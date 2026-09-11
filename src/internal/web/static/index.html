@@ -222,6 +222,19 @@
           </div>
         </section>
 
+        <section class="form-section">
+          <div class="form-section-title">
+            <p class="eyebrow">This root's enrichment</p>
+            <p>Limits and OCR engine commands are configured globally; these switches decide what this root may do.</p>
+          </div>
+          <div class="rules-grid">
+            <label class="check-row"><input id="rules-extraction" type="checkbox"><span>Extract Office, PDF, and text content</span></label>
+            <label class="check-row"><input id="rules-ocr" type="checkbox"><span>OCR scanned PDFs and images</span></label>
+            <label class="check-row"><input id="rules-hashing" type="checkbox"><span>Calculate SHA-256 hashes</span></label>
+            <label class="check-row"><input id="rules-ownership" type="checkbox"><span>Collect filesystem owner metadata</span></label>
+          </div>
+        </section>
+
         <details class="advanced-rules">
           <summary>Legacy compatibility rules</summary>
           <label>

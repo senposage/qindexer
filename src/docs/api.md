@@ -201,6 +201,13 @@ Content-Type: application/json
 
 Rules are persisted to the YAML config. Secret values are not managed through this endpoint.
 
+The same root-rules payload also accepts `content_extraction`, `ocr`, `hashing`,
+and `collect_ownership` booleans. They are evaluated per root. Existing roots
+without these fields inherit the crawler-wide values for compatibility. Global
+settings retain queue size, worker count, file size, timeout, and OCR engine
+configuration; they do not force enrichment onto a root with its local switch
+off.
+
 Root paths may be literal paths or filesystem glob patterns. Examples:
 
 - `D:\Shares`
@@ -213,6 +220,21 @@ Root paths may be literal paths or filesystem glob patterns. Examples:
 ```http
 POST /admin/v1/roots/{root_id}/crawl
 ```
+
+### Clear One Root's Index
+
+```http
+POST /admin/v1/roots/{root_id}/clear-index
+Content-Type: application/json
+```
+
+```json
+{"confirm_root_id":"finance-share"}
+```
+
+Clearing removes only that root's indexed documents, search entries,
+checkpoints, crawl history, and root state. It never deletes source files. The
+request is rejected while that root has an active crawl.
 
 ### Recent Crawls
 

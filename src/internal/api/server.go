@@ -77,6 +77,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("GET /admin/v1/roots", s.withAdminAuth(s.roots))
 	mux.HandleFunc("POST /admin/v1/roots", s.withAdminAuth(s.createRoot))
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/crawl", s.withAdminAuth(s.crawlRoot))
+	mux.HandleFunc("POST /admin/v1/roots/{root_id}/clear-index", s.withAdminAuth(s.clearRootIndex))
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/validate", s.withAdminAuth(s.validateRoot))
 	mux.HandleFunc("PUT /admin/v1/roots/{root_id}/rules", s.withAdminAuth(s.updateRootRules))
 	mux.HandleFunc("GET /admin/v1/crawls", s.withAdminAuth(s.crawls))
@@ -139,10 +140,14 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"service_version":  version.Version,
 		"features": map[string]bool{
 			"metadata_search": true,
-			"content_search":  s.cfg.Crawler.ContentExtraction.Enabled,
-			"ocr_search":      s.cfg.Crawler.ContentExtraction.Enabled && s.cfg.Crawler.OCR.Enabled,
+			"content_search": s.anyRootUses(func(root config.RootConfig) bool {
+				return root.ContentExtractionEnabled(s.cfg.Crawler.ContentExtraction.Enabled)
+			}),
+			"ocr_search": s.anyRootUses(func(root config.RootConfig) bool {
+				return root.ContentExtractionEnabled(s.cfg.Crawler.ContentExtraction.Enabled) && root.OCREnabled(s.cfg.Crawler.OCR.Enabled)
+			}),
 			"acl_filtering":   false,
-			"content_hashing": s.cfg.Crawler.Hashing.Enabled,
+			"content_hashing": s.anyRootUses(func(root config.RootConfig) bool { return root.HashingEnabled(s.cfg.Crawler.Hashing.Enabled) }),
 			"crawl_control":   true,
 			"folder_search":   true,
 			"folder_suggest":  true,
@@ -212,6 +217,15 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"roots": out})
+}
+
+func (s *Server) anyRootUses(include func(config.RootConfig) bool) bool {
+	for _, root := range s.cfg.Roots {
+		if root.Enabled && include(root) {
+			return true
+		}
+	}
+	return false
 }
 
 func rootAliases(root config.RootConfig) []rootAliasView {
@@ -426,6 +440,44 @@ func (s *Server) crawlRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "scheduled", "root_id": rootID})
 }
 
+func (s *Server) clearRootIndex(w http.ResponseWriter, r *http.Request) {
+	rootID := r.PathValue("root_id")
+	var req struct {
+		ConfirmRootID string `json:"confirm_root_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if req.ConfirmRootID != rootID {
+		writeError(w, http.StatusBadRequest, "clear_confirmation_required", "confirm_root_id must match the root being cleared")
+		return
+	}
+	s.mu.RLock()
+	known := false
+	for _, root := range s.cfg.Roots {
+		if root.ID == rootID {
+			known = true
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if !known {
+		writeError(w, http.StatusNotFound, "root_not_found", "root not found")
+		return
+	}
+	if s.crawler.IsRootRunning(rootID) {
+		writeError(w, http.StatusConflict, "crawl_in_progress", "pause or wait for the root crawl before clearing its index")
+		return
+	}
+	removed, err := s.cat.ClearRoot(r.Context(), rootID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "catalog_clear_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared", "root_id": rootID, "documents_removed": removed})
+}
+
 func (s *Server) validateRoot(w http.ResponseWriter, r *http.Request) {
 	rootID := r.PathValue("root_id")
 	s.mu.RLock()
@@ -461,6 +513,10 @@ type rootRulesUpdate struct {
 	ExcludePatterns       []string           `json:"exclude_patterns"`
 	CredentialRef         string             `json:"credential_ref"`
 	PathAliases           []config.PathAlias `json:"path_aliases"`
+	ContentExtraction     *bool              `json:"content_extraction"`
+	OCR                   *bool              `json:"ocr"`
+	Hashing               *bool              `json:"hashing"`
+	CollectOwnership      *bool              `json:"collect_ownership"`
 }
 
 func (s *Server) createRoot(w http.ResponseWriter, r *http.Request) {
@@ -508,8 +564,12 @@ func rootConfigFromUpdate(rootID string, req rootRulesUpdate) config.RootConfig 
 		IncludeExtensions: cleanExtensions(req.IncludeExtensions), ExcludeExtensions: cleanExtensions(req.ExcludeExtensions),
 		IncludeFilePatterns: cleanList(req.IncludeFilePatterns, false), ExcludeFilePatterns: cleanList(req.ExcludeFilePatterns, false),
 		IncludeFolderPatterns: cleanList(req.IncludeFolderPatterns, false), ExcludeFolderPatterns: cleanList(req.ExcludeFolderPatterns, false),
-		ExcludePatterns: cleanList(req.ExcludePatterns, false),
-		PathAliases:     cleanPathAliases(req.PathAliases),
+		ExcludePatterns:   cleanList(req.ExcludePatterns, false),
+		PathAliases:       cleanPathAliases(req.PathAliases),
+		ContentExtraction: req.ContentExtraction,
+		OCR:               req.OCR,
+		Hashing:           req.Hashing,
+		CollectOwnership:  req.CollectOwnership,
 	}
 }
 
@@ -543,6 +603,10 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Roots[i].ExcludePatterns = cleanList(req.ExcludePatterns, false)
 		s.cfg.Roots[i].CredentialRef = strings.TrimSpace(req.CredentialRef)
 		s.cfg.Roots[i].PathAliases = cleanPathAliases(req.PathAliases)
+		s.cfg.Roots[i].ContentExtraction = req.ContentExtraction
+		s.cfg.Roots[i].OCR = req.OCR
+		s.cfg.Roots[i].Hashing = req.Hashing
+		s.cfg.Roots[i].CollectOwnership = req.CollectOwnership
 		if err := config.Save(s.configPath, s.cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 			return

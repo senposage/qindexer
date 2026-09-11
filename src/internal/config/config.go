@@ -126,6 +126,10 @@ type RootConfig struct {
 	ExcludePatterns       []string    `yaml:"exclude_patterns" json:"exclude_patterns"`
 	CredentialRef         string      `yaml:"credential_ref" json:"credential_ref"`
 	PathAliases           []PathAlias `yaml:"path_aliases" json:"path_aliases,omitempty"`
+	ContentExtraction     *bool       `yaml:"content_extraction" json:"content_extraction,omitempty"`
+	OCR                   *bool       `yaml:"ocr" json:"ocr,omitempty"`
+	Hashing               *bool       `yaml:"hashing" json:"hashing,omitempty"`
+	CollectOwnership      *bool       `yaml:"collect_ownership" json:"collect_ownership,omitempty"`
 }
 
 type PathAlias struct {
@@ -139,6 +143,26 @@ func (r RootConfig) FriendlyName() string {
 		return r.Name
 	}
 	return r.ID
+}
+
+func (r RootConfig) ContentExtractionEnabled(defaultValue bool) bool {
+	return enabledOrDefault(r.ContentExtraction, defaultValue)
+}
+
+func (r RootConfig) OCREnabled(defaultValue bool) bool {
+	return enabledOrDefault(r.OCR, defaultValue)
+}
+
+func (r RootConfig) HashingEnabled(defaultValue bool) bool {
+	return enabledOrDefault(r.Hashing, defaultValue)
+}
+
+func (r RootConfig) OwnershipEnabled(defaultValue bool) bool {
+	return enabledOrDefault(r.CollectOwnership, defaultValue)
+}
+
+func enabledOrDefault(value *bool, defaultValue bool) bool {
+	return value == nil && defaultValue || value != nil && *value
 }
 
 func Load(path string) (*Config, error) {

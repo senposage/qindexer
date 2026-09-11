@@ -424,3 +424,16 @@ content query will only succeed after those commands are installed or configured
 with their full executable paths in the admin OCR settings. Until then, failed
 OCR jobs are surfaced as `ocr_status: "failed"` without affecting normal index
 or metadata search availability.
+
+## 2026-09-10 Per-Root Enrichment And Clear Index
+
+Content extraction, OCR, SHA-256 hashing, and owner metadata are now explicit
+per-root rule switches: `content_extraction`, `ocr`, `hashing`, and
+`collect_ownership`. The client may inspect them on `GET /v1/roots` or the
+admin root config. Missing fields on an older root mean it inherits the global
+crawler default; saved Rules-panel edits always make the root's choice explicit.
+
+Admin now exposes `POST /admin/v1/roots/{root_id}/clear-index` with
+`{"confirm_root_id":"{root_id}"}`. It removes only that root's catalog state,
+never source files, and returns a conflict if the root is crawling. The Web UI
+has a matching **Clear index** action with a confirmation dialog.

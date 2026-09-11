@@ -49,8 +49,8 @@ type Crawler struct {
 }
 
 type backgroundJob struct {
-	id, path, signature string
-	size                int64
+	id, rootID, path, signature string
+	size                        int64
 }
 
 type adaptivePressure struct {
@@ -144,6 +144,12 @@ func (c *Crawler) CrawlRoot(ctx context.Context, rootID string) (catalog.CrawlRu
 	return c.crawl(ctx, root)
 }
 
+func (c *Crawler) IsRootRunning(rootID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.run[rootID]
+}
+
 func (c *Crawler) CrawlHint(ctx context.Context, rootID string, path string, removed bool) (catalog.CrawlRun, error) {
 	root, ok := c.rootByID(rootID)
 	if !ok {
@@ -213,43 +219,45 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 
 func (c *Crawler) refillBackground(ctx context.Context) {
 	content := c.cfg.Crawler.ContentExtraction
-	if content.Enabled {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.ContentExtractionEnabled(content.Enabled) }); len(rootIDs) > 0 {
 		available := cap(c.contentJobs) - len(c.contentJobs)
 		if available > 0 {
-			items, err := c.cat.ClaimPendingContent(ctx, available, content.MaxFileSizeMB<<20)
+			items, err := c.cat.ClaimPendingContent(ctx, rootIDs, available, content.MaxFileSizeMB<<20)
 			if err != nil {
 				c.log.Debug("content queue refill failed", "error", err)
 			} else {
 				for _, item := range items {
-					c.contentJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
+					c.contentJobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
 				}
 			}
 		}
 	}
 	ocr := c.cfg.Crawler.OCR
-	if ocr.Enabled {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
+		return root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
+	}); len(rootIDs) > 0 {
 		available := cap(c.ocrJobs) - len(c.ocrJobs)
 		if available > 0 {
-			items, err := c.cat.ClaimPendingOCR(ctx, available, ocr.MaxFileSizeMB<<20)
+			items, err := c.cat.ClaimPendingOCR(ctx, rootIDs, available, ocr.MaxFileSizeMB<<20)
 			if err != nil {
 				c.log.Debug("OCR queue refill failed", "error", err)
 			} else {
 				for _, item := range items {
-					c.ocrJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
+					c.ocrJobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
 				}
 			}
 		}
 	}
 	hashing := c.cfg.Crawler.Hashing
-	if hashing.Enabled {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.HashingEnabled(hashing.Enabled) }); len(rootIDs) > 0 {
 		available := cap(c.hashJobs) - len(c.hashJobs)
 		if available > 0 {
-			items, err := c.cat.ClaimPendingHashes(ctx, available, hashing.MaxFileSizeMB<<20)
+			items, err := c.cat.ClaimPendingHashes(ctx, rootIDs, available, hashing.MaxFileSizeMB<<20)
 			if err != nil {
 				c.log.Debug("hash queue refill failed", "error", err)
 			} else {
 				for _, item := range items {
-					c.hashJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
+					c.hashJobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
 				}
 			}
 		}
@@ -907,7 +915,7 @@ func (c *Crawler) indexPath(ctx context.Context, root config.RootConfig, path st
 		Signature:          catalog.Signature(info.Size(), info.ModTime()),
 		AccessStatus:       "metadata_readable",
 	}
-	if c.cfg.Crawler.CollectOwnership {
+	if root.OwnershipEnabled(c.cfg.Crawler.CollectOwnership) {
 		doc.Owner = filemeta.Owner(path)
 	}
 	return c.cat.UpsertDocument(ctx, doc)
@@ -942,6 +950,11 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			if c.waitIfPaused(ctx) != nil {
 				return
 			}
+			root, exists := c.rootByID(job.rootID)
+			if !exists || !root.ContentExtractionEnabled(c.cfg.Crawler.ContentExtraction.Enabled) {
+				_ = c.cat.UpdateContentStatus(ctx, job.id, job.signature, "not_indexed")
+				continue
+			}
 			text, err := extract.Text(job.path)
 			status := "extracted"
 			if err != nil {
@@ -952,7 +965,7 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				c.log.Debug("content update failed", "path", job.path, "error", err)
 				continue
 			}
-			if err == nil && strings.TrimSpace(text) == "" && c.cfg.Crawler.OCR.Enabled && extract.OCREligible(job.path) {
+			if err == nil && exists && strings.TrimSpace(text) == "" && root.OCREnabled(c.cfg.Crawler.OCR.Enabled) && extract.OCREligible(job.path) {
 				if updateErr := c.cat.UpdateOCRStatus(ctx, job.id, job.signature, "pending"); updateErr != nil {
 					c.log.Debug("OCR pending update failed", "path", job.path, "error", updateErr)
 				}
@@ -971,6 +984,11 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				return
 			}
 			settings := c.cfg.Crawler.OCR
+			root, exists := c.rootByID(job.rootID)
+			if !exists || !root.ContentExtractionEnabled(c.cfg.Crawler.ContentExtraction.Enabled) || !root.OCREnabled(settings.Enabled) {
+				_ = c.cat.UpdateOCRStatus(ctx, job.id, job.signature, "pending")
+				continue
+			}
 			jobCtx, cancel := context.WithTimeout(ctx, time.Duration(settings.TimeoutSeconds)*time.Second)
 			status, text, err := extract.OCR(jobCtx, job.path, extract.OCROptions{
 				Engine: settings.Engine, TesseractCommand: settings.TesseractCommand,
@@ -995,6 +1013,11 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 		case job := <-c.hashJobs:
 			if c.waitIfPaused(ctx) != nil {
 				return
+			}
+			root, exists := c.rootByID(job.rootID)
+			if !exists || !root.HashingEnabled(c.cfg.Crawler.Hashing.Enabled) {
+				_ = c.cat.UpdateContentHash(ctx, job.id, job.signature, "", "not_hashed")
+				continue
 			}
 			f, err := os.Open(job.path)
 			status, value := "hashed", ""
@@ -1023,6 +1046,16 @@ func (c *Crawler) rootByID(rootID string) (config.RootConfig, bool) {
 		}
 	}
 	return config.RootConfig{}, false
+}
+
+func (c *Crawler) rootIDsFor(include func(config.RootConfig) bool) []string {
+	rootIDs := make([]string, 0, len(c.cfg.Roots))
+	for _, root := range c.cfg.Roots {
+		if root.Enabled && include(root) {
+			rootIDs = append(rootIDs, root.ID)
+		}
+	}
+	return rootIDs
 }
 
 func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHidden bool) bool {

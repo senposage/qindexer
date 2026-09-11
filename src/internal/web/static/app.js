@@ -49,6 +49,8 @@ document.querySelector("#roots").addEventListener("click", (event) => {
     validateRoot(root);
   } else if (button.dataset.action === "crawl") {
     crawlRoot(root);
+  } else if (button.dataset.action === "clear") {
+    clearRootIndex(root);
   }
 });
 
@@ -174,6 +176,7 @@ function renderRoots(roots) {
           <button type="button" class="secondary" data-action="rules" data-root="${escapeAttr(root.id)}">Rules</button>
           <button type="button" class="secondary" data-action="validate" data-root="${escapeAttr(root.id)}">Validate</button>
           <button type="button" data-action="crawl" data-root="${escapeAttr(root.id)}">Crawl</button>
+          <button type="button" class="danger" data-action="clear" data-root="${escapeAttr(root.id)}">Clear index</button>
         </div>
       </td>
     `;
@@ -202,6 +205,10 @@ function openRules(rootId) {
   document.querySelector("#rules-include-folder").value = lines(root.include_folder_patterns);
   document.querySelector("#rules-exclude-folder").value = lines(root.exclude_folder_patterns);
   document.querySelector("#rules-exclude-legacy").value = lines(root.exclude_patterns);
+  document.querySelector("#rules-extraction").checked = rootOption(root, "content_extraction", state.crawler.content_extraction?.enabled);
+  document.querySelector("#rules-ocr").checked = rootOption(root, "ocr", state.crawler.ocr?.enabled);
+  document.querySelector("#rules-hashing").checked = rootOption(root, "hashing", state.crawler.hashing?.enabled);
+  document.querySelector("#rules-ownership").checked = rootOption(root, "collect_ownership", state.crawler.collect_ownership);
   document.querySelector("#rules-panel").classList.remove("hidden");
   document.querySelector("#rules-panel").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -225,6 +232,10 @@ function openNewRoot() {
   document.querySelector("#rules-include-folder").value = "";
   document.querySelector("#rules-exclude-folder").value = "";
   document.querySelector("#rules-exclude-legacy").value = "";
+  document.querySelector("#rules-extraction").checked = Boolean(state.crawler.content_extraction?.enabled);
+  document.querySelector("#rules-ocr").checked = Boolean(state.crawler.ocr?.enabled);
+  document.querySelector("#rules-hashing").checked = Boolean(state.crawler.hashing?.enabled);
+  document.querySelector("#rules-ownership").checked = Boolean(state.crawler.collect_ownership);
   document.querySelector("#rules-panel").classList.remove("hidden");
   document.querySelector("#rules-panel").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -254,6 +265,10 @@ async function saveRules(event) {
     include_folder_patterns: splitList(document.querySelector("#rules-include-folder").value),
     exclude_folder_patterns: splitList(document.querySelector("#rules-exclude-folder").value),
     exclude_patterns: splitList(document.querySelector("#rules-exclude-legacy").value),
+    content_extraction: document.querySelector("#rules-extraction").checked,
+    ocr: document.querySelector("#rules-ocr").checked,
+    hashing: document.querySelector("#rules-hashing").checked,
+    collect_ownership: document.querySelector("#rules-ownership").checked,
   };
   try {
     const data = await api(state.creatingRoot ? "/admin/v1/roots" : `/admin/v1/roots/${encodeURIComponent(rootId)}/rules`, {
@@ -370,6 +385,18 @@ async function crawlRoot(root) {
   }
 }
 
+async function clearRootIndex(root) {
+  if (!window.confirm(`Clear every indexed document, checkpoint, and crawl record for ${root}? This does not delete files.`)) return;
+  try {
+    const data = await api(`/admin/v1/roots/${encodeURIComponent(root)}/clear-index`, { method: "POST", body: JSON.stringify({ confirm_root_id: root }) });
+    const count = data.documents_removed || 0;
+    setMessage(`${root}: cleared ${count} indexed document${count === 1 ? "" : "s"}`);
+    refresh();
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
 function labels(values = []) {
   values = array(values);
   return values.map((value) => `<span class="tag">${escapeHtml(value)}</span>`).join(" ");
@@ -382,6 +409,9 @@ function ruleSummary(root) {
     `${array(root.exclude_extensions).length} blocked type${array(root.exclude_extensions).length === 1 ? "" : "s"}`,
     `${array(root.include_file_patterns).length + array(root.exclude_file_patterns).length} file pattern${array(root.include_file_patterns).length + array(root.exclude_file_patterns).length === 1 ? "" : "s"}`,
     `${array(root.include_folder_patterns).length + array(root.exclude_folder_patterns).length} folder pattern${array(root.include_folder_patterns).length + array(root.exclude_folder_patterns).length === 1 ? "" : "s"}`,
+    rootOption(root, "content_extraction", state.crawler.content_extraction?.enabled) ? "content" : "no content",
+    rootOption(root, "ocr", state.crawler.ocr?.enabled) ? "OCR" : "no OCR",
+    rootOption(root, "hashing", state.crawler.hashing?.enabled) ? "SHA-256" : "no hashes",
   ];
   return `<div class="root-rule-summary">${parts.map((part) => `<span class="tag">${escapeHtml(part)}</span>`).join("")}</div>`;
 }
@@ -422,6 +452,10 @@ function normalizeRoot(root) {
     exclude_patterns: array(root.exclude_patterns),
     path_aliases: array(root.path_aliases),
   };
+}
+
+function rootOption(root, field, fallback) {
+  return typeof root[field] === "boolean" ? root[field] : Boolean(fallback);
 }
 
 function showView(view) {

@@ -79,3 +79,8 @@ roots:
       - "**/.git/**"
       - "**/node_modules/**"
     exclude_patterns: []
+    # Per-root enrichment switches override the crawler-wide legacy defaults.
+    content_extraction: false
+    ocr: false
+    hashing: false
+    collect_ownership: false

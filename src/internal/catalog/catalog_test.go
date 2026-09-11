@@ -116,6 +116,30 @@ func TestSearchMatchesFilenamePrefix(t *testing.T) {
 	}
 }
 
+func TestClearRootRemovesOnlyThatRoot(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, rootID := range []string{"finance", "engineering"} {
+		doc := Document{ID: rootID, RootID: rootID, Path: `D:\` + rootID + `\report.txt`, NormalizedPath: NormalizePath(`D:\` + rootID + `\report.txt`), Name: "report.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := cat.ClearRoot(ctx, "finance")
+	if err != nil || removed != 1 {
+		t.Fatalf("clear root = %d, %v", removed, err)
+	}
+	remaining, err := cat.Search(ctx, SearchRequest{Limit: 10}, 20)
+	if err != nil || len(remaining.Results) != 1 || remaining.Results[0].RootID != "engineering" {
+		t.Fatalf("unexpected remaining documents: %#v, %v", remaining.Results, err)
+	}
+}
+
 func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

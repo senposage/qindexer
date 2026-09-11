@@ -86,6 +86,7 @@ type UpsertResult struct {
 
 type BackgroundCandidate struct {
 	ID        string
+	RootID    string
 	Path      string
 	Signature string
 	Size      int64
@@ -171,6 +172,38 @@ func Open(ctx context.Context, dataDir string) (*Catalog, error) {
 
 func (c *Catalog) Close() error {
 	return c.db.Close()
+}
+
+// ClearRoot removes only catalog state belonging to one configured root.
+func (c *Catalog) ClearRoot(ctx context.Context, rootID string) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE root_id = ?`, rootID)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE root_id = ?`, rootID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ?`, rootID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_runs WHERE root_id = ?`, rootID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM root_states WHERE root_id = ?`, rootID); err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return count, tx.Commit()
 }
 
 func (c *Catalog) migrate(ctx context.Context) error {
@@ -510,6 +543,13 @@ func (c *Catalog) UpdateOCRStatus(ctx context.Context, id, signature, status str
 	return err
 }
 
+func (c *Catalog) UpdateContentStatus(ctx context.Context, id, signature, status string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.db.ExecContext(ctx, `UPDATE documents SET content_status = ? WHERE id = ? AND signature = ?`, status, id, signature)
+	return err
+}
+
 func (c *Catalog) UpdateOCRContent(ctx context.Context, id, signature, status, content string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -541,20 +581,20 @@ func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, st
 	return err
 }
 
-func (c *Catalog) ClaimPendingContent(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "content_status", "not_indexed", "queued", limit, maxSize)
+func (c *Catalog) ClaimPendingContent(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "content_status", "not_indexed", "queued", rootIDs, limit, maxSize)
 }
 
-func (c *Catalog) ClaimPendingOCR(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "ocr_status", "pending", "queued", limit, maxSize)
+func (c *Catalog) ClaimPendingOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "ocr_status", "pending", "queued", rootIDs, limit, maxSize)
 }
 
-func (c *Catalog) ClaimPendingHashes(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", limit, maxSize)
+func (c *Catalog) ClaimPendingHashes(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", rootIDs, limit, maxSize)
 }
 
-func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	if limit <= 0 || maxSize <= 0 {
+func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	if len(rootIDs) == 0 || limit <= 0 || maxSize <= 0 {
 		return nil, nil
 	}
 	c.writeMu.Lock()
@@ -564,14 +604,21 @@ func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed str
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND `+column+` = ? AND size <= ? LIMIT ?`, pending, maxSize, limit)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(rootIDs)), ",")
+	args := []any{pending, maxSize}
+	for _, rootID := range rootIDs {
+		args = append(args, rootID)
+	}
+	args = append(args, limit)
+	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ? AND root_id IN (` + placeholders + `) LIMIT ?`
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	var candidates []BackgroundCandidate
 	for rows.Next() {
 		var item BackgroundCandidate
-		if err := rows.Scan(&item.ID, &item.Path, &item.Signature, &item.Size); err != nil {
+		if err := rows.Scan(&item.ID, &item.RootID, &item.Path, &item.Signature, &item.Size); err != nil {
 			rows.Close()
 			return nil, err
 		}
