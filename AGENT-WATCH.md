@@ -305,3 +305,20 @@ Please log the final absolute request URI and method from the adapter. The
 service endpoint is `http://127.0.0.1:41973/v1`; requests must be exactly
 `GET /v1/health`, `GET /v1/roots`, and `POST /v1/{search,directories}`. Do not
 append a second `/v1`, omit it, or issue a GET for the POST-only endpoints.
+
+Additional end-to-end FTS/scope smoke, also HTTP 200:
+
+```json
+POST /v1/search
+{
+  "search_id": "live-scope-smoke",
+  "query": "BannerCache",
+  "filters": {"include_paths": ["D:\\"]},
+  "limit": 10,
+  "sort": "relevance"
+}
+```
+
+This returned four `drive-d` results with `matched_fields: ["path"]` and path
+highlights. The service is therefore ready for the adapter to send its final
+absolute URI/method/body trace when it sees a non-200 or zero-result response.
