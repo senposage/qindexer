@@ -1,0 +1,36 @@
+{
+  "protocol_version": "1.1",
+  "case": "folder_scope_pagination",
+  "request": {
+    "search_id": "fixture-folder-scope-001",
+    "query": "budget",
+    "filters": {
+      "roots": ["shared-finance"],
+      "include_paths": ["\\\\fileserver\\finance\\FY2026"],
+      "exclude_paths": ["\\\\fileserver\\finance\\FY2026\\Archive"],
+      "kind": "file"
+    },
+    "limit": 2,
+    "offset": 0,
+    "sort": "modified",
+    "direction": "desc"
+  },
+  "required_response_fields": [
+    "search_id",
+    "results",
+    "offset",
+    "has_more",
+    "index"
+  ],
+  "required_result_fields": [
+    "result_id",
+    "etag",
+    "root_id",
+    "path",
+    "kind",
+    "is_folder",
+    "status",
+    "indexed_at"
+  ],
+  "scope_rule": "A prefix matches the path itself or a descendant path segment, never a similarly named sibling such as FY20260."
+}

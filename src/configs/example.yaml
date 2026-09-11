@@ -1,0 +1,69 @@
+server:
+  bind: "127.0.0.1:41973"
+  public_base_url: "http://127.0.0.1:41973"
+  auth:
+    mode: "static-token"
+
+management:
+  enabled: true
+  bind: "127.0.0.1:41974"
+  auth:
+    mode: "admin-token"
+
+index:
+  data_dir: "data"
+  commit_interval_seconds: 5
+  max_results: 200
+
+crawler:
+  scan_interval_seconds: 300
+  root_parallelism: 1
+  directory_worker_count: 4
+  metadata_worker_count: 8
+  metadata_queue_size: 5000
+  index_batch_size: 1000
+  ignore_hidden: false
+  follow_symlinks: false
+  missing_after_successful_crawls: 3
+  # Ownership metadata can require a separate security-descriptor round trip on NAS paths.
+  collect_ownership: false
+  content_extraction:
+    enabled: false
+    worker_count: 1
+    queue_size: 1000
+    max_file_size_mb: 64
+  hashing:
+    enabled: false
+    worker_count: 1
+    queue_size: 1000
+    max_file_size_mb: 2048
+  adaptive_throttle:
+    enabled: true
+    sample_interval_seconds: 5
+    cpu_percent_threshold: 80
+    disk_busy_percent_threshold: 70
+    recovery_samples: 3
+
+watcher:
+  enabled: true
+  debounce_milliseconds: 1500
+  max_watched_directories: 25000
+  max_dirty_paths_per_flush: 500
+
+roots:
+  - id: "local-sample"
+    path: "."
+    enabled: true
+    labels: ["local"]
+    include_extensions: []
+    exclude_extensions: ["tmp", "bak"]
+    include_file_patterns: []
+    exclude_file_patterns:
+      - "~$*"
+      - "*.tmp"
+      - "*.bak"
+    include_folder_patterns: []
+    exclude_folder_patterns:
+      - "**/.git/**"
+      - "**/node_modules/**"
+    exclude_patterns: []

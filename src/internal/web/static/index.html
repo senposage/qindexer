@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QIndexer Admin</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">Q</span>
+      <div>
+        <h1>QSurfer</h1>
+        <p>Search service administration <span class="build">UI 0.1.6</span></p>
+      </div>
+    </div>
+    <div class="auth">
+      <input id="token" type="password" autocomplete="current-password" placeholder="Admin token">
+      <button id="save-token" type="button">Connect</button>
+      <button id="clear-token" type="button" class="secondary">Forget</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="bootstrap-panel" class="panel bootstrap-panel hidden">
+      <div class="panel-title">
+        <div>
+          <p class="eyebrow">Initial setup</p>
+          <h2>Set admin token</h2>
+        </div>
+      </div>
+      <form id="bootstrap-form" class="bootstrap-form">
+        <label>
+          New admin token
+          <input id="bootstrap-token" type="password" minlength="16" autocomplete="new-password" required>
+        </label>
+        <label>
+          Confirm admin token
+          <input id="bootstrap-confirm" type="password" minlength="16" autocomplete="new-password" required>
+        </label>
+        <button type="submit">Secure administration</button>
+      </form>
+    </section>
+
+    <section class="overview" aria-label="Service overview">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Service overview</p>
+          <h2>Index health</h2>
+        </div>
+        <span id="endpoint" class="endpoint">Admin endpoint</span>
+      </div>
+      <div class="status-grid">
+      <div class="metric">
+        <span>Status</span>
+        <strong id="status">Unknown</strong>
+      </div>
+      <div class="metric">
+        <span>Version</span>
+        <strong id="version">-</strong>
+      </div>
+      <div class="metric">
+        <span>Documents</span>
+        <strong id="document-count">0</strong>
+      </div>
+      <div class="metric">
+        <span>Roots</span>
+        <strong id="root-count">0</strong>
+      </div>
+      <div class="metric">
+        <span>Files/sec</span>
+        <strong id="files-rate">0</strong>
+      </div>
+      <div class="metric">
+        <span>Dirs/sec</span>
+        <strong id="dirs-rate">0</strong>
+      </div>
+      <div class="metric">
+        <span>I/O rate</span>
+        <strong id="io-rate">0 B/s</strong>
+      </div>
+      <div class="metric">
+        <span>Crawler</span>
+        <strong id="crawler-state">Idle</strong>
+      </div>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <div class="view-toggle" aria-label="View selection">
+        <button id="view-roots" type="button">Roots</button>
+        <button id="view-config" type="button" class="secondary">Configuration</button>
+      </div>
+      <div class="toolbar-actions">
+        <button id="refresh" type="button" class="secondary">Refresh</button>
+        <button id="validate-config" type="button" class="secondary">Validate config</button>
+        <label class="pause-control" title="How long the crawler remains paused">
+          <span>Pause duration</span>
+          <select id="pause-seconds" aria-label="Pause duration">
+            <option value="60">1 minute</option>
+            <option value="300" selected>5 minutes</option>
+            <option value="900">15 minutes</option>
+            <option value="3600">1 hour</option>
+          </select>
+        </label>
+        <button id="pause-crawler" type="button" class="secondary">Pause crawler</button>
+        <button id="resume-crawler" type="button" class="secondary">Resume</button>
+      </div>
+      <span id="message" role="status"></span>
+    </section>
+
+    <section id="roots-view">
+    <section class="panel">
+      <div class="panel-title">
+        <div>
+          <p class="eyebrow">Storage targets</p>
+          <h2>Indexed roots</h2>
+        </div>
+        <button id="add-root" type="button">Add root</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Root</th>
+              <th>Path</th>
+              <th>Status</th>
+              <th>Indexed</th>
+              <th>Missing</th>
+              <th>Rules</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="roots"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="rules-panel" class="panel hidden">
+      <div class="panel-title">
+        <h2 id="rules-title">Index Rules</h2>
+        <button id="close-rules" type="button" class="secondary">Close</button>
+      </div>
+      <form id="rules-form" class="rules-form">
+        <section class="form-section root-settings">
+          <div class="form-section-title">
+            <p class="eyebrow">Root profile</p>
+            <p>Identity, location, and credentials for this root only.</p>
+          </div>
+          <div class="root-settings-grid">
+            <label>
+              Root ID
+              <input id="rules-id" type="text" placeholder="finance-share" required>
+            </label>
+            <label>
+              Display name
+              <input id="rules-name" type="text" placeholder="Finance share">
+            </label>
+            <label>
+              Root path
+              <input id="rules-path" type="text" placeholder="D:\Shares or X:\* or \\nas01\share\*">
+            </label>
+            <label class="check-row">
+              <input id="rules-enabled" type="checkbox">
+              <span>Index this root</span>
+            </label>
+            <label>
+              Labels
+              <input id="rules-labels" type="text" placeholder="nas, finance">
+            </label>
+            <label>
+              Credential reference
+              <input id="rules-credential" type="text" placeholder="os-service-account">
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-title">
+            <p class="eyebrow">This root's file filters</p>
+            <p>One extension or wildcard per line. Leave an include list empty to allow all.</p>
+          </div>
+          <div class="rules-grid">
+            <label>
+              Include file types
+              <textarea id="rules-include-ext" spellcheck="false" placeholder="pdf&#10;docx&#10;xlsx"></textarea>
+            </label>
+            <label>
+              Exclude file types
+              <textarea id="rules-exclude-ext" spellcheck="false" placeholder="tmp&#10;bak"></textarea>
+            </label>
+            <label>
+              Include file wildcards
+              <textarea id="rules-include-file" spellcheck="false" placeholder="*.pdf&#10;report-*.xlsx&#10;**/finance/*.docx"></textarea>
+            </label>
+            <label>
+              Exclude file wildcards
+              <textarea id="rules-exclude-file" spellcheck="false" placeholder="~$*&#10;*.tmp&#10;*.bak"></textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-title">
+            <p class="eyebrow">This root's folder filters</p>
+            <p>Use wildcards to scope or omit folders from this crawl.</p>
+          </div>
+          <div class="rules-grid">
+            <label>
+              Include folder wildcards
+              <textarea id="rules-include-folder" spellcheck="false" placeholder="X:\*&#10;**/Finance/**&#10;**/Projects/**"></textarea>
+            </label>
+            <label>
+              Exclude folder wildcards
+              <textarea id="rules-exclude-folder" spellcheck="false" placeholder="**/.git/**&#10;**/node_modules/**&#10;**/tmp/**"></textarea>
+            </label>
+          </div>
+        </section>
+
+        <details class="advanced-rules">
+          <summary>Legacy compatibility rules</summary>
+          <label>
+            Legacy exclude patterns
+            <textarea id="rules-exclude-legacy" spellcheck="false" placeholder="**/.git/**&#10;**/node_modules/**"></textarea>
+          </label>
+        </details>
+
+        <div class="form-actions">
+          <button id="save-rules" type="submit">Save Rules</button>
+          <button id="cancel-rules" type="button" class="secondary">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="validation-panel" class="panel hidden">
+      <div class="panel-title">
+        <h2 id="validation-title">Path Validation</h2>
+        <button id="close-validation" type="button" class="secondary">Close</button>
+      </div>
+      <pre id="validation-output">{}</pre>
+    </section>
+
+    <section class="split">
+      <div class="panel">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">Activity</p>
+            <h2>Recent crawls</h2>
+          </div>
+        </div>
+        <div id="crawls" class="list"></div>
+      </div>
+
+      <div id="config-view" class="panel hidden">
+        <div class="panel-title">
+          <h2>Configuration</h2>
+        </div>
+        <pre id="config">{}</pre>
+      </div>
+    </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

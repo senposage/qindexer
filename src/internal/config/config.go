@@ -1,0 +1,302 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+type Config struct {
+	Server     ServerConfig     `yaml:"server" json:"server"`
+	Management ManagementConfig `yaml:"management" json:"management"`
+	Index      IndexConfig      `yaml:"index" json:"index"`
+	Crawler    CrawlerConfig    `yaml:"crawler" json:"crawler"`
+	Watcher    WatcherConfig    `yaml:"watcher" json:"watcher"`
+	Roots      []RootConfig     `yaml:"roots" json:"roots"`
+}
+
+type ServerConfig struct {
+	Bind          string     `yaml:"bind" json:"bind"`
+	PublicBaseURL string     `yaml:"public_base_url" json:"public_base_url"`
+	Auth          AuthConfig `yaml:"auth" json:"auth"`
+}
+
+type ManagementConfig struct {
+	Enabled bool       `yaml:"enabled" json:"enabled"`
+	Bind    string     `yaml:"bind" json:"bind"`
+	Auth    AuthConfig `yaml:"auth" json:"auth"`
+}
+
+type AuthConfig struct {
+	Mode      string `yaml:"mode" json:"mode"`
+	Token     string `yaml:"token" json:"token,omitempty"`
+	TokenFile string `yaml:"token_file" json:"token_file,omitempty"`
+}
+
+type IndexConfig struct {
+	DataDir               string `yaml:"data_dir" json:"data_dir"`
+	CommitIntervalSeconds int    `yaml:"commit_interval_seconds" json:"commit_interval_seconds"`
+	MaxResults            int    `yaml:"max_results" json:"max_results"`
+}
+
+type CrawlerConfig struct {
+	ScanIntervalSeconds          int                     `yaml:"scan_interval_seconds" json:"scan_interval_seconds"`
+	RootParallelism              int                     `yaml:"root_parallelism" json:"root_parallelism"`
+	DirectoryWorkerCount         int                     `yaml:"directory_worker_count" json:"directory_worker_count"`
+	MetadataWorkerCount          int                     `yaml:"metadata_worker_count" json:"metadata_worker_count"`
+	MetadataQueueSize            int                     `yaml:"metadata_queue_size" json:"metadata_queue_size"`
+	IndexBatchSize               int                     `yaml:"index_batch_size" json:"index_batch_size"`
+	IgnoreHidden                 bool                    `yaml:"ignore_hidden" json:"ignore_hidden"`
+	FollowSymlinks               bool                    `yaml:"follow_symlinks" json:"follow_symlinks"`
+	CollectOwnership             bool                    `yaml:"collect_ownership" json:"collect_ownership"`
+	MissingAfterSuccessfulCrawls int                     `yaml:"missing_after_successful_crawls" json:"missing_after_successful_crawls"`
+	PauseWindows                 []PauseWindow           `yaml:"pause_windows" json:"pause_windows"`
+	AdaptiveThrottle             AdaptiveThrottleConfig  `yaml:"adaptive_throttle" json:"adaptive_throttle"`
+	ContentExtraction            ContentExtractionConfig `yaml:"content_extraction" json:"content_extraction"`
+	Hashing                      HashingConfig           `yaml:"hashing" json:"hashing"`
+}
+
+type ContentExtractionConfig struct {
+	Enabled       bool  `yaml:"enabled" json:"enabled"`
+	WorkerCount   int   `yaml:"worker_count" json:"worker_count"`
+	QueueSize     int   `yaml:"queue_size" json:"queue_size"`
+	MaxFileSizeMB int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+}
+
+type HashingConfig struct {
+	Enabled       bool  `yaml:"enabled" json:"enabled"`
+	WorkerCount   int   `yaml:"worker_count" json:"worker_count"`
+	QueueSize     int   `yaml:"queue_size" json:"queue_size"`
+	MaxFileSizeMB int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+}
+
+type AdaptiveThrottleConfig struct {
+	Enabled                  bool    `yaml:"enabled" json:"enabled"`
+	SampleIntervalSeconds    int     `yaml:"sample_interval_seconds" json:"sample_interval_seconds"`
+	CPUPercentThreshold      float64 `yaml:"cpu_percent_threshold" json:"cpu_percent_threshold"`
+	DiskBusyPercentThreshold float64 `yaml:"disk_busy_percent_threshold" json:"disk_busy_percent_threshold"`
+	RecoverySamples          int     `yaml:"recovery_samples" json:"recovery_samples"`
+}
+
+type PauseWindow struct {
+	Start string   `yaml:"start" json:"start"`
+	End   string   `yaml:"end" json:"end"`
+	Days  []string `yaml:"days" json:"days"`
+}
+
+type WatcherConfig struct {
+	Enabled               bool `yaml:"enabled" json:"enabled"`
+	DebounceMilliseconds  int  `yaml:"debounce_milliseconds" json:"debounce_milliseconds"`
+	MaxWatchedDirectories int  `yaml:"max_watched_directories" json:"max_watched_directories"`
+	MaxDirtyPathsPerFlush int  `yaml:"max_dirty_paths_per_flush" json:"max_dirty_paths_per_flush"`
+}
+
+type RootConfig struct {
+	ID                    string      `yaml:"id" json:"id"`
+	Name                  string      `yaml:"name" json:"name,omitempty"`
+	Path                  string      `yaml:"path" json:"path"`
+	Enabled               bool        `yaml:"enabled" json:"enabled"`
+	Labels                []string    `yaml:"labels" json:"labels"`
+	IncludeExtensions     []string    `yaml:"include_extensions" json:"include_extensions"`
+	ExcludeExtensions     []string    `yaml:"exclude_extensions" json:"exclude_extensions"`
+	IncludeFilePatterns   []string    `yaml:"include_file_patterns" json:"include_file_patterns"`
+	ExcludeFilePatterns   []string    `yaml:"exclude_file_patterns" json:"exclude_file_patterns"`
+	IncludeFolderPatterns []string    `yaml:"include_folder_patterns" json:"include_folder_patterns"`
+	ExcludeFolderPatterns []string    `yaml:"exclude_folder_patterns" json:"exclude_folder_patterns"`
+	ExcludePatterns       []string    `yaml:"exclude_patterns" json:"exclude_patterns"`
+	CredentialRef         string      `yaml:"credential_ref" json:"credential_ref"`
+	PathAliases           []PathAlias `yaml:"path_aliases" json:"path_aliases,omitempty"`
+}
+
+type PathAlias struct {
+	ID       string `yaml:"id" json:"id,omitempty"`
+	Platform string `yaml:"platform" json:"platform"`
+	Path     string `yaml:"path" json:"path"`
+}
+
+func (r RootConfig) FriendlyName() string {
+	if strings.TrimSpace(r.Name) != "" {
+		return r.Name
+	}
+	return r.ID
+}
+
+func Load(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return nil, err
+	}
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func ResolveDataDir(configPath string, dataDir string) string {
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	if filepath.IsAbs(dataDir) {
+		return dataDir
+	}
+	return filepath.Join(filepath.Dir(configPath), dataDir)
+}
+
+func (c *Config) applyDefaults() {
+	if c.Server.Bind == "" {
+		c.Server.Bind = "127.0.0.1:41973"
+	}
+	if c.Management.Bind == "" {
+		c.Management.Bind = "127.0.0.1:41974"
+	}
+	if c.Index.DataDir == "" {
+		c.Index.DataDir = "data"
+	}
+	if c.Index.CommitIntervalSeconds <= 0 {
+		c.Index.CommitIntervalSeconds = 5
+	}
+	if c.Index.MaxResults <= 0 {
+		c.Index.MaxResults = 200
+	}
+	if c.Crawler.ScanIntervalSeconds <= 0 {
+		c.Crawler.ScanIntervalSeconds = 300
+	}
+	if c.Crawler.RootParallelism <= 0 {
+		c.Crawler.RootParallelism = 1
+	}
+	if c.Crawler.DirectoryWorkerCount <= 0 {
+		c.Crawler.DirectoryWorkerCount = 4
+	}
+	if c.Crawler.MetadataWorkerCount <= 0 {
+		c.Crawler.MetadataWorkerCount = 8
+	}
+	if c.Crawler.MetadataQueueSize <= 0 {
+		c.Crawler.MetadataQueueSize = 5000
+	}
+	if c.Crawler.IndexBatchSize <= 0 {
+		c.Crawler.IndexBatchSize = 1000
+	}
+	if c.Crawler.MissingAfterSuccessfulCrawls <= 0 {
+		c.Crawler.MissingAfterSuccessfulCrawls = 3
+	}
+	if c.Crawler.ContentExtraction.WorkerCount <= 0 {
+		c.Crawler.ContentExtraction.WorkerCount = 1
+	}
+	if c.Crawler.ContentExtraction.QueueSize <= 0 {
+		c.Crawler.ContentExtraction.QueueSize = 1000
+	}
+	if c.Crawler.ContentExtraction.MaxFileSizeMB <= 0 {
+		c.Crawler.ContentExtraction.MaxFileSizeMB = 64
+	}
+	if c.Crawler.Hashing.WorkerCount <= 0 {
+		c.Crawler.Hashing.WorkerCount = 1
+	}
+	if c.Crawler.Hashing.QueueSize <= 0 {
+		c.Crawler.Hashing.QueueSize = 1000
+	}
+	if c.Crawler.Hashing.MaxFileSizeMB <= 0 {
+		c.Crawler.Hashing.MaxFileSizeMB = 2048
+	}
+	if c.Crawler.AdaptiveThrottle.SampleIntervalSeconds <= 0 {
+		c.Crawler.AdaptiveThrottle.SampleIntervalSeconds = 5
+	}
+	if c.Crawler.AdaptiveThrottle.CPUPercentThreshold <= 0 {
+		c.Crawler.AdaptiveThrottle.CPUPercentThreshold = 80
+	}
+	if c.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold <= 0 {
+		c.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold = 70
+	}
+	if c.Crawler.AdaptiveThrottle.RecoverySamples <= 0 {
+		c.Crawler.AdaptiveThrottle.RecoverySamples = 3
+	}
+	if c.Watcher.DebounceMilliseconds <= 0 {
+		c.Watcher.DebounceMilliseconds = 1500
+	}
+	if c.Watcher.MaxWatchedDirectories <= 0 {
+		c.Watcher.MaxWatchedDirectories = 25000
+	}
+	if c.Watcher.MaxDirtyPathsPerFlush <= 0 {
+		c.Watcher.MaxDirtyPathsPerFlush = 500
+	}
+}
+
+func (c *Config) Validate() error {
+	ids := map[string]bool{}
+	for _, root := range c.Roots {
+		if strings.TrimSpace(root.ID) == "" {
+			return errors.New("root id is required")
+		}
+		if ids[root.ID] {
+			return fmt.Errorf("duplicate root id %q", root.ID)
+		}
+		ids[root.ID] = true
+		if strings.TrimSpace(root.Path) == "" {
+			return fmt.Errorf("root %q path is required", root.ID)
+		}
+		for _, alias := range root.PathAliases {
+			if strings.TrimSpace(alias.Platform) == "" || strings.TrimSpace(alias.Path) == "" {
+				return fmt.Errorf("root %q path aliases require platform and path", root.ID)
+			}
+		}
+	}
+	for _, window := range c.Crawler.PauseWindows {
+		if _, err := time.Parse("15:04", window.Start); err != nil {
+			return fmt.Errorf("invalid crawl pause window start %q", window.Start)
+		}
+		if _, err := time.Parse("15:04", window.End); err != nil {
+			return fmt.Errorf("invalid crawl pause window end %q", window.End)
+		}
+	}
+	return nil
+}
+
+func Save(path string, cfg *Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	b, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0600)
+}
+
+func (a AuthConfig) ResolveToken(baseDir string) (string, error) {
+	if a.Token != "" {
+		return a.Token, nil
+	}
+	if a.TokenFile == "" {
+		return "", nil
+	}
+	path := a.TokenFile
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func (c CrawlerConfig) ScanInterval() time.Duration {
+	return time.Duration(c.ScanIntervalSeconds) * time.Second
+}
+
+func (a AdaptiveThrottleConfig) SampleInterval() time.Duration {
+	return time.Duration(a.SampleIntervalSeconds) * time.Second
+}
+
+func (w WatcherConfig) Debounce() time.Duration {
+	return time.Duration(w.DebounceMilliseconds) * time.Millisecond
+}

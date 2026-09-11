@@ -1,0 +1,11 @@
+# Local service state and operator configuration
+/outputs/
+/work/
+**/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Build artifacts
+/src/dist/
+*.exe

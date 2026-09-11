@@ -1,0 +1,105 @@
+server:
+  bind: "127.0.0.1:41973"
+  public_base_url: "http://127.0.0.1:41973"
+  auth:
+    mode: "static-token"
+    token_file: "C:\\ProgramData\\QSurferSearch\\secrets\\search-api-token"
+
+management:
+  enabled: true
+  bind: "127.0.0.1:41974"
+  auth:
+    mode: "admin-token"
+    token_file: "C:\\ProgramData\\QSurferSearch\\secrets\\admin-api-token"
+
+index:
+  data_dir: "C:\\ProgramData\\QSurferSearch\\data"
+  commit_interval_seconds: 5
+  max_results: 200
+
+crawler:
+  scan_interval_seconds: 300
+  root_parallelism: 1
+  directory_worker_count: 2
+  metadata_worker_count: 4
+  metadata_queue_size: 5000
+  index_batch_size: 1000
+  ignore_hidden: false
+  follow_symlinks: false
+  missing_after_successful_crawls: 3
+  # Local service time. Crawls and watcher updates wait until the window ends.
+  pause_windows:
+    - start: "08:30"
+      end: "18:00"
+      days: ["mon", "tue", "wed", "thu", "fri"]
+
+watcher:
+  enabled: true
+  debounce_milliseconds: 1500
+  max_watched_directories: 25000
+  max_dirty_paths_per_flush: 500
+
+roots:
+  - id: "nas-finance"
+    name: "Finance share"
+    path: "\\\\nas01\\finance"
+    path_aliases:
+      - id: "finance-x-drive"
+        platform: "windows-drive"
+        path: "X:\\Finance"
+      - id: "finance-linux-mount"
+        platform: "linux"
+        path: "/mnt/finance"
+    enabled: true
+    labels: ["nas", "finance"]
+    include_extensions: ["pdf", "docx", "xlsx", "pptx", "txt", "csv", "md"]
+    exclude_extensions: ["tmp", "bak", "partial"]
+    include_file_patterns: []
+    exclude_file_patterns:
+      - "**/~$*"
+      - "*.tmp"
+      - "*.bak"
+    include_folder_patterns: []
+    exclude_folder_patterns:
+      - "**/.git/**"
+      - "**/node_modules/**"
+      - "**/tmp/**"
+    exclude_patterns: []
+    credential_ref: "os-service-account"
+
+  - id: "nas-projects"
+    name: "Projects share"
+    path: "\\\\nas01\\projects"
+    enabled: false
+    labels: ["nas", "projects"]
+    include_extensions: []
+    exclude_extensions: ["tmp", "bak"]
+    include_file_patterns: []
+    exclude_file_patterns:
+      - "**/~$*"
+      - "*.tmp"
+    include_folder_patterns: []
+    exclude_folder_patterns:
+      - "**/.git/**"
+      - "**/node_modules/**"
+    exclude_patterns: []
+    credential_ref: "os-service-account"
+
+  - id: "drive-x-top-level"
+    path: "X:\\*"
+    enabled: false
+    labels: ["drive", "wildcard"]
+    include_extensions: ["pdf", "docx", "xlsx", "pptx", "txt", "csv", "md"]
+    exclude_extensions: ["tmp", "bak", "partial"]
+    include_file_patterns: []
+    exclude_file_patterns:
+      - "~$*"
+      - "*.tmp"
+      - "*.bak"
+    include_folder_patterns: []
+    exclude_folder_patterns:
+      - "**/.git/**"
+      - "**/node_modules/**"
+      - "**/tmp/**"
+    exclude_patterns: []
+    credential_ref: "os-service-account"
