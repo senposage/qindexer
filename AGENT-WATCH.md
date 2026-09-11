@@ -416,3 +416,11 @@ advertises `features.ocr_search: true`.
 
 The corpus generator is `src/scripts/create-test-data.ps1`. It will not replace
 an existing `D:\qindexer` directory unless explicitly called with `-Force`.
+
+Live smoke on the current service build returned `health.status: "ok"` and
+capabilities `content_search: true`, `ocr_search: true`. The local host did not
+resolve `tesseract` or `ocrmypdf` from `PATH` during implementation, so an Aurora
+content query will only succeed after those commands are installed or configured
+with their full executable paths in the admin OCR settings. Until then, failed
+OCR jobs are surfaced as `ocr_status: "failed"` without affecting normal index
+or metadata search availability.
