@@ -86,3 +86,37 @@ func TestDescendantPathLikePreservesDriveRootSeparator(t *testing.T) {
 		t.Fatalf("unexpected nested pattern %q", got)
 	}
 }
+
+func TestContentMatchMetadataUsesBoundedExcerpt(t *testing.T) {
+	doc := Document{Name: "report.docx", Path: `C:\Finance\report.docx`, ContentText: "The quarterly revenue plan is ready for the finance review."}
+	addMatchMetadata(&doc, "revenue")
+	if len(doc.MatchedFields) != 1 || doc.MatchedFields[0] != "content" {
+		t.Fatalf("unexpected match fields: %#v", doc.MatchedFields)
+	}
+	if got := doc.Highlights["content"][0]; got == "" || len(got) > 192 {
+		t.Fatalf("unexpected content excerpt: %q", got)
+	}
+}
+
+func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, path := range []string{`D:\Legal\Matter\brief.docx`, `D:\Legal\Archive\old.docx`} {
+		_, err := cat.UpsertDocument(ctx, Document{ID: path, RootID: "drive-d", Path: path, NormalizedPath: NormalizePath(path), Name: filepath.Base(path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Filters: SearchFilters{IncludePaths: []string{`D:\Legal\Matter`}, ExcludePaths: []string{`D:\Legal`}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != `D:\Legal\Matter\brief.docx` {
+		t.Fatalf("child include did not override parent exclusion: %#v", resp.Results)
+	}
+}

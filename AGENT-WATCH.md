@@ -192,3 +192,52 @@ or is unavailable. QIndexer is also valid as the only configured search source.
 Folder scope filtering remains client-side in this pass. The new `/v1/roots`
 canonical-path and alias contract is the right prerequisite for a later,
 unambiguous forwarding of selected include/exclude scopes.
+
+## 2026-09-10 Scope Forwarding Status
+
+QSurfer now forwards explicit `include_paths` and `exclude_paths` to QIndexer
+for every search page when `GET /v1/roots` can map the user-selected path to
+one authoritative canonical root. The desktop keeps its client-side scope
+filter as a safety net and does not rewrite raw query text.
+
+The currently observed gap is service root resolution: local selections such
+as `D:\` do not yet obtain a root alias/canonical mapping, so the client
+retains local filtering instead of guessing. Please ensure `GET /v1/roots`
+publishes each indexed root's usable local path and any configured Windows
+drive, UNC, and Linux mount aliases. Alias matching must remain
+path-segment-aware and deterministic.
+
+### Required Service Work / Acceptance Criteria
+
+1. Every configured and successfully indexed root is returned by
+   `GET /v1/roots` with non-empty `root_id`, `canonical_path`, and a stable
+   `aliases` array. Do not omit a root merely because its canonical path is a
+   local drive such as `D:\`.
+2. A root configured at `D:\` must round-trip: QSurfer selects `D:\`, maps it
+   through the advertised alias to the canonical path, sends that canonical
+   value as `include_paths`, and QIndexer returns only descendants of that
+   root. The same must work for a child, e.g. `D:\Cases\Active`.
+3. A mapped drive, its UNC path, and a Linux mount path that refer to one
+   indexed location must be represented as aliases of one `root_id`; they must
+   all translate to the same canonical path. No client-side string guessing or
+   raw-query rewriting is permitted.
+4. `include_paths` and `exclude_paths` must use path-segment boundaries:
+   `D:\Legal` includes `D:\Legal\Matter` but never `D:\Legalities`.
+   A more-specific include should remain effective after a parent exclusion,
+   matching QSurfer's current scope semantics.
+5. Add a service-level regression test that exercises `/v1/roots` plus a
+   scoped `/v1/search` request for a drive-root and a child folder. Include
+   the returned roots/aliases and the requested canonical scope in diagnostics
+   or trace logs, with secrets excluded.
+
+## 2026-09-10 Service Scope Forwarding Update
+
+QIndexer now resolves only explicit scope fields (`path_prefix`,
+`path_prefixes`, `include_paths`, and `exclude_paths`) against each advertised
+root canonical path and configured alias. Every root advertises a canonical
+`service` alias as well as configured client aliases, so a drive root such as
+`D:\` can round-trip without optional NAS mappings. A unique match is rewritten
+to the canonical service path and its root ID is added to the filter. Multiple
+selected scopes across multiple roots are supported. Ambiguous aliases and
+caller root-filter conflicts return `400 invalid_path_scope`; raw `query` text
+is never rewritten. Child include paths override parent exclusions.

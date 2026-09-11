@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -38,9 +39,10 @@ type Server struct {
 }
 
 type rootAliasView struct {
-	AliasID  string `json:"alias_id"`
-	Platform string `json:"platform"`
-	Path     string `json:"path"`
+	AliasID   string `json:"alias_id"`
+	Platform  string `json:"platform"`
+	Path      string `json:"path"`
+	Canonical bool   `json:"canonical"`
 }
 
 func New(cfg *config.Config, configPath string, cat *catalog.Catalog, cr *crawler.Crawler, log *slog.Logger, searchToken, adminToken string) *Server {
@@ -212,7 +214,8 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 }
 
 func rootAliases(root config.RootConfig) []rootAliasView {
-	aliases := make([]rootAliasView, 0, len(root.PathAliases))
+	aliases := make([]rootAliasView, 0, len(root.PathAliases)+1)
+	aliases = append(aliases, rootAliasView{AliasID: root.ID + ":canonical", Platform: "service", Path: root.Path, Canonical: true})
 	for _, alias := range root.PathAliases {
 		id := strings.TrimSpace(alias.ID)
 		if id == "" {
@@ -236,6 +239,10 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SearchID == "" {
 		req.SearchID = uuid.NewString()
+	}
+	if err := s.resolveScopeAliases(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_path_scope", err.Error())
+		return
 	}
 	s.mu.RLock()
 	maxResults := s.cfg.Index.MaxResults
@@ -290,6 +297,10 @@ func (s *Server) searchWithKind(w http.ResponseWriter, r *http.Request, kind str
 	if req.SearchID == "" {
 		req.SearchID = uuid.NewString()
 	}
+	if err := s.resolveScopeAliases(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_path_scope", err.Error())
+		return
+	}
 	req.Filters.Kind = kind
 	if req.Limit <= 0 || req.Limit > maxResults {
 		req.Limit = maxResults
@@ -304,6 +315,102 @@ func (s *Server) searchWithKind(w http.ResponseWriter, r *http.Request, kind str
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) resolveScopeAliases(req *catalog.SearchRequest) error {
+	s.mu.RLock()
+	roots := append([]config.RootConfig(nil), s.cfg.Roots...)
+	s.mu.RUnlock()
+	requestedRoots := map[string]bool{}
+	for _, id := range req.Filters.Roots {
+		requestedRoots[id] = true
+	}
+	resolvedRoots := map[string]bool{}
+	resolve := func(scope string) (string, error) {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			return scope, nil
+		}
+		var matches []struct{ rootID, path string }
+		for _, root := range roots {
+			if suffix, ok := scopedPathSuffix(scope, root.Path); ok {
+				matches = append(matches, struct{ rootID, path string }{root.ID, joinCanonicalScope(root.Path, suffix)})
+			}
+			for _, alias := range root.PathAliases {
+				if suffix, ok := scopedPathSuffix(scope, alias.Path); ok {
+					matches = append(matches, struct{ rootID, path string }{root.ID, joinCanonicalScope(root.Path, suffix)})
+				}
+			}
+		}
+		if len(matches) == 0 {
+			return scope, nil
+		}
+		first := matches[0]
+		for _, match := range matches[1:] {
+			if match.rootID != first.rootID || !sameScopePath(match.path, first.path) {
+				return "", fmt.Errorf("scope %q matches more than one root alias", scope)
+			}
+		}
+		if len(requestedRoots) > 0 && !requestedRoots[first.rootID] {
+			return "", fmt.Errorf("scope %q conflicts with requested roots", scope)
+		}
+		resolvedRoots[first.rootID] = true
+		return first.path, nil
+	}
+	var err error
+	if req.Filters.PathPrefix, err = resolve(req.Filters.PathPrefix); err != nil {
+		return err
+	}
+	for i := range req.Filters.PathPrefixes {
+		if req.Filters.PathPrefixes[i], err = resolve(req.Filters.PathPrefixes[i]); err != nil {
+			return err
+		}
+	}
+	for i := range req.Filters.IncludePaths {
+		if req.Filters.IncludePaths[i], err = resolve(req.Filters.IncludePaths[i]); err != nil {
+			return err
+		}
+	}
+	for i := range req.Filters.ExcludePaths {
+		if req.Filters.ExcludePaths[i], err = resolve(req.Filters.ExcludePaths[i]); err != nil {
+			return err
+		}
+	}
+	if len(resolvedRoots) > 0 {
+		req.Filters.Roots = make([]string, 0, len(resolvedRoots))
+		for _, root := range roots {
+			if resolvedRoots[root.ID] {
+				req.Filters.Roots = append(req.Filters.Roots, root.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func scopedPathSuffix(path, prefix string) (string, bool) {
+	path, prefix = strings.ReplaceAll(path, "\\", "/"), strings.ReplaceAll(prefix, "\\", "/")
+	prefix = strings.TrimRight(prefix, "/")
+	if prefix == "" {
+		return "", false
+	}
+	if strings.EqualFold(path, prefix) {
+		return "", true
+	}
+	if len(path) > len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) && path[len(prefix)] == '/' {
+		return path[len(prefix)+1:], true
+	}
+	return "", false
+}
+
+func joinCanonicalScope(root, suffix string) string {
+	if suffix == "" {
+		return root
+	}
+	return filepath.Join(root, filepath.FromSlash(suffix))
+}
+
+func sameScopePath(a, b string) bool {
+	return strings.EqualFold(strings.ReplaceAll(a, "\\", "/"), strings.ReplaceAll(b, "\\", "/"))
 }
 
 func (s *Server) crawlRoot(w http.ResponseWriter, r *http.Request) {

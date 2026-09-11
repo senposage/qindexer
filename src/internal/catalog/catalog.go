@@ -38,6 +38,7 @@ type Document struct {
 	LastSeenGeneration int64               `json:"-"`
 	LastIndexedAt      time.Time           `json:"indexed_at"`
 	ContentStatus      string              `json:"content_status,omitempty"`
+	ContentText        string              `json:"-"`
 	ContentHash        string              `json:"content_hash,omitempty"`
 	HashStatus         string              `json:"hash_status,omitempty"`
 	Owner              string              `json:"owner,omitempty"`
@@ -410,7 +411,8 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 		return UpsertResult{Added: true}, tx.Commit()
 	}
 	if existingSignature == doc.Signature {
-		_, err := c.db.ExecContext(ctx, `UPDATE documents SET status = 'active', last_seen_generation = ?, missing_count = 0 WHERE id = ?`,
+		_, err := c.db.ExecContext(ctx, `UPDATE documents SET status = 'active', access_status = ?, last_seen_generation = ?, missing_count = 0 WHERE id = ?`,
+			doc.AccessStatus,
 			doc.LastSeenGeneration, existingID)
 		return UpsertResult{Unchanged: true}, err
 	}
@@ -481,7 +483,7 @@ func (c *Catalog) MarkMissing(ctx context.Context, rootID string, generation int
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `UPDATE documents
-		SET status = 'missing', missing_count = missing_count + 1
+		SET status = 'missing', access_status = 'missing', missing_count = missing_count + 1
 		WHERE root_id = ? AND status = 'active' AND last_seen_generation <> ?`,
 		rootID, generation)
 	if err != nil {
@@ -501,9 +503,24 @@ func (c *Catalog) MarkPathMissing(ctx context.Context, rootID string, path strin
 	defer c.writeMu.Unlock()
 	normalized := NormalizePath(path)
 	res, err := c.db.ExecContext(ctx, `UPDATE documents
-		SET status = 'missing', missing_count = missing_count + 1
+		SET status = 'missing', access_status = 'missing', missing_count = missing_count + 1
 		WHERE root_id = ? AND status = 'active' AND (normalized_path = ? OR normalized_path LIKE ?)`,
 		rootID, normalized, descendantPathLike(normalized))
+	if err != nil {
+		return 0, err
+	}
+	count, _ := res.RowsAffected()
+	return count, nil
+}
+
+func (c *Catalog) MarkPathInaccessible(ctx context.Context, rootID, path string, generation int64) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	normalized := NormalizePath(path)
+	res, err := c.db.ExecContext(ctx, `UPDATE documents
+		SET access_status = 'inaccessible', last_seen_generation = ?
+		WHERE root_id = ? AND status = 'active' AND (normalized_path = ? OR normalized_path LIKE ?)`,
+		generation, rootID, normalized, descendantPathLike(normalized))
 	if err != nil {
 		return 0, err
 	}
@@ -611,8 +628,19 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 			if prefix == "" {
 				continue
 			}
-			where = append(where, "NOT (d.normalized_path = ? OR d.normalized_path LIKE ? ESCAPE '\\')")
+			clause := "NOT (d.normalized_path = ? OR d.normalized_path LIKE ? ESCAPE '\\')"
 			args = append(args, NormalizePath(prefix), escapeLike(pathChildPrefix(prefix))+"%")
+			overrides := []string{}
+			for _, include := range prefixes {
+				if pathScopeWithin(include, prefix) {
+					overrides = append(overrides, "(d.normalized_path = ? OR d.normalized_path LIKE ? ESCAPE '\\')")
+					args = append(args, NormalizePath(include), escapeLike(pathChildPrefix(include))+"%")
+				}
+			}
+			if len(overrides) > 0 {
+				clause = "(" + clause + " OR " + strings.Join(overrides, " OR ") + ")"
+			}
+			where = append(where, clause)
 		}
 	}
 	if req.Filters.Kind != "" {
@@ -649,7 +677,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.content_hash, d.hash_status, d.owner, d.access_status, d.signature
+	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.signature
 		FROM ` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	args = append(args, limit+1, req.Offset)
 	rows, err := c.db.QueryContext(ctx, query, args...)
@@ -671,8 +699,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 			doc.Kind = "file"
 		}
 		if hasQuery {
-			doc.MatchedFields = []string{"name", "path"}
-			doc.Highlights = map[string][]string{"name": {doc.Name}, "path": {doc.Path}}
+			addMatchMetadata(&doc, req.Query)
 		}
 		docs = append(docs, doc)
 	}
@@ -691,6 +718,14 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 		resp.Index = searchIndexInfo(states, req.Filters.Roots)
 	}
 	return resp, nil
+}
+
+func pathScopeWithin(path, parent string) bool {
+	path, parent = NormalizePath(path), NormalizePath(parent)
+	if path == parent {
+		return true
+	}
+	return strings.HasPrefix(path, pathChildPrefix(parent))
 }
 
 func searchIndexInfo(states map[string]RootState, requestedRoots []string) SearchIndexInfo {
@@ -841,7 +876,7 @@ type documentScanner interface {
 func scanDocument(row documentScanner) (Document, error) {
 	var d Document
 	var modified, created, indexed string
-	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.Signature); err != nil {
+	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.Signature); err != nil {
 		return d, err
 	}
 	d.ModifiedAt, _ = time.Parse(time.RFC3339Nano, modified)
@@ -857,6 +892,55 @@ func scanDocument(row documentScanner) (Document, error) {
 		d.Kind = "file"
 	}
 	return d, nil
+}
+
+func addMatchMetadata(doc *Document, query string) {
+	terms := strings.Fields(strings.ToLower(query))
+	if len(terms) == 0 {
+		return
+	}
+	fields := []struct{ name, value string }{{"name", doc.Name}, {"path", doc.Path}, {"extension", doc.Extension}, {"content", doc.ContentText}}
+	doc.Highlights = map[string][]string{}
+	for _, field := range fields {
+		if excerpt, ok := matchedExcerpt(field.value, terms); ok {
+			doc.MatchedFields = append(doc.MatchedFields, field.name)
+			doc.Highlights[field.name] = []string{excerpt}
+		}
+	}
+	if len(doc.MatchedFields) == 0 {
+		doc.MatchedFields = []string{"metadata"}
+	}
+	if len(doc.Highlights) == 0 {
+		doc.Highlights = nil
+	}
+}
+
+func matchedExcerpt(value string, terms []string) (string, bool) {
+	lower := strings.ToLower(value)
+	position := -1
+	for _, term := range terms {
+		if i := strings.Index(lower, term); i >= 0 && (position < 0 || i < position) {
+			position = i
+		}
+	}
+	if position < 0 {
+		return "", false
+	}
+	start, end := position-96, position+192
+	if start < 0 {
+		start = 0
+	}
+	if end > len(value) {
+		end = len(value)
+	}
+	excerpt := value[start:end]
+	if start > 0 {
+		excerpt = "..." + excerpt
+	}
+	if end < len(value) {
+		excerpt += "..."
+	}
+	return excerpt, true
 }
 
 func placeholders(n int) string {

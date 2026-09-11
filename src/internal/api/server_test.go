@@ -82,10 +82,37 @@ func TestRootAliasesUseConfiguredOrDeterministicIDs(t *testing.T) {
 		{Platform: "linux", Path: "/mnt/finance"},
 	}}
 	aliases := rootAliases(root)
-	if len(aliases) != 2 || aliases[0].AliasID != "finance-x" {
+	if len(aliases) != 3 || aliases[0].AliasID != "finance:canonical" || !aliases[0].Canonical || aliases[1].AliasID != "finance-x" {
 		t.Fatalf("configured alias ID was not preserved: %#v", aliases)
 	}
-	if aliases[1].AliasID == "" || aliases[1].AliasID != rootAliases(root)[1].AliasID {
-		t.Fatalf("derived alias ID is not stable: %#v", aliases[1])
+	if aliases[2].AliasID == "" || aliases[2].AliasID != rootAliases(root)[2].AliasID {
+		t.Fatalf("derived alias ID is not stable: %#v", aliases[2])
+	}
+}
+
+func TestResolveScopeAliasesOnlyChangesExplicitScopes(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "finance", Path: `\\nas\finance`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Finance`}}}}}
+	server := &Server{cfg: cfg}
+	req := catalog.SearchRequest{Query: `X:\Finance budget`, Filters: catalog.SearchFilters{IncludePaths: []string{`X:\Finance\Q3`}}}
+	if err := server.resolveScopeAliases(&req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Query != `X:\Finance budget` {
+		t.Fatalf("raw query was rewritten: %q", req.Query)
+	}
+	if got := req.Filters.IncludePaths[0]; got != `\\nas\finance\Q3` {
+		t.Fatalf("unexpected canonical scope %q", got)
+	}
+	if len(req.Filters.Roots) != 1 || req.Filters.Roots[0] != "finance" {
+		t.Fatalf("root was not inferred: %#v", req.Filters.Roots)
+	}
+}
+
+func TestResolveScopeAliasesRejectsAmbiguity(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "one", Path: `C:\One`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Shared`}}}, {ID: "two", Path: `C:\Two`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Shared`}}}}}
+	server := &Server{cfg: cfg}
+	req := catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`X:\Shared\docs`}}}
+	if err := server.resolveScopeAliases(&req); err == nil {
+		t.Fatal("expected ambiguous alias error")
 	}
 }

@@ -410,6 +410,7 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
+			c.recordPathFailure(ctx, root, path, err, generation)
 			atomic.AddInt64(errorsCount, 1)
 			c.log.Warn("root path stat failed", "root", root.ID, "path", path, "error", err)
 			continue
@@ -476,6 +477,7 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 	atomic.StoreInt64(&c.lastActivity, time.Now().Unix())
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		c.recordPathFailure(ctx, root, dir, err, generation)
 		atomic.AddInt64(errorsCount, 1)
 		c.log.Warn("directory read failed", "root", root.ID, "path", dir, "error", err)
 		return
@@ -807,6 +809,7 @@ func hasGlob(path string) bool {
 func (c *Crawler) indexPath(ctx context.Context, root config.RootConfig, path string, generation int64) (catalog.UpsertResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
+		c.recordPathFailure(ctx, root, path, err, generation)
 		return catalog.UpsertResult{}, err
 	}
 	isFolder := info.IsDir()
@@ -847,6 +850,14 @@ func (c *Crawler) indexPath(ctx context.Context, root config.RootConfig, path st
 		c.enqueueBackground(doc)
 	}
 	return res, err
+}
+
+func (c *Crawler) recordPathFailure(ctx context.Context, root config.RootConfig, path string, err error, generation int64) {
+	if os.IsNotExist(err) {
+		_, _ = c.cat.MarkPathMissing(ctx, root.ID, path)
+		return
+	}
+	_, _ = c.cat.MarkPathInaccessible(ctx, root.ID, path, generation)
 }
 
 func (c *Crawler) enqueueBackground(doc catalog.Document) {
