@@ -116,6 +116,7 @@ type SearchFilters struct {
 	ModifiedBefore string   `json:"modified_before"`
 	MinSize        *int64   `json:"min_size"`
 	MaxSize        *int64   `json:"max_size"`
+	MatchFields    []string `json:"match_fields"`
 }
 
 type SearchResponse struct {
@@ -799,9 +800,13 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	from := "documents d"
 	hasQuery := strings.TrimSpace(req.Query) != ""
 	if hasQuery {
+		matchQuery, err := scopedFTSQuery(req.Query, req.Filters.MatchFields)
+		if err != nil {
+			return SearchResponse{}, err
+		}
 		from = "documents d JOIN documents_fts ON documents_fts.id = d.id"
 		where = append(where, "documents_fts MATCH ?")
-		args = append(args, escapeFTS(req.Query))
+		args = append(args, matchQuery)
 	}
 	if len(req.Filters.Roots) > 0 {
 		where = append(where, "d.root_id IN ("+placeholders(len(req.Filters.Roots))+")")
@@ -1170,4 +1175,28 @@ func escapeFTS(q string) string {
 		parts[i] = `"` + strings.ReplaceAll(part, `"`, `""`) + `"*`
 	}
 	return strings.Join(parts, " ")
+}
+
+func scopedFTSQuery(query string, fields []string) (string, error) {
+	terms := escapeFTS(query)
+	if len(fields) == 0 {
+		return terms, nil
+	}
+	valid := map[string]bool{"name": true, "path": true, "extension": true, "content": true}
+	selected := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, field := range fields {
+		field = strings.ToLower(strings.TrimSpace(field))
+		if !valid[field] {
+			return "", &RequestError{Code: "invalid_match_fields", Message: "match_fields supports name, path, extension, and content"}
+		}
+		if !seen[field] {
+			selected = append(selected, field)
+			seen[field] = true
+		}
+	}
+	if len(selected) == 0 {
+		return "", &RequestError{Code: "invalid_match_fields", Message: "match_fields must not be empty when provided"}
+	}
+	return "{" + strings.Join(selected, " ") + "} : (" + terms + ")", nil
 }

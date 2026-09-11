@@ -57,7 +57,8 @@ function New-ScannedPdf([string]$Path, [byte[]]$Jpeg, [int]$Width, [int]$Height)
   [Array]::Copy($imageHeader, 0, $image, 0, $imageHeader.Length)
   [Array]::Copy($Jpeg, 0, $image, $imageHeader.Length, $Jpeg.Length)
   [Array]::Copy($imageFooter, 0, $image, $imageHeader.Length + $Jpeg.Length, $imageFooter.Length)
-  $draw = "q 612 0 0 792 0 0 cm /Im0 Do Q"
+  $drawHeight = [math]::Round(612 * $Height / $Width, 2)
+  $draw = "q 612 0 0 $drawHeight 0 0 cm /Im0 Do Q"
   [byte[][]]$objects = @(
     $ascii.GetBytes("<< /Type /Catalog /Pages 2 0 R >>"),
     $ascii.GetBytes("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),

@@ -437,3 +437,33 @@ Admin now exposes `POST /admin/v1/roots/{root_id}/clear-index` with
 `{"confirm_root_id":"{root_id}"}`. It removes only that root's catalog state,
 never source files, and returns a conflict if the root is crawling. The Web UI
 has a matching **Clear index** action with a confirmation dialog.
+
+## 2026-09-10 Content Scope Contract And Live Corpus Results
+
+`POST /v1/search` now supports `filters.match_fields` with the only accepted
+values `name`, `path`, `extension`, and `content`. Omitted means legacy
+all-fields behavior. Send `["name", "path", "extension"]` while QSurfer's
+**Search contents** is off; send `["name", "path", "extension", "content"]`
+when it is on. An invalid field or explicitly empty list returns
+`invalid_match_fields`.
+
+The active `qindexer-fixtures` root targets `D:\qindexer` and explicitly has
+content extraction, OCR, SHA-256, and owner metadata enabled. Tesseract 5.5.3
+and OCRmyPDF 17.11.0 are installed locally; their absolute commands are saved
+in the service OCR settings. Live verification completed:
+
+```json
+// Metadata only: expected zero hits.
+{"query":"ORCHID","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\qindexer\\content"],"match_fields":["name","path","extension"]},"limit":10,"sort":"relevance"}
+
+// Content only: expected plain-notes.txt with content highlight.
+{"query":"ORCHID","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\qindexer\\content"],"match_fields":["content"]},"limit":10,"sort":"relevance"}
+
+// OCR content: expected receipt-ocr.png and scanned-invoice.pdf.
+{"query":"AURORA","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\qindexer\\ocr"],"match_fields":["content"]},"limit":10,"sort":"relevance"}
+```
+
+The office markers are `VIOLET 317` in `office\\sample.docx`, `COBALT 428` in
+`office\\sample.xlsx`, `AMBER 539` in `office\\sample.pptx`, and `EMBER 514`
+in `pdf\\embedded-text.pdf`. Scope each request to that exact file's parent
+folder when asserting a single result.

@@ -84,12 +84,12 @@ func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, 
 	}
 	defer os.RemoveAll(dir)
 	sidecar := filepath.Join(dir, "content.txt")
-	output := filepath.Join(dir, "output.pdf")
 	args := []string{"--skip-text", "--output-type", "none", "--sidecar", sidecar}
 	if options.Languages != "" {
 		args = append(args, "-l", options.Languages)
 	}
-	args = append(args, path, output)
+	// OCRmyPDF requires '-' as the output argument when output-type is none.
+	args = append(args, path, "-")
 	if out, err := exec.CommandContext(ctx, command, args...).CombinedOutput(); err != nil {
 		return "failed", "", fmt.Errorf("%s failed: %w: %s", command, err, strings.TrimSpace(string(out)))
 	}

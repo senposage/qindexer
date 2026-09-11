@@ -169,6 +169,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 			"modified_before",
 			"min_size",
 			"max_size",
+			"match_fields",
 		},
 		"limits": map[string]any{
 			"max_page_size":           s.cfg.Index.MaxResults,

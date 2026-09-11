@@ -67,7 +67,8 @@ Content-Type: application/json
     "modified_after": "2026-01-01T00:00:00Z",
     "modified_before": "2026-12-31T23:59:59Z",
     "min_size": 1024,
-    "max_size": 10485760
+    "max_size": 10485760,
+    "match_fields": ["name", "path", "extension", "content"]
   },
   "limit": 50,
   "offset": 0,
@@ -79,6 +80,12 @@ Content-Type: application/json
 `path_prefix` remains supported for compatibility. `path_prefixes` and `include_paths` are equivalent multi-scope include fields; `exclude_paths` removes scopes. Prefix matching is path-segment-aware, so `C:\Legal` matches `C:\Legal\brief.docx` but not `C:\Legalities\brief.docx`.
 
 Search responses echo `search_id` and include `offset`, `has_more`, and `next_offset` for progressive paging. Results always contain `result_id`, `etag`, `root_id`, canonical `path`, `kind`, `is_folder`, `indexed_at`, and filename/path match metadata. The response `index` object includes per-root crawl status, generation, and freshness in seconds.
+
+`filters.match_fields` explicitly controls the FTS columns searched. Accepted
+values are `name`, `path`, `extension`, and `content`. Omit it to preserve the
+legacy all-fields search. QSurfer should use `["name", "path", "extension"]`
+when **Search contents** is off and add `"content"` when it is on. Invalid or
+empty supplied values return the structured `invalid_match_fields` error.
 
 ### Directories and suggestions
 

@@ -140,6 +140,61 @@ func TestClearRootRemovesOnlyThatRoot(t *testing.T) {
 	}
 }
 
+func TestSearchMatchFieldsSeparatesMetadataAndContent(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	doc := Document{ID: "content-only", RootID: "test", Path: `D:\qindexer\content\plain-notes.txt`, NormalizedPath: NormalizePath(`D:\qindexer\content\plain-notes.txt`), Name: "plain-notes.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.UpdateExtractedContent(ctx, doc.ID, doc.Signature, "extracted", "QINDEXER ORCHID 731"); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"name", "path", "extension"}}, Limit: 10}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Results) != 0 {
+		t.Fatalf("metadata-only search returned content match: %#v", metadata.Results)
+	}
+	content, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"content"}}, Limit: 10}, 20)
+	if err != nil || len(content.Results) != 1 || content.Results[0].MatchedFields[0] != "content" {
+		t.Fatalf("content-only search = %#v, %v", content.Results, err)
+	}
+	if _, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"unknown"}}, Limit: 10}, 20); err == nil {
+		t.Fatal("expected invalid match field error")
+	}
+}
+
+func TestClaimPendingWorkRespectsRootSelection(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, rootID := range []string{"enabled", "disabled"} {
+		doc := Document{ID: rootID, RootID: rootID, Path: `D:\` + rootID + `\file.txt`, NormalizedPath: NormalizePath(`D:\` + rootID + `\file.txt`), Name: "file.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := cat.ClaimPendingContent(ctx, []string{"enabled"}, 10, 1024)
+	if err != nil || len(items) != 1 || items[0].RootID != "enabled" {
+		t.Fatalf("claimed items = %#v, %v", items, err)
+	}
+	items, err = cat.ClaimPendingContent(ctx, []string{"disabled"}, 10, 1024)
+	if err != nil || len(items) != 1 || items[0].RootID != "disabled" {
+		t.Fatalf("claimed items = %#v, %v", items, err)
+	}
+}
+
 func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

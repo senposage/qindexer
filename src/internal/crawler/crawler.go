@@ -220,46 +220,55 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 func (c *Crawler) refillBackground(ctx context.Context) {
 	content := c.cfg.Crawler.ContentExtraction
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.ContentExtractionEnabled(content.Enabled) }); len(rootIDs) > 0 {
-		available := cap(c.contentJobs) - len(c.contentJobs)
-		if available > 0 {
-			items, err := c.cat.ClaimPendingContent(ctx, rootIDs, available, content.MaxFileSizeMB<<20)
-			if err != nil {
-				c.log.Debug("content queue refill failed", "error", err)
-			} else {
-				for _, item := range items {
-					c.contentJobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
-				}
-			}
-		}
+		c.fillBackground(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, "content")
 	}
 	ocr := c.cfg.Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
-		available := cap(c.ocrJobs) - len(c.ocrJobs)
-		if available > 0 {
-			items, err := c.cat.ClaimPendingOCR(ctx, rootIDs, available, ocr.MaxFileSizeMB<<20)
-			if err != nil {
-				c.log.Debug("OCR queue refill failed", "error", err)
-			} else {
-				for _, item := range items {
-					c.ocrJobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
-				}
-			}
-		}
+		c.fillBackground(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, "OCR")
 	}
 	hashing := c.cfg.Crawler.Hashing
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.HashingEnabled(hashing.Enabled) }); len(rootIDs) > 0 {
-		available := cap(c.hashJobs) - len(c.hashJobs)
-		if available > 0 {
-			items, err := c.cat.ClaimPendingHashes(ctx, rootIDs, available, hashing.MaxFileSizeMB<<20)
-			if err != nil {
-				c.log.Debug("hash queue refill failed", "error", err)
-			} else {
-				for _, item := range items {
-					c.hashJobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
-				}
+		c.fillBackground(ctx, rootIDs, c.hashJobs, hashing.MaxFileSizeMB<<20, c.cat.ClaimPendingHashes, "hash")
+	}
+}
+
+type backgroundClaim func(context.Context, []string, int, int64) ([]catalog.BackgroundCandidate, error)
+
+// fillBackground shares capacity across roots so a sprawling root cannot starve
+// a smaller root's extraction, OCR, or hashing backlog.
+func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string) {
+	available := cap(jobs) - len(jobs)
+	if available <= 0 {
+		return
+	}
+	perRoot := max(1, available/len(rootIDs))
+	batches := make([][]catalog.BackgroundCandidate, 0, len(rootIDs))
+	for _, rootID := range rootIDs {
+		if available <= 0 {
+			return
+		}
+		limit := min(perRoot, available)
+		items, err := claim(ctx, []string{rootID}, limit, maxSize)
+		if err != nil {
+			c.log.Debug(kind+" queue refill failed", "root", rootID, "error", err)
+			continue
+		}
+		batches = append(batches, items)
+		available -= len(items)
+	}
+	// Interleave roots so one worker makes progress on every root promptly.
+	for pending := true; pending; {
+		pending = false
+		for i := range batches {
+			if len(batches[i]) == 0 {
+				continue
 			}
+			item := batches[i][0]
+			batches[i] = batches[i][1:]
+			jobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
+			pending = true
 		}
 	}
 }
