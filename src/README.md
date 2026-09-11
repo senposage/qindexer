@@ -68,3 +68,15 @@ Artifacts are written to `dist/`.
 - `configs/linux-nas.example.yaml`: systemd host with mounted NAS paths.
 
 Root paths may also use filesystem wildcards, including `X:\*`, `\\nas01\share\*`, and `/mnt/nas-*/*`.
+
+## OCR
+
+OCR is optional and local. Enable content extraction and OCR from the management UI, then choose `auto` (OCRmyPDF for scanned PDFs and Tesseract for images), `tesseract`, or `ocrmypdf`. QIndexer does not install either engine or transmit files off-host. OCR uses its own bounded worker queue, file-size limit, and timeout; original files are never modified.
+
+Generate a synthetic content-search and OCR corpus with:
+
+```powershell
+.\scripts\create-test-data.ps1 -Destination D:\qindexer
+```
+
+The corpus includes TXT, DOCX, XLSX, PPTX, embedded-text PDF, image, and scanned-image PDF files with documented unique search markers.

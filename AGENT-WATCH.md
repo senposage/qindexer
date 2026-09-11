@@ -354,3 +354,65 @@ and is not excluded by its configured rules. Live QIndexer verification with
 returned exactly one active result at `D:\zankyo.docx`. If it is absent in the
 desktop UI, inspect QSurfer's received provider page and its local merged/scope
 filter rather than recrawling the service.
+
+## 2026-09-10 Required Content-Search Contract
+
+QSurfer's **Search contents** checkbox is not yet faithfully expressible to
+QIndexer. The desktop presently builds a filename-only Qsirch query when it is
+off, but the QIndexer adapter normalizes that legacy syntax into a bare query.
+QIndexer then runs its FTS query across `name`, `path`, `extension`, and
+extracted `content` whenever extraction is enabled. Consequently, QIndexer can
+return a content match even while the desktop checkbox is off.
+
+Please add an explicit, documented request field to `POST /v1/search`, such as
+`filters.match_fields: ["name", "path", "extension"]` for the normal QSurfer
+search and `filters.match_fields: ["name", "path", "extension", "content"]`
+when **Search contents** is on. The service must reject unsupported fields with
+the standard structured error and advertise supported fields through
+`GET /v1/capabilities`. Preserve the current bare-query behavior only as the
+legacy/default request behavior; QSurfer will send the explicit list once it is
+available. Please include an integration test proving a content-only term is
+absent from metadata-only results and present when `content` is requested.
+
+## 2026-09-10 OCR Implementation
+
+QIndexer now has opt-in local OCR configuration and a separate bounded,
+restart-safe OCR queue. `auto` selects OCRmyPDF for scanned PDFs and Tesseract
+for image files; explicit engine commands, languages, file-size cap, and job
+timeout are configurable in the admin UI. OCR runs only after normal extraction
+finds no embedded text, never modifies source files, and exposes `ocr_status`
+on a search result. OCR stays disabled until the two local tools are installed
+and enabled by the administrator.
+
+The service currently retains the documented legacy behavior of searching FTS
+metadata and extracted content together. The requested explicit `match_fields`
+contract is the next protocol change needed for QSurfer's Search contents toggle;
+please continue sending the legacy bare query until that change lands.
+
+## 2026-09-10 Client Test Corpus
+
+Synthetic data for QSurfer integration testing is now present at `D:\qindexer`.
+It is deliberately separate from user content and may be indexed as a normal
+root or picked up by the existing `D:\` root. Its expected markers are:
+
+| File | Search marker | Expected source |
+| --- | --- | --- |
+| `content\plain-notes.txt` | `ORCHID 731` | embedded plain text |
+| `office\sample.docx` | `VIOLET 317` | Office XML extraction |
+| `office\sample.xlsx` | `COBALT 428` | Office XML extraction |
+| `office\sample.pptx` | `AMBER 539` | Office XML extraction |
+| `pdf\embedded-text.pdf` | `EMBER 514` | embedded PDF text |
+| `ocr\receipt-ocr.png` | `AURORA 842` | Tesseract after OCR is enabled |
+| `ocr\scanned-invoice.pdf` | `AURORA 842` | OCRmyPDF after OCR is enabled |
+| `nested\project-alpha\path-note.md` | `CEDAR 219` | embedded Markdown text |
+
+For the first five content markers, enable **Extract Office, PDF, and text
+content** in the QIndexer admin Configuration screen, wait for the bounded
+backfill queue, then issue ordinary `POST /v1/search` requests scoped to
+`D:\qindexer`. The two Aurora files remain indexed by name/path only until
+Tesseract and OCRmyPDF are installed, OCR is enabled, and their `ocr_status`
+becomes `extracted`. This is intentional; service `GET /v1/capabilities` then
+advertises `features.ocr_search: true`.
+
+The corpus generator is `src/scripts/create-test-data.ps1`. It will not replace
+an existing `D:\qindexer` directory unless explicitly called with `-Force`.

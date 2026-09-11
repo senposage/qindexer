@@ -30,6 +30,9 @@ func Text(path string) (string, error) {
 		return readText(plain)
 	case "docx", "xlsx", "pptx":
 		return officeText(path)
+	case "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp":
+		// Images have no embedded text. Returning an empty value hands them to OCR.
+		return "", nil
 	default:
 		f, err := os.Open(path)
 		if err != nil {

@@ -270,9 +270,17 @@ async function saveRules(event) {
 
 function renderIndexingSettings(crawler) {
   const extraction = crawler.content_extraction || {};
+	const ocr = crawler.ocr || {};
   const hashing = crawler.hashing || {};
   document.querySelector("#settings-extraction").checked = Boolean(extraction.enabled);
   document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
+	document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
+	document.querySelector("#settings-ocr-engine").value = ocr.engine || "auto";
+	document.querySelector("#settings-ocr-languages").value = ocr.languages || "eng";
+	document.querySelector("#settings-ocr-size").value = ocr.max_file_size_mb || 128;
+	document.querySelector("#settings-ocr-timeout").value = ocr.timeout_seconds || 180;
+	document.querySelector("#settings-tesseract-command").value = ocr.tesseract_command || "tesseract";
+	document.querySelector("#settings-ocrmypdf-command").value = ocr.ocrmypdf_command || "ocrmypdf";
   document.querySelector("#settings-hashing").checked = Boolean(hashing.enabled);
   document.querySelector("#settings-hashing-size").value = hashing.max_file_size_mb || 2048;
   document.querySelector("#settings-ownership").checked = Boolean(crawler.collect_ownership);
@@ -281,10 +289,11 @@ function renderIndexingSettings(crawler) {
 async function saveIndexingSettings(event) {
   event.preventDefault();
   const crawler = state.crawler || {};
-  const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64 };
+  const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf" };
+  const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64 };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   try {
-    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, content_extraction: content, hashing }) });
+    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, content_extraction: content, ocr, hashing }) });
     setMessage("Indexing settings saved");
     refresh();
   } catch (err) { setMessage(err.message); }

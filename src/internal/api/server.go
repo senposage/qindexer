@@ -140,7 +140,7 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		"features": map[string]bool{
 			"metadata_search": true,
 			"content_search":  s.cfg.Crawler.ContentExtraction.Enabled,
-			"ocr_search":      false,
+			"ocr_search":      s.cfg.Crawler.ContentExtraction.Enabled && s.cfg.Crawler.OCR.Enabled,
 			"acl_filtering":   false,
 			"content_hashing": s.cfg.Crawler.Hashing.Enabled,
 			"crawl_control":   true,
@@ -688,6 +688,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CollectOwnership  bool                           `json:"collect_ownership"`
 		ContentExtraction config.ContentExtractionConfig `json:"content_extraction"`
+		OCR               config.OCRConfig               `json:"ocr"`
 		Hashing           config.HashingConfig           `json:"hashing"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -699,6 +700,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	candidate := *s.cfg
 	candidate.Crawler.CollectOwnership = req.CollectOwnership
 	candidate.Crawler.ContentExtraction = req.ContentExtraction
+	candidate.Crawler.OCR = req.OCR
 	candidate.Crawler.Hashing = req.Hashing
 	candidate.ApplyDefaults()
 	if err := candidate.Validate(); err != nil {

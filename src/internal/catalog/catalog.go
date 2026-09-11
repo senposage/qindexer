@@ -38,6 +38,7 @@ type Document struct {
 	LastSeenGeneration int64               `json:"-"`
 	LastIndexedAt      time.Time           `json:"indexed_at"`
 	ContentStatus      string              `json:"content_status,omitempty"`
+	OCRStatus          string              `json:"ocr_status,omitempty"`
 	ContentText        string              `json:"-"`
 	ContentHash        string              `json:"content_hash,omitempty"`
 	HashStatus         string              `json:"hash_status,omitempty"`
@@ -191,6 +192,7 @@ func (c *Catalog) migrate(ctx context.Context) error {
 			last_seen_generation INTEGER NOT NULL,
 			last_indexed_at TEXT NOT NULL,
 			content_status TEXT NOT NULL,
+			ocr_status TEXT NOT NULL DEFAULT 'not_requested',
 			content_text TEXT NOT NULL DEFAULT '',
 			content_hash TEXT NOT NULL DEFAULT '',
 			hash_status TEXT NOT NULL DEFAULT 'not_hashed',
@@ -262,6 +264,9 @@ func (c *Catalog) migrate(ctx context.Context) error {
 	if err := c.ensureColumn(ctx, "documents", "content_text", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := c.ensureColumn(ctx, "documents", "ocr_status", "TEXT NOT NULL DEFAULT 'not_requested'"); err != nil {
+		return err
+	}
 	if err := c.ensureColumn(ctx, "documents", "content_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -272,6 +277,9 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := c.db.ExecContext(ctx, `UPDATE documents SET content_status = 'not_indexed' WHERE content_status = 'queued'`); err != nil {
+		return err
+	}
+	if _, err := c.db.ExecContext(ctx, `UPDATE documents SET ocr_status = 'pending' WHERE ocr_status = 'queued'`); err != nil {
 		return err
 	}
 	if _, err := c.db.ExecContext(ctx, `UPDATE documents SET hash_status = 'not_hashed' WHERE hash_status = 'queued'`); err != nil {
@@ -427,8 +435,8 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 				return UpsertResult{}, err
 			}
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, content_text, content_hash, hash_status, owner, access_status, moved_from_path, is_folder, signature, missing_count)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
+		_, err = tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, ocr_status, content_text, content_hash, hash_status, owner, access_status, moved_from_path, is_folder, signature, missing_count)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', 'not_requested', '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
 			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature)
 		if err != nil {
 			return UpsertResult{}, err
@@ -451,7 +459,7 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE documents
 		SET path = ?, name = ?, extension = ?, size = ?, modified_at = ?, created_at = ?, status = 'active',
-		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
+		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
 		WHERE id = ?`,
 		doc.Path, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID)
 	if err != nil {
@@ -495,6 +503,37 @@ func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, sta
 	return tx.Commit()
 }
 
+func (c *Catalog) UpdateOCRStatus(ctx context.Context, id, signature, status string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.db.ExecContext(ctx, `UPDATE documents SET ocr_status = ? WHERE id = ? AND signature = ?`, status, id, signature)
+	return err
+}
+
+func (c *Catalog) UpdateOCRContent(ctx context.Context, id, signature, status, content string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var rootID, name, path, extension string
+	if err := tx.QueryRowContext(ctx, `SELECT root_id, name, path, extension FROM documents WHERE id = ? AND signature = ?`, id, signature).Scan(&rootID, &name, &path, &extension); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = 'extracted', content_text = ?, ocr_status = ? WHERE id = ?`, content, status, id); err != nil {
+		return err
+	}
+	if err := upsertFTS(ctx, tx, id, rootID, name, path, extension, content); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, status string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -504,6 +543,10 @@ func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, st
 
 func (c *Catalog) ClaimPendingContent(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
 	return c.claimPending(ctx, "content_status", "not_indexed", "queued", limit, maxSize)
+}
+
+func (c *Catalog) ClaimPendingOCR(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "ocr_status", "pending", "queued", limit, maxSize)
 }
 
 func (c *Catalog) ClaimPendingHashes(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
@@ -802,7 +845,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.moved_from_path, d.signature
+	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.ocr_status, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.moved_from_path, d.signature
 		FROM ` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	args = append(args, limit+1, req.Offset)
 	rows, err := c.db.QueryContext(ctx, query, args...)
@@ -1001,7 +1044,7 @@ type documentScanner interface {
 func scanDocument(row documentScanner) (Document, error) {
 	var d Document
 	var modified, created, indexed string
-	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.MovedFromPath, &d.Signature); err != nil {
+	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.OCRStatus, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.MovedFromPath, &d.Signature); err != nil {
 		return d, err
 	}
 	d.ModifiedAt, _ = time.Parse(time.RFC3339Nano, modified)

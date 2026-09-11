@@ -123,6 +123,47 @@ GET /admin/v1/config
 
 Tokens are redacted.
 
+### Optional Content and OCR Settings
+
+```http
+PUT /admin/v1/crawler/settings
+Content-Type: application/json
+```
+
+```json
+{
+  "collect_ownership": false,
+  "content_extraction": {
+    "enabled": true,
+    "max_file_size_mb": 64
+  },
+  "ocr": {
+    "enabled": true,
+    "engine": "auto",
+    "tesseract_command": "tesseract",
+    "ocrmypdf_command": "ocrmypdf",
+    "languages": "eng",
+    "max_file_size_mb": 128,
+    "timeout_seconds": 180
+  },
+  "hashing": {
+    "enabled": false,
+    "max_file_size_mb": 2048
+  }
+}
+```
+
+OCR is an optional local post-extraction stage. When enabled alongside content
+extraction, QIndexer sends image files with no embedded text to Tesseract and
+scanned PDFs with no embedded text to OCRmyPDF in `auto` mode. It never changes
+the source file. `ocr_status` on a result is one of `not_requested`, `pending`,
+`queued`, `extracted`, `failed`, or `unsupported`. `failed` commonly means the
+selected local executable is absent, timed out, or rejected the source file.
+
+`GET /v1/capabilities` reports `ocr_search: true` only when both content
+extraction and OCR are enabled. A client may search OCR text normally once the
+result reaches `ocr_status: "extracted"`; it does not need a separate endpoint.
+
 ### Validate Config
 
 ```http

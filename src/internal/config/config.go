@@ -58,6 +58,7 @@ type CrawlerConfig struct {
 	PauseWindows                 []PauseWindow           `yaml:"pause_windows" json:"pause_windows"`
 	AdaptiveThrottle             AdaptiveThrottleConfig  `yaml:"adaptive_throttle" json:"adaptive_throttle"`
 	ContentExtraction            ContentExtractionConfig `yaml:"content_extraction" json:"content_extraction"`
+	OCR                          OCRConfig               `yaml:"ocr" json:"ocr"`
 	Hashing                      HashingConfig           `yaml:"hashing" json:"hashing"`
 }
 
@@ -66,6 +67,20 @@ type ContentExtractionConfig struct {
 	WorkerCount   int   `yaml:"worker_count" json:"worker_count"`
 	QueueSize     int   `yaml:"queue_size" json:"queue_size"`
 	MaxFileSizeMB int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+}
+
+// OCRConfig describes an optional local OCR sidecar. Commands stay configurable
+// so a QIndexer build can run unchanged on Windows, Linux, and NAS hosts.
+type OCRConfig struct {
+	Enabled          bool   `yaml:"enabled" json:"enabled"`
+	Engine           string `yaml:"engine" json:"engine"`
+	TesseractCommand string `yaml:"tesseract_command" json:"tesseract_command"`
+	OCRmyPDFCommand  string `yaml:"ocrmypdf_command" json:"ocrmypdf_command"`
+	Languages        string `yaml:"languages" json:"languages"`
+	WorkerCount      int    `yaml:"worker_count" json:"worker_count"`
+	QueueSize        int    `yaml:"queue_size" json:"queue_size"`
+	MaxFileSizeMB    int64  `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+	TimeoutSeconds   int    `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 
 type HashingConfig struct {
@@ -198,6 +213,30 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.ContentExtraction.MaxFileSizeMB <= 0 {
 		c.Crawler.ContentExtraction.MaxFileSizeMB = 64
 	}
+	if c.Crawler.OCR.Engine == "" {
+		c.Crawler.OCR.Engine = "auto"
+	}
+	if c.Crawler.OCR.TesseractCommand == "" {
+		c.Crawler.OCR.TesseractCommand = "tesseract"
+	}
+	if c.Crawler.OCR.OCRmyPDFCommand == "" {
+		c.Crawler.OCR.OCRmyPDFCommand = "ocrmypdf"
+	}
+	if c.Crawler.OCR.Languages == "" {
+		c.Crawler.OCR.Languages = "eng"
+	}
+	if c.Crawler.OCR.WorkerCount <= 0 {
+		c.Crawler.OCR.WorkerCount = 1
+	}
+	if c.Crawler.OCR.QueueSize <= 0 {
+		c.Crawler.OCR.QueueSize = 100
+	}
+	if c.Crawler.OCR.MaxFileSizeMB <= 0 {
+		c.Crawler.OCR.MaxFileSizeMB = 128
+	}
+	if c.Crawler.OCR.TimeoutSeconds <= 0 {
+		c.Crawler.OCR.TimeoutSeconds = 180
+	}
 	if c.Crawler.Hashing.WorkerCount <= 0 {
 		c.Crawler.Hashing.WorkerCount = 1
 	}
@@ -234,6 +273,10 @@ func (c *Config) applyDefaults() {
 func (c *Config) ApplyDefaults() { c.applyDefaults() }
 
 func (c *Config) Validate() error {
+	engine := strings.ToLower(strings.TrimSpace(c.Crawler.OCR.Engine))
+	if engine != "" && engine != "auto" && engine != "tesseract" && engine != "ocrmypdf" {
+		return fmt.Errorf("invalid OCR engine %q; expected auto, tesseract, or ocrmypdf", c.Crawler.OCR.Engine)
+	}
 	ids := map[string]bool{}
 	for _, root := range c.Roots {
 		if strings.TrimSpace(root.ID) == "" {

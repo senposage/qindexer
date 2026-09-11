@@ -268,6 +268,13 @@
           <div class="rules-grid">
             <label class="check-row"><input id="settings-extraction" type="checkbox"><span>Extract Office, PDF, and text content</span></label>
             <label>Extraction file limit (MB)<input id="settings-extraction-size" type="number" min="1" step="1"></label>
+            <label class="check-row"><input id="settings-ocr" type="checkbox"><span>OCR scanned PDFs and images</span></label>
+            <label>OCR engine<select id="settings-ocr-engine"><option value="auto">Automatic: OCRmyPDF for PDFs, Tesseract for images</option><option value="tesseract">Tesseract images only</option><option value="ocrmypdf">OCRmyPDF PDFs only</option></select></label>
+            <label>OCR language(s)<input id="settings-ocr-languages" type="text" placeholder="eng"></label>
+            <label>OCR file limit (MB)<input id="settings-ocr-size" type="number" min="1" step="1"></label>
+            <label>OCR timeout (seconds)<input id="settings-ocr-timeout" type="number" min="10" step="1"></label>
+            <label>Tesseract command<input id="settings-tesseract-command" type="text" placeholder="tesseract"></label>
+            <label>OCRmyPDF command<input id="settings-ocrmypdf-command" type="text" placeholder="ocrmypdf"></label>
             <label class="check-row"><input id="settings-hashing" type="checkbox"><span>Calculate SHA-256 hashes</span></label>
             <label>Hash file limit (MB)<input id="settings-hashing-size" type="number" min="1" step="1"></label>
             <label class="check-row"><input id="settings-ownership" type="checkbox"><span>Collect filesystem owner metadata</span></label>

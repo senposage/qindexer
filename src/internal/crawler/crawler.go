@@ -44,6 +44,7 @@ type Crawler struct {
 	pressureMu   sync.RWMutex
 	pressure     adaptivePressure
 	contentJobs  chan backgroundJob
+	ocrJobs      chan backgroundJob
 	hashJobs     chan backgroundJob
 }
 
@@ -61,7 +62,7 @@ type adaptivePressure struct {
 }
 
 func New(cfg *config.Config, cat *catalog.Catalog, log *slog.Logger) *Crawler {
-	return &Crawler{cfg: cfg, cat: cat, log: log, run: map[string]bool{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, cfg.Crawler.ContentExtraction.QueueSize), hashJobs: make(chan backgroundJob, cfg.Crawler.Hashing.QueueSize)}
+	return &Crawler{cfg: cfg, cat: cat, log: log, run: map[string]bool{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, cfg.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, cfg.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, cfg.Crawler.Hashing.QueueSize)}
 }
 
 type Stats struct {
@@ -221,6 +222,20 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 			} else {
 				for _, item := range items {
 					c.contentJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
+				}
+			}
+		}
+	}
+	ocr := c.cfg.Crawler.OCR
+	if ocr.Enabled {
+		available := cap(c.ocrJobs) - len(c.ocrJobs)
+		if available > 0 {
+			items, err := c.cat.ClaimPendingOCR(ctx, available, ocr.MaxFileSizeMB<<20)
+			if err != nil {
+				c.log.Debug("OCR queue refill failed", "error", err)
+			} else {
+				for _, item := range items {
+					c.ocrJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
 				}
 			}
 		}
@@ -910,6 +925,9 @@ func (c *Crawler) startBackgroundWorkers(ctx context.Context) {
 	for i := 0; i < c.cfg.Crawler.ContentExtraction.WorkerCount; i++ {
 		go c.contentWorker(ctx)
 	}
+	for i := 0; i < c.cfg.Crawler.OCR.WorkerCount; i++ {
+		go c.ocrWorker(ctx)
+	}
 	for i := 0; i < c.cfg.Crawler.Hashing.WorkerCount; i++ {
 		go c.hashWorker(ctx)
 	}
@@ -932,6 +950,38 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			}
 			if err := c.cat.UpdateExtractedContent(ctx, job.id, job.signature, status, text); err != nil {
 				c.log.Debug("content update failed", "path", job.path, "error", err)
+				continue
+			}
+			if err == nil && strings.TrimSpace(text) == "" && c.cfg.Crawler.OCR.Enabled && extract.OCREligible(job.path) {
+				if updateErr := c.cat.UpdateOCRStatus(ctx, job.id, job.signature, "pending"); updateErr != nil {
+					c.log.Debug("OCR pending update failed", "path", job.path, "error", updateErr)
+				}
+			}
+		}
+	}
+}
+
+func (c *Crawler) ocrWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-c.ocrJobs:
+			if c.waitIfPaused(ctx) != nil {
+				return
+			}
+			settings := c.cfg.Crawler.OCR
+			jobCtx, cancel := context.WithTimeout(ctx, time.Duration(settings.TimeoutSeconds)*time.Second)
+			status, text, err := extract.OCR(jobCtx, job.path, extract.OCROptions{
+				Engine: settings.Engine, TesseractCommand: settings.TesseractCommand,
+				OCRmyPDFCommand: settings.OCRmyPDFCommand, Languages: settings.Languages,
+			})
+			cancel()
+			if err != nil {
+				c.log.Debug("OCR failed", "path", job.path, "engine", settings.Engine, "error", err)
+			}
+			if err := c.cat.UpdateOCRContent(ctx, job.id, job.signature, status, text); err != nil {
+				c.log.Debug("OCR update failed", "path", job.path, "error", err)
 			}
 		}
 	}
