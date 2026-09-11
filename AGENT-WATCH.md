@@ -345,3 +345,12 @@ Full reconciliation now detects a move only when a newly active path and one
 missing path from the same root have exactly one matching completed SHA-256.
 The new result includes `moved_from_path`; ambiguous duplicate hashes are left
 as independent files.
+
+## 2026-09-10 Live File Verification
+
+`D:\zankyo.docx` exists as a normal 13,367-byte `.docx` at the `drive-d` root
+and is not excluded by its configured rules. Live QIndexer verification with
+`query: "zankyo"`, `roots: ["drive-d"]`, and `include_paths: ["D:\\"]`
+returned exactly one active result at `D:\zankyo.docx`. If it is absent in the
+desktop UI, inspect QSurfer's received provider page and its local merged/scope
+filter rather than recrawling the service.
