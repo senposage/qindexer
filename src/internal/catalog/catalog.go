@@ -43,6 +43,7 @@ type Document struct {
 	HashStatus         string              `json:"hash_status,omitempty"`
 	Owner              string              `json:"owner,omitempty"`
 	AccessStatus       string              `json:"access_status"`
+	MovedFromPath      string              `json:"moved_from_path,omitempty"`
 	Signature          string              `json:"-"`
 	Score              float64             `json:"score,omitempty"`
 	MatchedFields      []string            `json:"matched_fields,omitempty"`
@@ -188,6 +189,7 @@ func (c *Catalog) migrate(ctx context.Context) error {
 			hash_status TEXT NOT NULL DEFAULT 'not_hashed',
 			owner TEXT NOT NULL DEFAULT '',
 			access_status TEXT NOT NULL DEFAULT 'metadata_readable',
+			moved_from_path TEXT NOT NULL DEFAULT '',
 			is_folder INTEGER NOT NULL DEFAULT 0,
 			signature TEXT NOT NULL,
 			missing_count INTEGER NOT NULL DEFAULT 0,
@@ -245,6 +247,9 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := c.ensureColumn(ctx, "documents", "access_status", "TEXT NOT NULL DEFAULT 'metadata_readable'"); err != nil {
+		return err
+	}
+	if err := c.ensureColumn(ctx, "documents", "moved_from_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := c.ensureColumn(ctx, "documents", "content_text", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -394,14 +399,24 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 		created = doc.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
+		movedFromPath := ""
+		var movedID string
+		if moveErr := c.db.QueryRowContext(ctx, `SELECT id, path FROM documents WHERE root_id = ? AND signature = ? AND status = 'missing' ORDER BY last_indexed_at DESC LIMIT 1`, doc.RootID, doc.Signature).Scan(&movedID, &movedFromPath); moveErr == nil {
+			doc.MovedFromPath = movedFromPath
+		}
 		tx, err := c.db.BeginTx(ctx, nil)
 		if err != nil {
 			return UpsertResult{}, err
 		}
 		defer tx.Rollback()
-		_, err = tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, content_text, content_hash, hash_status, owner, access_status, is_folder, signature, missing_count)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', '', '', 'not_hashed', ?, ?, ?, ?, 0)`,
-			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature)
+		if movedID != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'moved' WHERE id = ?`, movedID); err != nil {
+				return UpsertResult{}, err
+			}
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, content_text, content_hash, hash_status, owner, access_status, moved_from_path, is_folder, signature, missing_count)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
+			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature)
 		if err != nil {
 			return UpsertResult{}, err
 		}
@@ -677,7 +692,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.signature
+	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.moved_from_path, d.signature
 		FROM ` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	args = append(args, limit+1, req.Offset)
 	rows, err := c.db.QueryContext(ctx, query, args...)
@@ -876,7 +891,7 @@ type documentScanner interface {
 func scanDocument(row documentScanner) (Document, error) {
 	var d Document
 	var modified, created, indexed string
-	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.Signature); err != nil {
+	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.MovedFromPath, &d.Signature); err != nil {
 		return d, err
 	}
 	d.ModifiedAt, _ = time.Parse(time.RFC3339Nano, modified)

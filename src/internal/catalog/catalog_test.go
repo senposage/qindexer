@@ -120,3 +120,33 @@ func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 		t.Fatalf("child include did not override parent exclusion: %#v", resp.Results)
 	}
 }
+
+func TestNewPathReportsWatcherDetectedMove(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	oldPath, newPath := `D:\Old\report.docx`, `D:\New\report.docx`
+	base := Document{RootID: "drive-d", Extension: "docx", Size: 2, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(2, modified)}
+	base.ID, base.Path, base.NormalizedPath, base.Name = "old", oldPath, NormalizePath(oldPath), filepath.Base(oldPath)
+	if _, err := cat.UpsertDocument(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.MarkPathMissing(ctx, "drive-d", oldPath); err != nil {
+		t.Fatal(err)
+	}
+	base.ID, base.Path, base.NormalizedPath, base.Name = "new", newPath, NormalizePath(newPath), filepath.Base(newPath)
+	if _, err := cat.UpsertDocument(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Filters: SearchFilters{Roots: []string{"drive-d"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].MovedFromPath != oldPath {
+		t.Fatalf("move relationship missing: %#v", resp.Results)
+	}
+}

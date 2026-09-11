@@ -241,3 +241,8 @@ to the canonical service path and its root ID is added to the filter. Multiple
 selected scopes across multiple roots are supported. Ambiguous aliases and
 caller root-filter conflicts return `400 invalid_path_scope`; raw `query` text
 is never rewritten. Child include paths override parent exclusions.
+
+Search results now distinguish service-observed `metadata_readable`,
+`inaccessible`, and `missing` access states. For watcher-driven remove/create
+flows, a same-signature replacement result includes `moved_from_path`; QIndexer
+does not infer moves from ordinary duplicate files.
