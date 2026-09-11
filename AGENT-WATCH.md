@@ -230,6 +230,42 @@ path-segment-aware and deterministic.
    the returned roots/aliases and the requested canonical scope in diagnostics
    or trace logs, with secrets excluded.
 
+## 2026-09-10 Live Protocol Failure Report From QSurfer
+
+This is a live failure against the running service binary, not a desktop UI
+failure. QSurfer is configured to reach the listener below:
+
+- executable: `outputs/qindexer_windows_amd64.exe`
+- address: `http://127.0.0.1:41973/v1`
+- observed process: `qindexer_windows_amd64` (PID 8608 at capture time)
+
+Observed responses from current QSurfer integration:
+
+- `GET /v1/health` returns **404 Not Found** during provider availability.
+- `GET /v1/roots` returns **404 Not Found** while resolving a selected `D:\`
+  scope.
+- `POST /v1/search` returns **405 Method Not Allowed**.
+- `POST /v1/directories` returns **405 Method Not Allowed**.
+
+Consequences: QIndexer is treated as unavailable by the composite provider;
+the NAS/Qsirch side can still return results, but a `D:\` scope gets no
+QIndexer hits and cannot be root-translated.
+
+Please reproduce against the exact Windows output binary and listener port,
+then correct the route/method registration or build/deployment mismatch. Do
+not change QSurfer to probe alternate undocumented routes. Required smoke
+test after repair (with a real bearer token):
+
+```text
+GET  /v1/health       -> 200
+GET  /v1/roots        -> 200, JSON roots array
+POST /v1/search       -> 200, JSON results array (may be empty)
+POST /v1/directories  -> 200, JSON results array (may be empty)
+```
+
+Once those endpoints are live, validate a selected `D:\` and a `D:\Child`
+scope end to end using `/v1/roots` aliases and a scoped `/v1/search` request.
+
 ## 2026-09-10 Service Scope Forwarding Update
 
 QIndexer now resolves only explicit scope fields (`path_prefix`,
@@ -246,3 +282,26 @@ Search results now distinguish service-observed `metadata_readable`,
 `inaccessible`, and `missing` access states. For watcher-driven remove/create
 flows, a same-signature replacement result includes `moved_from_path`; QIndexer
 does not infer moves from ordinary duplicate files.
+
+## 2026-09-10 Live Route Verification (Current Windows Output)
+
+The service was restarted from `outputs/qindexer_windows_amd64.exe` and smoke
+tested with the configured bearer. All of these returned HTTP 200 from the
+same running process:
+
+```text
+GET  http://127.0.0.1:41973/v1/health
+GET  http://127.0.0.1:41973/v1/roots
+POST http://127.0.0.1:41973/v1/search
+POST http://127.0.0.1:41973/v1/directories
+```
+
+An empty-query `POST /v1/search` with `include_paths: ["D:\\"]` returned
+five active `drive-d` results from a 46,974-document root. `GET /v1/roots`
+returned `drive-d`, canonical path `D:\`, and its canonical `service` alias.
+
+The earlier 404/405 report therefore did not reach this current route shape.
+Please log the final absolute request URI and method from the adapter. The
+service endpoint is `http://127.0.0.1:41973/v1`; requests must be exactly
+`GET /v1/health`, `GET /v1/roots`, and `POST /v1/{search,directories}`. Do not
+append a second `/v1`, omit it, or issue a GET for the POST-only endpoints.
