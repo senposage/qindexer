@@ -26,7 +26,7 @@ Search API:
 
 ```http
 POST /v1/search
-Authorization: Bearer local-dev-token
+Authorization: Bearer <search-token>
 Content-Type: application/json
 ```
 
@@ -47,7 +47,7 @@ On a fresh configuration, open the local UI and set a token before the search an
 
 ## Build
 
-Install Go 1.23 or newer, then:
+Install Go 1.24.1 or newer, then:
 
 ```powershell
 .\scripts\build.ps1
