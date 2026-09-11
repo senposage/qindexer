@@ -1,5 +1,6 @@
 # Local service state and operator configuration
 /outputs/
+/src/outputs/
 /work/
 **/data/
 *.db
