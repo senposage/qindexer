@@ -98,6 +98,24 @@ func TestContentMatchMetadataUsesBoundedExcerpt(t *testing.T) {
 	}
 }
 
+func TestSearchMatchesFilenamePrefix(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	doc := Document{ID: "zankyo", RootID: "drive-d", Path: `D:\zankyo.docx`, NormalizedPath: NormalizePath(`D:\zankyo.docx`), Name: "zankyo.docx", Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Query: "zan", Limit: 10}, 10)
+	if err != nil || len(resp.Results) != 1 || resp.Results[0].Path != doc.Path {
+		t.Fatalf("prefix query did not match: %#v err=%v", resp.Results, err)
+	}
+}
+
 func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

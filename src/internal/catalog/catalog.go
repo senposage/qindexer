@@ -1075,7 +1075,9 @@ func placeholders(n int) string {
 func escapeFTS(q string) string {
 	parts := strings.Fields(q)
 	for i, part := range parts {
-		parts[i] = `"` + strings.ReplaceAll(part, `"`, `""`) + `"`
+		// Quoted prefix terms preserve punctuation safety while letting a user
+		// type the beginning of a filename or path component naturally.
+		parts[i] = `"` + strings.ReplaceAll(part, `"`, `""`) + `"*`
 	}
 	return strings.Join(parts, " ")
 }
