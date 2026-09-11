@@ -180,3 +180,15 @@ opt-in; `access_status`) while filesystem/share permissions remain the final
 authority. Content extraction and SHA-256 hashing are bounded background
 pipelines, disabled by default in config, and exposed through capabilities only
 when enabled.
+
+## 2026-09-10 Client Tandem Integration Update
+
+QSurfer is changing from the early mutually-exclusive provider selector to a
+NAS/Qsirch connection plus an optional QIndexer companion connection. When both
+are configured, the desktop client queries both concurrently, merges duplicate
+canonical paths, and continues with the healthy source if the other times out
+or is unavailable. QIndexer is also valid as the only configured search source.
+
+Folder scope filtering remains client-side in this pass. The new `/v1/roots`
+canonical-path and alias contract is the right prerequisite for a later,
+unambiguous forwarding of selected include/exclude scopes.
