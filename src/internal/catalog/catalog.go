@@ -83,6 +83,13 @@ type UpsertResult struct {
 	Unchanged bool
 }
 
+type BackgroundCandidate struct {
+	ID        string
+	Path      string
+	Signature string
+	Size      int64
+}
+
 type SearchRequest struct {
 	SearchID      string        `json:"search_id,omitempty"`
 	Query         string        `json:"query"`
@@ -262,6 +269,12 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := c.ensureContentFTS(ctx); err != nil {
+		return err
+	}
+	if _, err := c.db.ExecContext(ctx, `UPDATE documents SET content_status = 'not_indexed' WHERE content_status = 'queued'`); err != nil {
+		return err
+	}
+	if _, err := c.db.ExecContext(ctx, `UPDATE documents SET hash_status = 'not_hashed' WHERE hash_status = 'queued'`); err != nil {
 		return err
 	}
 	_, err := c.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_documents_status_kind_path ON documents(status, is_folder, normalized_path)`)
@@ -489,6 +502,52 @@ func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, st
 	return err
 }
 
+func (c *Catalog) ClaimPendingContent(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "content_status", "not_indexed", "queued", limit, maxSize)
+}
+
+func (c *Catalog) ClaimPendingHashes(ctx context.Context, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", limit, maxSize)
+}
+
+func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	if limit <= 0 || maxSize <= 0 {
+		return nil, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND `+column+` = ? AND size <= ? LIMIT ?`, pending, maxSize, limit)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []BackgroundCandidate
+	for rows.Next() {
+		var item BackgroundCandidate
+		if err := rows.Scan(&item.ID, &item.Path, &item.Signature, &item.Size); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, item := range candidates {
+		if _, err := tx.ExecContext(ctx, `UPDATE documents SET `+column+` = ? WHERE id = ? AND `+column+` = ?`, claimed, item.ID, pending); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
 func (c *Catalog) MarkMissing(ctx context.Context, rootID string, generation int64, deleteAfter int) (int64, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -541,6 +600,57 @@ func (c *Catalog) MarkPathInaccessible(ctx context.Context, rootID, path string,
 	}
 	count, _ := res.RowsAffected()
 	return count, nil
+}
+
+// ReconcileMoves converts an unambiguous missing-to-active hash match into a
+// move relationship after a full crawl. Duplicate hashes are intentionally left alone.
+func (c *Catalog) ReconcileMoves(ctx context.Context, rootID string, generation int64) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT active.id, missing.id, missing.path
+		FROM documents active JOIN documents missing
+		ON missing.root_id = active.root_id AND missing.content_hash = active.content_hash
+		WHERE active.root_id = ? AND active.status = 'active' AND active.last_seen_generation = ?
+		AND active.content_hash <> '' AND active.moved_from_path = '' AND missing.status = 'missing'`, rootID, generation)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct{ activeID, missingID, missingPath string }
+	byActive := map[string][]candidate{}
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.activeID, &item.missingID, &item.missingPath); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		byActive[item.activeID] = append(byActive[item.activeID], item)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	var moved int64
+	for _, matches := range byActive {
+		if len(matches) != 1 {
+			continue
+		}
+		match := matches[0]
+		if _, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'moved' WHERE id = ?`, match.missingID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE documents SET moved_from_path = ? WHERE id = ?`, match.missingPath, match.activeID); err != nil {
+			return 0, err
+		}
+		moved++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return moved, nil
 }
 
 func (c *Catalog) MarkDirectoryCheckpoint(ctx context.Context, rootID string, path string) error {

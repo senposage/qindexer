@@ -179,6 +179,7 @@ func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
 func (c *Crawler) Loop(ctx context.Context) {
 	go c.adaptiveMonitor(ctx)
 	c.startBackgroundWorkers(ctx)
+	go c.refillBackgroundLoop(ctx)
 	ticker := time.NewTicker(c.cfg.Crawler.ScanInterval())
 	defer ticker.Stop()
 	_ = c.waitIfPaused(ctx)
@@ -192,6 +193,50 @@ func (c *Crawler) Loop(ctx context.Context) {
 				return
 			}
 			c.CrawlAll(ctx)
+		}
+	}
+}
+
+func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		c.refillBackground(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Crawler) refillBackground(ctx context.Context) {
+	content := c.cfg.Crawler.ContentExtraction
+	if content.Enabled {
+		available := cap(c.contentJobs) - len(c.contentJobs)
+		if available > 0 {
+			items, err := c.cat.ClaimPendingContent(ctx, available, content.MaxFileSizeMB<<20)
+			if err != nil {
+				c.log.Debug("content queue refill failed", "error", err)
+			} else {
+				for _, item := range items {
+					c.contentJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
+				}
+			}
+		}
+	}
+	hashing := c.cfg.Crawler.Hashing
+	if hashing.Enabled {
+		available := cap(c.hashJobs) - len(c.hashJobs)
+		if available > 0 {
+			items, err := c.cat.ClaimPendingHashes(ctx, available, hashing.MaxFileSizeMB<<20)
+			if err != nil {
+				c.log.Debug("hash queue refill failed", "error", err)
+			} else {
+				for _, item := range items {
+					c.hashJobs <- backgroundJob{id: item.ID, path: item.Path, signature: item.Signature, size: item.Size}
+				}
+			}
 		}
 	}
 }
@@ -291,6 +336,11 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig) (catalog.Cr
 		} else {
 			run.FilesMissing = missing
 			run.Status = "ok"
+			if moved, moveErr := c.cat.ReconcileMoves(ctx, root.ID, generation); moveErr != nil {
+				c.log.Warn("move reconciliation failed", "root", root.ID, "error", moveErr)
+			} else if moved > 0 {
+				c.log.Info("moves reconciled", "root", root.ID, "count", moved)
+			}
 		}
 	}
 	if err := c.cat.FinishCrawl(ctx, run); err != nil {
@@ -845,11 +895,7 @@ func (c *Crawler) indexPath(ctx context.Context, root config.RootConfig, path st
 	if c.cfg.Crawler.CollectOwnership {
 		doc.Owner = filemeta.Owner(path)
 	}
-	res, err := c.cat.UpsertDocument(ctx, doc)
-	if err == nil && (res.Added || res.Updated) && !doc.IsFolder {
-		c.enqueueBackground(doc)
-	}
-	return res, err
+	return c.cat.UpsertDocument(ctx, doc)
 }
 
 func (c *Crawler) recordPathFailure(ctx context.Context, root config.RootConfig, path string, err error, generation int64) {
@@ -858,24 +904,6 @@ func (c *Crawler) recordPathFailure(ctx context.Context, root config.RootConfig,
 		return
 	}
 	_, _ = c.cat.MarkPathInaccessible(ctx, root.ID, path, generation)
-}
-
-func (c *Crawler) enqueueBackground(doc catalog.Document) {
-	job := backgroundJob{id: doc.ID, path: doc.Path, signature: doc.Signature, size: doc.Size}
-	if c.cfg.Crawler.ContentExtraction.Enabled && job.size <= c.cfg.Crawler.ContentExtraction.MaxFileSizeMB<<20 {
-		select {
-		case c.contentJobs <- job:
-		default:
-			c.log.Debug("content queue full", "path", job.path)
-		}
-	}
-	if c.cfg.Crawler.Hashing.Enabled && job.size <= c.cfg.Crawler.Hashing.MaxFileSizeMB<<20 {
-		select {
-		case c.hashJobs <- job:
-		default:
-			c.log.Debug("hash queue full", "path", job.path)
-		}
-	}
 }
 
 func (c *Crawler) startBackgroundWorkers(ctx context.Context) {

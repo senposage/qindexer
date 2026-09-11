@@ -11,7 +11,7 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
-        <h1>QSurfer</h1>
+        <h1>QIndexer</h1>
         <p>Search service administration <span class="build">UI 0.1.6</span></p>
       </div>
     </div>
@@ -173,6 +173,10 @@
               Credential reference
               <input id="rules-credential" type="text" placeholder="os-service-account">
             </label>
+            <label class="wide-field">
+              Client path aliases
+              <textarea id="rules-aliases" spellcheck="false" placeholder="finance-x | windows-drive | X:\Finance&#10;finance-unc | windows-unc | \\nas01\finance&#10;finance-linux | linux | /mnt/finance"></textarea>
+            </label>
           </div>
         </section>
 
@@ -256,6 +260,20 @@
         <div class="panel-title">
           <h2>Configuration</h2>
         </div>
+        <form id="indexing-settings-form" class="settings-form">
+          <div class="form-section-title">
+            <p class="eyebrow">Optional indexing work</p>
+            <p>Extraction and hashing use bounded background workers and obey crawler throttling.</p>
+          </div>
+          <div class="rules-grid">
+            <label class="check-row"><input id="settings-extraction" type="checkbox"><span>Extract Office, PDF, and text content</span></label>
+            <label>Extraction file limit (MB)<input id="settings-extraction-size" type="number" min="1" step="1"></label>
+            <label class="check-row"><input id="settings-hashing" type="checkbox"><span>Calculate SHA-256 hashes</span></label>
+            <label>Hash file limit (MB)<input id="settings-hashing-size" type="number" min="1" step="1"></label>
+            <label class="check-row"><input id="settings-ownership" type="checkbox"><span>Collect filesystem owner metadata</span></label>
+          </div>
+          <div class="form-actions"><button type="submit">Save indexing settings</button></div>
+        </form>
         <pre id="config">{}</pre>
       </div>
     </section>

@@ -230,6 +230,9 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// ApplyDefaults normalizes configuration submitted through the management API.
+func (c *Config) ApplyDefaults() { c.applyDefaults() }
+
 func (c *Config) Validate() error {
 	ids := map[string]bool{}
 	for _, root := range c.Roots {

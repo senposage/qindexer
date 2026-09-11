@@ -150,3 +150,33 @@ func TestNewPathReportsWatcherDetectedMove(t *testing.T) {
 		t.Fatalf("move relationship missing: %#v", resp.Results)
 	}
 }
+
+func TestReconcileMovesUsesOnlyUnambiguousHashes(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	add := func(id, path, status, hash string, generation int64) {
+		t.Helper()
+		doc := Document{ID: id, RootID: "drive-d", Path: path, NormalizedPath: NormalizePath(path), Name: filepath.Base(path), Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: generation, Signature: Signature(1, modified) + ":" + id}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET status = ?, content_hash = ? WHERE id = ?`, status, hash, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("old", `D:\Old\a.txt`, "missing", "sha256:abc", 1)
+	add("new", `D:\New\a.txt`, "active", "sha256:abc", 2)
+	moved, err := cat.ReconcileMoves(ctx, "drive-d", 2)
+	if err != nil || moved != 1 {
+		t.Fatalf("reconcile result: moved=%d err=%v", moved, err)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Filters: SearchFilters{Roots: []string{"drive-d"}}, Limit: 10}, 10)
+	if err != nil || len(resp.Results) != 1 || resp.Results[0].MovedFromPath != `D:\Old\a.txt` {
+		t.Fatalf("move metadata missing: %#v err=%v", resp.Results, err)
+	}
+}

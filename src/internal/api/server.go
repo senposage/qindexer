@@ -73,6 +73,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("GET /admin/v1/diagnostics", s.withAdminAuth(s.diagnostics))
 	mux.HandleFunc("POST /admin/v1/crawler/pause", s.withAdminAuth(s.pauseCrawler))
 	mux.HandleFunc("POST /admin/v1/crawler/resume", s.withAdminAuth(s.resumeCrawler))
+	mux.HandleFunc("PUT /admin/v1/crawler/settings", s.withAdminAuth(s.updateCrawlerSettings))
 	mux.HandleFunc("GET /admin/v1/roots", s.withAdminAuth(s.roots))
 	mux.HandleFunc("POST /admin/v1/roots", s.withAdminAuth(s.createRoot))
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/crawl", s.withAdminAuth(s.crawlRoot))
@@ -681,6 +682,35 @@ func (s *Server) pauseCrawler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) resumeCrawler(w http.ResponseWriter, r *http.Request) {
 	s.crawler.Resume()
 	writeJSON(w, http.StatusOK, map[string]any{"status": "resumed"})
+}
+
+func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CollectOwnership  bool                           `json:"collect_ownership"`
+		ContentExtraction config.ContentExtractionConfig `json:"content_extraction"`
+		Hashing           config.HashingConfig           `json:"hashing"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	candidate := *s.cfg
+	candidate.Crawler.CollectOwnership = req.CollectOwnership
+	candidate.Crawler.ContentExtraction = req.ContentExtraction
+	candidate.Crawler.Hashing = req.Hashing
+	candidate.ApplyDefaults()
+	if err := candidate.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_crawler_settings", err.Error())
+		return
+	}
+	s.cfg.Crawler = candidate.Crawler
+	if err := config.Save(s.configPath, s.cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler})
 }
 
 func (s *Server) configValidate(w http.ResponseWriter, r *http.Request) {

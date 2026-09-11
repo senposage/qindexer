@@ -266,6 +266,15 @@ POST /v1/directories  -> 200, JSON results array (may be empty)
 Once those endpoints are live, validate a selected `D:\` and a `D:\Child`
 scope end to end using `/v1/roots` aliases and a scoped `/v1/search` request.
 
+### Resolution Note
+
+The desktop configuration had briefly been set to port **41974**, which is not
+the QIndexer search API listener. With QSurfer corrected to **41973**, the
+current service binary returns HTTP 200 for `/v1/health`, `/v1/roots`,
+`/v1/directories`, and scoped `/v1/search`. QSurfer logs
+`scope translated include=1/1` for `D:\` and receives result pages. No route
+or root-resolution change is currently required from this report.
+
 ## 2026-09-10 Service Scope Forwarding Update
 
 QIndexer now resolves only explicit scope fields (`path_prefix`,
@@ -322,3 +331,17 @@ POST /v1/search
 This returned four `drive-d` results with `matched_fields: ["path"]` and path
 highlights. The service is therefore ready for the adapter to send its final
 absolute URI/method/body trace when it sees a non-200 or zero-result response.
+
+## 2026-09-10 Extraction, Alias UI, And Move Reconciliation
+
+The QIndexer admin Configuration view now enables/disables Office/PDF/text
+extraction, SHA-256 hashing, and optional owner collection with explicit size
+limits. Enabling extraction or hashing backfills existing eligible active
+documents through bounded, restart-safe queues; it does not require a rebuild
+of the index. The per-root Rules view now edits stable client aliases as
+`alias id | platform | path` lines.
+
+Full reconciliation now detects a move only when a newly active path and one
+missing path from the same root have exactly one matching completed SHA-256.
+The new result includes `moved_from_path`; ambiguous duplicate hashes are left
+as independent files.

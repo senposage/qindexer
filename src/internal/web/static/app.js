@@ -3,10 +3,11 @@ const message = document.querySelector("#message");
 const endpoint = document.querySelector("#endpoint");
 
 const state = {
-  token: sessionStorage.getItem("qsurfer.admin.token") || "",
+  token: sessionStorage.getItem("qindexer.admin.token") || "",
   roots: [],
   editingRoot: null,
   creatingRoot: false,
+  crawler: {},
 };
 
 tokenInput.value = state.token;
@@ -14,14 +15,14 @@ endpoint.textContent = `${location.origin}/admin/v1`;
 
 document.querySelector("#save-token").addEventListener("click", () => {
   state.token = tokenInput.value.trim();
-  sessionStorage.setItem("qsurfer.admin.token", state.token);
+  sessionStorage.setItem("qindexer.admin.token", state.token);
   refresh();
 });
 
 document.querySelector("#clear-token").addEventListener("click", () => {
   state.token = "";
   tokenInput.value = "";
-  sessionStorage.removeItem("qsurfer.admin.token");
+  sessionStorage.removeItem("qindexer.admin.token");
   setMessage("Token cleared");
 });
 
@@ -37,6 +38,7 @@ document.querySelector("#close-validation").addEventListener("click", closeValid
 document.querySelector("#rules-form").addEventListener("submit", saveRules);
 document.querySelector("#add-root").addEventListener("click", openNewRoot);
 document.querySelector("#bootstrap-form").addEventListener("submit", bootstrapAdmin);
+document.querySelector("#indexing-settings-form").addEventListener("submit", saveIndexingSettings);
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -87,6 +89,8 @@ async function refresh() {
     renderMetrics(metrics);
     renderRoots(roots.roots || []);
     renderCrawls(crawls.crawls || []);
+    state.crawler = config.crawler || {};
+    renderIndexingSettings(state.crawler);
     document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
     setMessage("Ready");
   } catch (err) {
@@ -111,7 +115,7 @@ async function bootstrapAdmin(event) {
     await api("/admin/v1/bootstrap", { method: "POST", body: JSON.stringify({ token }) });
     state.token = token;
     tokenInput.value = token;
-    sessionStorage.setItem("qsurfer.admin.token", token);
+    sessionStorage.setItem("qindexer.admin.token", token);
     document.querySelector("#bootstrap-token").value = "";
     document.querySelector("#bootstrap-confirm").value = "";
     document.querySelector("#bootstrap-panel").classList.add("hidden");
@@ -190,6 +194,7 @@ function openRules(rootId) {
   document.querySelector("#rules-enabled").checked = Boolean(root.enabled);
   document.querySelector("#rules-labels").value = (root.labels || []).join(", ");
   document.querySelector("#rules-credential").value = root.credential_ref || "";
+  document.querySelector("#rules-aliases").value = aliasLines(root.path_aliases);
   document.querySelector("#rules-include-ext").value = lines(root.include_extensions);
   document.querySelector("#rules-exclude-ext").value = lines(root.exclude_extensions);
   document.querySelector("#rules-include-file").value = lines(root.include_file_patterns);
@@ -212,6 +217,7 @@ function openNewRoot() {
   document.querySelector("#rules-enabled").checked = true;
   document.querySelector("#rules-labels").value = "";
   document.querySelector("#rules-credential").value = "";
+  document.querySelector("#rules-aliases").value = "";
   document.querySelector("#rules-include-ext").value = "";
   document.querySelector("#rules-exclude-ext").value = "";
   document.querySelector("#rules-include-file").value = "";
@@ -240,6 +246,7 @@ async function saveRules(event) {
     enabled: document.querySelector("#rules-enabled").checked,
     labels: splitList(document.querySelector("#rules-labels").value),
     credential_ref: document.querySelector("#rules-credential").value.trim(),
+    path_aliases: parseAliases(document.querySelector("#rules-aliases").value),
     include_extensions: splitList(document.querySelector("#rules-include-ext").value),
     exclude_extensions: splitList(document.querySelector("#rules-exclude-ext").value),
     include_file_patterns: splitList(document.querySelector("#rules-include-file").value),
@@ -259,6 +266,28 @@ async function saveRules(event) {
   } catch (err) {
     setMessage(err.message);
   }
+}
+
+function renderIndexingSettings(crawler) {
+  const extraction = crawler.content_extraction || {};
+  const hashing = crawler.hashing || {};
+  document.querySelector("#settings-extraction").checked = Boolean(extraction.enabled);
+  document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
+  document.querySelector("#settings-hashing").checked = Boolean(hashing.enabled);
+  document.querySelector("#settings-hashing-size").value = hashing.max_file_size_mb || 2048;
+  document.querySelector("#settings-ownership").checked = Boolean(crawler.collect_ownership);
+}
+
+async function saveIndexingSettings(event) {
+  event.preventDefault();
+  const crawler = state.crawler || {};
+  const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64 };
+  const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
+  try {
+    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, content_extraction: content, hashing }) });
+    setMessage("Indexing settings saved");
+    refresh();
+  } catch (err) { setMessage(err.message); }
 }
 
 function renderCrawls(crawls) {
@@ -359,6 +388,14 @@ function lines(values = []) {
   return array(values).join("\n");
 }
 
+function aliasLines(values = []) {
+  return array(values).map((alias) => [alias.id || "", alias.platform || "", alias.path || ""].join(" | ")).join("\n");
+}
+
+function parseAliases(value) {
+  return value.split("\n").map((line) => line.split("|").map((part) => part.trim())).filter((parts) => parts.length === 3 && parts[1] && parts[2]).map(([id, platform, path]) => ({ id, platform, path }));
+}
+
 function array(values) {
   return Array.isArray(values) ? values : [];
 }
@@ -374,6 +411,7 @@ function normalizeRoot(root) {
     include_folder_patterns: array(root.include_folder_patterns),
     exclude_folder_patterns: array(root.exclude_folder_patterns),
     exclude_patterns: array(root.exclude_patterns),
+    path_aliases: array(root.path_aliases),
   };
 }
 
