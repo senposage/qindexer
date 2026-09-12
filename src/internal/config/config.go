@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,14 +23,16 @@ type Config struct {
 
 type ServerConfig struct {
 	Bind          string     `yaml:"bind" json:"bind"`
+	BindAddresses []string   `yaml:"bind_addresses" json:"bind_addresses"`
 	PublicBaseURL string     `yaml:"public_base_url" json:"public_base_url"`
 	Auth          AuthConfig `yaml:"auth" json:"auth"`
 }
 
 type ManagementConfig struct {
-	Enabled bool       `yaml:"enabled" json:"enabled"`
-	Bind    string     `yaml:"bind" json:"bind"`
-	Auth    AuthConfig `yaml:"auth" json:"auth"`
+	Enabled       bool       `yaml:"enabled" json:"enabled"`
+	Bind          string     `yaml:"bind" json:"bind"`
+	BindAddresses []string   `yaml:"bind_addresses" json:"bind_addresses"`
+	Auth          AuthConfig `yaml:"auth" json:"auth"`
 }
 
 type AuthConfig struct {
@@ -136,6 +139,7 @@ type PathAlias struct {
 	ID       string `yaml:"id" json:"id,omitempty"`
 	Platform string `yaml:"platform" json:"platform"`
 	Path     string `yaml:"path" json:"path"`
+	Target   string `yaml:"target,omitempty" json:"target,omitempty"`
 }
 
 func (r RootConfig) FriendlyName() string {
@@ -195,9 +199,11 @@ func (c *Config) applyDefaults() {
 	if c.Server.Bind == "" {
 		c.Server.Bind = "127.0.0.1:41973"
 	}
+	c.Server.BindAddresses = normalizeBindAddresses(c.Server.Bind, c.Server.BindAddresses)
 	if c.Management.Bind == "" {
 		c.Management.Bind = "127.0.0.1:41974"
 	}
+	c.Management.BindAddresses = normalizeBindAddresses(c.Management.Bind, c.Management.BindAddresses)
 	if c.Index.DataDir == "" {
 		c.Index.DataDir = "data"
 	}
@@ -208,7 +214,7 @@ func (c *Config) applyDefaults() {
 		c.Index.MaxResults = 200
 	}
 	if c.Crawler.ScanIntervalSeconds <= 0 {
-		c.Crawler.ScanIntervalSeconds = 300
+		c.Crawler.ScanIntervalSeconds = 21600
 	}
 	if c.Crawler.RootParallelism <= 0 {
 		c.Crawler.RootParallelism = 1
@@ -286,7 +292,7 @@ func (c *Config) applyDefaults() {
 		c.Watcher.DebounceMilliseconds = 1500
 	}
 	if c.Watcher.MaxWatchedDirectories <= 0 {
-		c.Watcher.MaxWatchedDirectories = 25000
+		c.Watcher.MaxWatchedDirectories = 5000
 	}
 	if c.Watcher.MaxDirtyPathsPerFlush <= 0 {
 		c.Watcher.MaxDirtyPathsPerFlush = 500
@@ -297,6 +303,12 @@ func (c *Config) applyDefaults() {
 func (c *Config) ApplyDefaults() { c.applyDefaults() }
 
 func (c *Config) Validate() error {
+	if err := validateBindAddresses("server", c.Server.BindAddresses); err != nil {
+		return err
+	}
+	if err := validateBindAddresses("management", c.Management.BindAddresses); err != nil {
+		return err
+	}
 	engine := strings.ToLower(strings.TrimSpace(c.Crawler.OCR.Engine))
 	if engine != "" && engine != "auto" && engine != "tesseract" && engine != "ocrmypdf" {
 		return fmt.Errorf("invalid OCR engine %q; expected auto, tesseract, or ocrmypdf", c.Crawler.OCR.Engine)
@@ -330,7 +342,45 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func normalizeBindAddresses(primary string, values []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	add(primary)
+	for _, value := range values {
+		add(value)
+	}
+	return out
+}
+
+func validateBindAddresses(name string, values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("%s bind_addresses must contain at least one address", name)
+	}
+	for _, value := range values {
+		host, port, err := net.SplitHostPort(value)
+		if err != nil {
+			return fmt.Errorf("%s bind address %q must be host:port", name, value)
+		}
+		if port == "" {
+			return fmt.Errorf("%s bind address %q must include a port", name, value)
+		}
+		if strings.TrimSpace(host) == "" {
+			return fmt.Errorf("%s bind address %q must include a host; use 0.0.0.0 for all IPv4 interfaces", name, value)
+		}
+	}
+	return nil
+}
+
 func Save(path string, cfg *Config) error {
+	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}

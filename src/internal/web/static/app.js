@@ -8,6 +8,7 @@ const state = {
   editingRoot: null,
   creatingRoot: false,
   crawler: {},
+  network: {},
 };
 
 tokenInput.value = state.token;
@@ -30,6 +31,7 @@ document.querySelector("#refresh").addEventListener("click", refresh);
 document.querySelector("#validate-config").addEventListener("click", validateConfig);
 document.querySelector("#pause-crawler").addEventListener("click", pauseCrawler);
 document.querySelector("#resume-crawler").addEventListener("click", resumeCrawler);
+document.querySelector("#stop-service").addEventListener("click", stopService);
 document.querySelector("#view-roots").addEventListener("click", () => showView("roots"));
 document.querySelector("#view-config").addEventListener("click", () => showView("config"));
 document.querySelector("#close-rules").addEventListener("click", closeRules);
@@ -38,6 +40,7 @@ document.querySelector("#close-validation").addEventListener("click", closeValid
 document.querySelector("#rules-form").addEventListener("submit", saveRules);
 document.querySelector("#add-root").addEventListener("click", openNewRoot);
 document.querySelector("#bootstrap-form").addEventListener("submit", bootstrapAdmin);
+document.querySelector("#network-settings-form").addEventListener("submit", saveNetworkSettings);
 document.querySelector("#indexing-settings-form").addEventListener("submit", saveIndexingSettings);
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
@@ -47,10 +50,14 @@ document.querySelector("#roots").addEventListener("click", (event) => {
     openRules(root);
   } else if (button.dataset.action === "validate") {
     validateRoot(root);
+  } else if (button.dataset.action === "repair") {
+    repairRootIndex(root, { button });
   } else if (button.dataset.action === "crawl") {
     crawlRoot(root);
   } else if (button.dataset.action === "clear") {
     clearRootIndex(root);
+  } else if (button.dataset.action === "delete") {
+    deleteRoot(root);
   }
 });
 
@@ -65,6 +72,7 @@ function headers() {
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers: { ...headers(), ...(options.headers || {}) },
   });
   const text = await res.text();
@@ -77,9 +85,9 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function refresh() {
+async function refresh(options = {}) {
   try {
-    setMessage("Refreshing...");
+    if (!options.quiet) setMessage("Refreshing...");
     const [service, roots, crawls, config, metrics] = await Promise.all([
       api("/admin/v1/service"),
       api("/admin/v1/roots"),
@@ -92,9 +100,11 @@ async function refresh() {
     renderRoots(roots.roots || []);
     renderCrawls(crawls.crawls || []);
     state.crawler = config.crawler || {};
+    state.network = { server: config.server || {}, management: config.management || {} };
+    renderNetworkSettings(state.network);
     renderIndexingSettings(state.crawler);
     document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
-    setMessage("Ready");
+    setMessage(options.message || "Ready");
   } catch (err) {
     if (err.code === "admin_setup_required") {
       showBootstrap();
@@ -135,6 +145,7 @@ function renderMetrics(metrics) {
   document.querySelector("#files-rate").textContent = formatRate(metrics.files_per_second || 0);
   document.querySelector("#dirs-rate").textContent = formatRate(metrics.directories_per_second || 0);
   document.querySelector("#io-rate").textContent = `${formatBytes(metrics.bytes_per_second || 0)}/s`;
+  document.querySelector("#index-size").textContent = formatBytes(metrics.index_size_bytes || 0);
   const active = metrics.active_crawls || 0;
   if (metrics.adaptive_paused) {
     document.querySelector("#crawler-state").textContent = `Throttled: ${String(metrics.pause_reason || "system").replace("adaptive_", "")}`;
@@ -175,8 +186,10 @@ function renderRoots(roots) {
         <div class="action-group">
           <button type="button" class="secondary" data-action="rules" data-root="${escapeAttr(root.id)}">Rules</button>
           <button type="button" class="secondary" data-action="validate" data-root="${escapeAttr(root.id)}">Validate</button>
+          <button type="button" class="secondary" data-action="repair" data-root="${escapeAttr(root.id)}">Repair index</button>
           <button type="button" data-action="crawl" data-root="${escapeAttr(root.id)}">Crawl</button>
           <button type="button" class="danger" data-action="clear" data-root="${escapeAttr(root.id)}">Clear index</button>
+          <button type="button" class="danger" data-action="delete" data-root="${escapeAttr(root.id)}">Delete root</button>
         </div>
       </td>
     `;
@@ -190,6 +203,7 @@ function openRules(rootId) {
   state.editingRoot = root;
   state.creatingRoot = false;
   document.querySelector("#rules-title").textContent = `Index Rules: ${root.id}`;
+  document.querySelector("#save-repair-rules").classList.remove("hidden");
   document.querySelector("#rules-id").value = root.id;
   document.querySelector("#rules-id").disabled = true;
   document.querySelector("#rules-name").value = root.name || "";
@@ -217,6 +231,7 @@ function openNewRoot() {
   state.editingRoot = null;
   state.creatingRoot = true;
   document.querySelector("#rules-title").textContent = "Add indexed root";
+  document.querySelector("#save-repair-rules").classList.add("hidden");
   document.querySelector("#rules-id").value = "";
   document.querySelector("#rules-id").disabled = false;
   document.querySelector("#rules-name").value = "";
@@ -249,6 +264,7 @@ function closeRules() {
 async function saveRules(event) {
   event.preventDefault();
   if (!state.editingRoot && !state.creatingRoot) return;
+  const repairAfterSave = event.submitter?.id === "save-repair-rules" && !state.creatingRoot;
   const rootId = state.creatingRoot ? document.querySelector("#rules-id").value.trim() : state.editingRoot.id;
   const body = {
     id: rootId,
@@ -275,9 +291,13 @@ async function saveRules(event) {
       method: state.creatingRoot ? "POST" : "PUT",
       body: JSON.stringify(body),
     });
-    setMessage(`${rootId}: ${data.status}`);
+    if (repairAfterSave) {
+      const repair = await repairRootIndex(rootId, { confirm: false, refreshAfter: false });
+      await refresh({ quiet: true, message: `${rootId}: saved, repaired ${repair.paths_rewritten || 0}, merged ${repair.duplicate_paths_merged || 0}` });
+    } else {
+      await refresh({ quiet: true, message: `${rootId}: ${data.status}` });
+    }
     closeRules();
-    refresh();
   } catch (err) {
     setMessage(err.message);
   }
@@ -301,6 +321,37 @@ function renderIndexingSettings(crawler) {
   document.querySelector("#settings-ownership").checked = Boolean(crawler.collect_ownership);
 }
 
+function renderNetworkSettings(network) {
+  const server = network.server || {};
+  const management = network.management || {};
+  document.querySelector("#settings-search-binds").value = lines(server.bind_addresses?.length ? server.bind_addresses : [server.bind || "127.0.0.1:41973"]);
+  document.querySelector("#settings-admin-binds").value = lines(management.bind_addresses?.length ? management.bind_addresses : [management.bind || "127.0.0.1:41974"]);
+  document.querySelector("#settings-public-url").value = server.public_base_url || "";
+  document.querySelector("#settings-admin-enabled").checked = management.enabled !== false;
+}
+
+async function saveNetworkSettings(event) {
+  event.preventDefault();
+  const serverBinds = splitLines(document.querySelector("#settings-search-binds").value);
+  const adminBinds = splitLines(document.querySelector("#settings-admin-binds").value);
+  const body = {
+    server: {
+      bind_addresses: serverBinds,
+      public_base_url: document.querySelector("#settings-public-url").value.trim(),
+    },
+    management: {
+      enabled: document.querySelector("#settings-admin-enabled").checked,
+      bind_addresses: adminBinds,
+    },
+  };
+  try {
+    const data = await api("/admin/v1/network", { method: "PUT", body: JSON.stringify(body) });
+    await refresh({ quiet: true, message: data.restart_required ? "Network settings saved; restart required" : "Network settings saved" });
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
 async function saveIndexingSettings(event) {
   event.preventDefault();
   const crawler = state.crawler || {};
@@ -309,8 +360,7 @@ async function saveIndexingSettings(event) {
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   try {
     await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, content_extraction: content, ocr, hashing }) });
-    setMessage("Indexing settings saved");
-    refresh();
+    await refresh({ quiet: true, message: "Indexing settings saved" });
   } catch (err) { setMessage(err.message); }
 }
 
@@ -318,20 +368,34 @@ function renderCrawls(crawls) {
   const list = document.querySelector("#crawls");
   list.innerHTML = "";
   if (!crawls.length) {
-    list.innerHTML = `<div class="list-item"><strong>No crawls yet</strong><span>Trigger a root crawl to populate history.</span></div>`;
+    list.innerHTML = `<div class="activity-empty"><strong>No crawls yet</strong><span>Trigger a root crawl to populate history.</span></div>`;
     return;
   }
   for (const crawl of crawls) {
     const item = document.createElement("div");
-    item.className = "list-item";
+    item.className = "activity-item";
+    const status = crawl.status || "unknown";
     item.innerHTML = `
-      <strong>${escapeHtml(crawl.root_id)} <span class="tag ${statusTone(crawl.status)}">${escapeHtml(crawl.status)}</span></strong>
-      <span class="crawl-meta">Seen ${crawl.files_seen} &middot; Added ${crawl.files_added} &middot; Updated ${crawl.files_updated} &middot; Missing ${crawl.files_missing} &middot; Errors ${crawl.errors}</span>
-      <span class="crawl-time">${escapeHtml(formatTimestamp(crawl.started_at || ""))}</span>
-      ${crawl.error_message ? `<span>${escapeHtml(crawl.error_message)}</span>` : ""}
+      <div class="activity-main">
+        <strong>${escapeHtml(crawl.root_id)}</strong>
+        <span class="crawl-time">${escapeHtml(formatTimestamp(crawl.started_at || ""))}</span>
+        ${crawl.error_message ? `<span class="crawl-error">${escapeHtml(crawl.error_message)}</span>` : ""}
+      </div>
+      <div class="activity-status"><span class="tag ${statusTone(status)}">${escapeHtml(status)}</span></div>
+      <div class="activity-stats" aria-label="crawl totals">
+        ${crawlStat("Seen", crawl.files_seen)}
+        ${crawlStat("Added", crawl.files_added)}
+        ${crawlStat("Updated", crawl.files_updated)}
+        ${crawlStat("Missing", crawl.files_missing)}
+        ${crawlStat("Errors", crawl.errors)}
+      </div>
     `;
     list.appendChild(item);
   }
+}
+
+function crawlStat(label, value) {
+  return `<span><b>${Number(value || 0).toLocaleString()}</b>${label}</span>`;
 }
 
 async function validateConfig() {
@@ -347,8 +411,7 @@ async function pauseCrawler() {
   const seconds = Number(document.querySelector("#pause-seconds").value) || 300;
   try {
     const data = await api("/admin/v1/crawler/pause", { method: "POST", body: JSON.stringify({ seconds }) });
-    setMessage(`Crawler paused until ${new Date((data.paused_until_unix || 0) * 1000).toLocaleTimeString()}`);
-    refresh();
+    await refresh({ quiet: true, message: `Crawler paused until ${new Date((data.paused_until_unix || 0) * 1000).toLocaleTimeString()}` });
   } catch (err) {
     setMessage(err.message);
   }
@@ -357,8 +420,17 @@ async function pauseCrawler() {
 async function resumeCrawler() {
   try {
     const data = await api("/admin/v1/crawler/resume", { method: "POST", body: "{}" });
-    setMessage(`Crawler ${data.status}`);
-    refresh();
+    await refresh({ quiet: true, message: `Crawler ${data.status}` });
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
+async function stopService() {
+  if (!window.confirm("Stop QIndexer now? Active crawls will checkpoint what has completed, database writes will flush, and the process will exit.")) return;
+  try {
+    const data = await api("/admin/v1/service/stop", { method: "POST", body: "{}" });
+    setMessage(data.crawls_stopped ? "Stopping service..." : "Stopping service; waiting on slow filesystem calls");
   } catch (err) {
     setMessage(err.message);
   }
@@ -378,8 +450,8 @@ async function validateRoot(root) {
 async function crawlRoot(root) {
   try {
     const data = await api(`/admin/v1/roots/${encodeURIComponent(root)}/crawl`, { method: "POST", body: "{}" });
-    setMessage(`${root}: ${data.status}`);
-    setTimeout(refresh, 1200);
+    await refresh({ quiet: true, message: `${root}: ${data.status}` });
+    setTimeout(() => refresh({ quiet: true }), 1200);
   } catch (err) {
     setMessage(err.message);
   }
@@ -390,8 +462,60 @@ async function clearRootIndex(root) {
   try {
     const data = await api(`/admin/v1/roots/${encodeURIComponent(root)}/clear-index`, { method: "POST", body: JSON.stringify({ confirm_root_id: root }) });
     const count = data.documents_removed || 0;
-    setMessage(`${root}: cleared ${count} indexed document${count === 1 ? "" : "s"}`);
-    refresh();
+    await refresh({ quiet: true, message: `${root}: cleared ${count} indexed document${count === 1 ? "" : "s"}` });
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
+async function repairRootIndex(root, options = {}) {
+  const confirmRepair = options.confirm !== false;
+  if (confirmRepair && !window.confirm(`Repair indexed paths for ${root}? This rewrites rows that match this root's aliases into the root's canonical path and merges duplicates. Source files are not changed.`)) return null;
+  const button = options.button || null;
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Repairing...";
+  }
+  setMessage(`${root}: repairing index paths...`);
+  try {
+    const data = await api(`/admin/v1/roots/${encodeURIComponent(root)}/repair-index`, { method: "POST", body: "{}" });
+    const rewritten = data.paths_rewritten || 0;
+    const merged = data.duplicate_paths_merged || 0;
+    const aliases = data.aliases_checked || 0;
+    setMessage(`${root}: checked ${aliases} aliases, rewrote ${rewritten}, merged ${merged}`);
+    showOperation("Index Repair", {
+      root_id: data.root_id,
+      status: data.status,
+      aliases_checked: data.aliases_checked,
+      aliases_repaired: data.aliases_repaired,
+      paths_rewritten: rewritten,
+      duplicate_paths_merged: merged,
+      embedded_paths_rewritten: data.embedded_paths_rewritten || 0,
+      embedded_paths_merged: data.embedded_paths_merged || 0,
+    });
+    if (options.refreshAfter !== false) {
+      await refresh({ quiet: true, message: `${root}: checked ${aliases} aliases, rewrote ${rewritten}, merged ${merged}` });
+    }
+    return data;
+  } catch (err) {
+    setMessage(`${root}: repair failed - ${err.message}`);
+    showOperation("Index Repair Failed", { root_id: root, error: err.message, code: err.code });
+    throw err;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function deleteRoot(root) {
+  if (!window.confirm(`Delete ${root} from QIndexer and remove all of its indexed documents, checkpoints, and crawl records? This does not delete files.`)) return;
+  try {
+    const data = await api(`/admin/v1/roots/${encodeURIComponent(root)}`, { method: "DELETE", body: JSON.stringify({ confirm_root_id: root }) });
+    const count = data.documents_removed || 0;
+    await refresh({ quiet: true, message: `${root}: removed ${count} indexed document${count === 1 ? "" : "s"}` });
   } catch (err) {
     setMessage(err.message);
   }
@@ -423,16 +547,23 @@ function splitList(value) {
     .filter(Boolean);
 }
 
+function splitLines(value) {
+  return value
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function lines(values = []) {
   return array(values).join("\n");
 }
 
 function aliasLines(values = []) {
-  return array(values).map((alias) => [alias.id || "", alias.platform || "", alias.path || ""].join(" | ")).join("\n");
+  return array(values).map((alias) => [alias.id || "", alias.platform || "", alias.path || "", alias.target || ""].filter((part, index) => index < 3 || part).join(" | ")).join("\n");
 }
 
 function parseAliases(value) {
-  return value.split("\n").map((line) => line.split("|").map((part) => part.trim())).filter((parts) => parts.length === 3 && parts[1] && parts[2]).map(([id, platform, path]) => ({ id, platform, path }));
+  return value.split("\n").map((line) => line.split("|").map((part) => part.trim())).filter((parts) => parts.length >= 3 && parts[1] && parts[2]).map(([id, platform, path, target]) => ({ id, platform, path, target: target || "" }));
 }
 
 function array(values) {
@@ -487,6 +618,12 @@ function showValidation(root, data) {
     omitted_paths: Math.max(0, paths.length - shown.length),
     error: data.error,
   }, null, 2);
+  document.querySelector("#validation-panel").classList.remove("hidden");
+}
+
+function showOperation(title, data) {
+  document.querySelector("#validation-title").textContent = title;
+  document.querySelector("#validation-output").textContent = JSON.stringify(data, null, 2);
   document.querySelector("#validation-panel").classList.remove("hidden");
 }
 

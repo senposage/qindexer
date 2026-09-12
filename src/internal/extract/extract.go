@@ -3,6 +3,7 @@ package extract
 import (
 	"archive/zip"
 	"encoding/xml"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,9 +14,37 @@ import (
 
 const maxTextBytes = 4 << 20
 
+var ErrUnsupported = errors.New("content extraction is unsupported for this file type")
+
+var indexableExtensions = map[string]bool{
+	"pdf": true, "docx": true, "xlsx": true, "pptx": true,
+	"txt": true, "md": true, "csv": true, "tsv": true, "json": true,
+	"yaml": true, "yml": true, "xml": true, "html": true, "htm": true,
+	"log": true, "ini": true, "cfg": true, "conf": true, "sql": true,
+	"ps1": true, "go": true, "js": true, "ts": true, "py": true,
+	"rs": true, "java": true, "c": true, "h": true, "cpp": true, "cs": true,
+	"png": true, "jpg": true, "jpeg": true, "tif": true, "tiff": true,
+	"bmp": true, "gif": true, "webp": true,
+}
+
+func Indexable(path string) bool {
+	return indexableExtensions[strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")]
+}
+
+func IndexableExtensions() []string {
+	values := make([]string, 0, len(indexableExtensions))
+	for ext := range indexableExtensions {
+		values = append(values, ext)
+	}
+	return values
+}
+
 // Text returns best-effort text for common office, PDF, and plain-text files.
 func Text(path string) (string, error) {
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	if !Indexable(path) {
+		return "", ErrUnsupported
+	}
 	switch ext {
 	case "pdf":
 		f, r, err := pdf.Open(path)

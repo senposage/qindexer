@@ -467,3 +467,201 @@ The office markers are `VIOLET 317` in `office\\sample.docx`, `COBALT 428` in
 `office\\sample.xlsx`, `AMBER 539` in `office\\sample.pptx`, and `EMBER 514`
 in `pdf\\embedded-text.pdf`. Scope each request to that exact file's parent
 folder when asserting a single result.
+
+### QSurfer Client Wiring Complete
+
+QSurfer now sends the explicit contract on every QIndexer search request:
+
+- **Search contents off**: `filters.match_fields` is `["name", "path",
+  "extension"]`.
+- **Search contents on**: it adds `"content"`.
+
+The adapter preserves the existing Qsirch query syntax and derives the
+metadata-only mode from QSurfer's existing `name:"..."` request form. A
+regression test captures the outbound JSON for both modes; the QSurfer Core
+test suite passes 53 tests.
+
+## 2026-09-11 Request-Scoped Alias Contract
+
+`filters.scope_aliases` is now accepted by `POST /v1/search`,
+`POST /v1/directories`, and `POST /v1/suggest`. It is ephemeral and is never
+stored in QIndexer configuration:
+
+```json
+"scope_aliases": [{"path":"\\Shared","target":"X:\\","platform":"windows-compact-share"}]
+```
+
+Configured root aliases are preferred, followed by request-scoped aliases,
+then canonical root paths. Scope matching is segment-aware; Windows/UNC forms
+are case-insensitive and Linux paths remain case-sensitive. Invalid or
+conflicting explicit scopes return `400 invalid_path_scope`. Free-text `query`
+is never parsed, normalized, or rewritten.
+
+When an ephemeral alias resolves a scope, results retain canonical `path` and
+also include `display_path` in the requested alias namespace. Live validation:
+query `Estates`, root `shared`, scope `\\Shared\\AA ESTATES`, and alias
+`\\Shared -> X:\\` returned three hits with canonical `x:\\...` and display
+paths `\\Shared\\...`.
+
+## 2026-09-11 Request-Scoped Alias Resolution Needed
+
+QSurfer can hold user-selected folder scopes in forms that are correct for the
+current workstation but are not permanently configured in QIndexer: a mapped
+drive such as `X:\`, its UNC form `\\server\Shared`, and a Linux mount can all
+identify the same indexed root. Qsirch historically compacts NAS scopes to
+`\Shared`; that compact form is not a QIndexer root alias and consequently an
+`X:\` scope can be translated as `include=0/1`, leaving client-side filtering
+to discard otherwise valid QIndexer results.
+
+Please add a request-scoped alias mechanism to `POST /v1/search` and
+`POST /v1/directories`. The client will provide its known path relationships
+with explicit scopes, never by rewriting raw query text. Proposed shape:
+
+```json
+{
+  "filters": {
+    "include_paths": ["X:\\AA CRIMINAL"],
+    "exclude_paths": [],
+    "scope_aliases": [
+      {
+        "path": "X:\\",
+        "target": "\\\\DRK-NAS9B372E\\Shared",
+        "platform": "windows-drive"
+      }
+    ]
+  }
+}
+```
+
+Required behavior:
+
+1. Resolve explicit include/exclude paths against configured aliases first,
+   then request-scoped aliases, then canonical roots. A unique match is
+   translated to the root's canonical service path before filtering.
+2. Request aliases are ephemeral: do not persist them in service configuration
+   or expose them as root-admin changes.
+3. Use path-segment boundaries and retain existing more-specific-child-over-
+   parent-exclusion semantics.
+4. Reject an ambiguous or invalid explicit scope with `400 invalid_path_scope`.
+   Never reinterpret or rewrite free-text `query` content.
+5. Return the normal canonical result path and the preferred matched alias path
+   when available so QSurfer can use the same namespace for result display and
+   client-side safety filtering.
+
+This avoids requiring every endpoint's drive letter to be preconfigured in
+QIndexer, keeps mapped drives/UNC/Linux mounts interchangeable, and gives the
+desktop client a stable way to scope a shared index without mutating server
+configuration.
+
+### Path Identity Coverage (Must Be Complete)
+
+Treat these as alternate identities of one location, not as special cases:
+
+- Windows mapped-drive roots and descendants: `X:\`, `X:\Cases\Active`.
+- Windows UNC roots using a short host, FQDN, IP address, and a configured
+  host alias: `\\nas\Shared`, `\\nas.example.local\Shared`.
+- Qsirch's legacy compact share form: `\Shared` and `\Shared\Cases`.
+- Linux CIFS/NFS/local mount paths: `/mnt/shared`, `/home/user/qsurfer-mounts/shared`.
+- QIndexer's own canonical service path and any configured root aliases.
+
+QSurfer will send every relationship it knows from manual path mappings,
+discovered Windows mapped drives, and active Linux mounts. QIndexer should
+normalize separators and trailing delimiters, apply Windows-style comparisons
+case-insensitively, preserve Linux path case, and use segment-aware matching.
+It must detect conflicting aliases rather than silently selecting an arbitrary
+root. The same resolver must be used for search, directory autocomplete,
+result alias output, and include/exclude scope handling.
+
+## 2026-09-11 Required: Recovery/System Content Must Be Excluded At Crawl Time
+
+Live A/B checks against Qsirch show that QSurfer's scope request is accepted
+and applied by QIndexer. The remaining major mismatch is catalog hygiene:
+QIndexer returns large numbers of recovery/system records that QSurfer then
+hides with its existing client-side safety rules. This wastes response pages,
+distorts provisional result counts, and makes coverage/sort comparisons hard
+to interpret.
+
+For each configured root, add an explicit crawler-level exclusion policy for
+the same recovery/system trees QSurfer hides by default. At minimum cover these
+path components, case-insensitively for Windows/UNC roots:
+
+- `@Recently-Snapshot`
+- `@Recycle`
+- `#recycle`
+- `.sync`
+- `.qsync`
+- `.qsync_sn`
+
+Requirements:
+
+1. Exclude matching directories and all descendants before catalog insertion;
+   do not rely on the desktop client to suppress them after search.
+2. Provide a safe root-scoped cleanup/reconciliation action that removes
+   previously indexed records under newly excluded paths without touching user
+   source files. A normal subsequent crawl must not reinsert them.
+3. Keep exclusions configurable per root, with the defaults enabled for new
+   NAS/shared roots and a clear administrative override for unusual deployments.
+4. Surface index state in `GET /v1/roots` and search `index` metadata strongly
+   enough for the client to report an incomplete or in-progress root during
+   A/B validation. Include a stable coverage/completion indicator if available.
+5. Add integration coverage: a matching filename below an excluded snapshot
+   path must not be returned by `/v1/search` or `/v1/directories`, while an
+   equivalent ordinary path under the same root must be returned.
+
+This is a service/crawler responsibility. QSurfer will retain its own result
+rules as defense in depth, but it must not be the only place these records are
+removed.
+
+## 2026-09-11 TODO: Graceful Running Root Removal
+
+When removing a root while its crawler is active, QIndexer should stop that
+root's crawl deliberately, flush pending catalog writes, and close or quiesce
+the database work touching that root before marking the root deleted. The
+current deletion path is intentionally deferred/no-op cleanup oriented, but a
+later pass should make running-root removal graceful instead of relying on the
+process-level lifecycle.
+
+## 2026-09-11 Required: Canonicalize Crawled Paths Before Indexing
+
+Moving the crawler to a different machine exposed duplicate records for the
+same NAS file. One record is stored under a Windows mapped path, for example:
+
+`X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\...\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+
+and the other under the crawler host's mounted SMB path, for example:
+
+`\\DRK-NAS9B372E.dimlaw.local\home\legitsu\.qsurfer\mounts\shared-02800937c0a4\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\...\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`.
+
+These must be one index identity. This is a QIndexer ingestion and migration
+responsibility, not a QSurfer presentation/deduplication workaround.
+
+Requirements:
+
+1. At crawl discovery, translate the physical crawler path to the configured
+   root's canonical service path before any catalog upsert. Never store the
+   host-specific mount path as the indexed file path.
+2. Use the exact same resolver for crawl ingestion, incremental updates,
+   delete detection, directory autocomplete, and returned search paths.
+3. Add a root-scoped unique identity based on normalized canonical path,
+   case-insensitive for SMB/Windows roots. An upsert from a different crawler
+   host must update the existing record, never add a second one.
+4. Supply a safe migration/reconciliation operation that canonicalizes existing
+   records, merges duplicate metadata deterministically, and removes only
+   duplicate catalog rows. It must not alter source files.
+5. Add integration coverage with two distinct physical aliases for the same
+   configured root and relative file path; search must return exactly one item.
+
+The client can continue resolving the canonical result path into a preferred
+drive/UNC/mount path for display and opening. It should not receive a crawler
+machine's private mount directory in ordinary result records.
+
+## 2026-09-11 QIndexer Update: Root Path Migration/Duplicate Merge
+
+QIndexer now rewrites existing indexed document paths when an admin changes a
+root's canonical path, preserving the previous canonical path as a root alias.
+If the new canonical path already has an active row for the same relative item,
+the old row is merged away instead of being served as a duplicate. This is meant
+to handle moves such as `X:\...` on Windows becoming a service-local Linux/CIFS
+mount path while representing the same physical share. Crawl checkpoints are
+rewritten at the same time. Fresh Windows and Linux binaries were copied to
+`H:\qindexer\bin` for testing.

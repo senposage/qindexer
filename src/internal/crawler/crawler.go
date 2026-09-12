@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -19,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/process"
 
 	"qindexer/internal/catalog"
 	"qindexer/internal/config"
@@ -27,25 +29,27 @@ import (
 )
 
 type Crawler struct {
-	cfg          *config.Config
-	cat          *catalog.Catalog
-	log          *slog.Logger
-	mu           sync.Mutex
-	run          map[string]bool
-	startedAt    time.Time
-	activeCrawls int64
-	filesStatted int64
-	bytesStatted int64
-	dirsRead     int64
-	hintCrawls   int64
-	fullCrawls   int64
-	lastActivity int64
-	pausedUntil  int64
-	pressureMu   sync.RWMutex
-	pressure     adaptivePressure
-	contentJobs  chan backgroundJob
-	ocrJobs      chan backgroundJob
-	hashJobs     chan backgroundJob
+	cfg           *config.Config
+	cat           *catalog.Catalog
+	log           *slog.Logger
+	mu            sync.Mutex
+	run           map[string]context.CancelFunc
+	done          map[string]chan struct{}
+	startedAt     time.Time
+	activeCrawls  int64
+	filesStatted  int64
+	bytesStatted  int64
+	dirsRead      int64
+	hintCrawls    int64
+	fullCrawls    int64
+	initialCrawls int64
+	lastActivity  int64
+	pausedUntil   int64
+	pressureMu    sync.RWMutex
+	pressure      adaptivePressure
+	contentJobs   chan backgroundJob
+	ocrJobs       chan backgroundJob
+	hashJobs      chan backgroundJob
 }
 
 type backgroundJob struct {
@@ -62,13 +66,14 @@ type adaptivePressure struct {
 }
 
 func New(cfg *config.Config, cat *catalog.Catalog, log *slog.Logger) *Crawler {
-	return &Crawler{cfg: cfg, cat: cat, log: log, run: map[string]bool{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, cfg.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, cfg.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, cfg.Crawler.Hashing.QueueSize)}
+	return &Crawler{cfg: cfg, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, cfg.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, cfg.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, cfg.Crawler.Hashing.QueueSize)}
 }
 
 type Stats struct {
 	StartedAt        time.Time `json:"started_at"`
 	UptimeSeconds    float64   `json:"uptime_seconds"`
 	ActiveCrawls     int64     `json:"active_crawls"`
+	InitialCrawls    int64     `json:"initial_crawls"`
 	FilesStatted     int64     `json:"files_statted"`
 	DirectoriesRead  int64     `json:"directories_read"`
 	BytesStatted     int64     `json:"bytes_statted"`
@@ -95,6 +100,7 @@ func (c *Crawler) Stats() Stats {
 	dirs := atomic.LoadInt64(&c.dirsRead)
 	bytes := atomic.LoadInt64(&c.bytesStatted)
 	pausedUntil := atomic.LoadInt64(&c.pausedUntil)
+	initialCrawls := atomic.LoadInt64(&c.initialCrawls)
 	pausedReason := ""
 	pressure := c.adaptiveStatus()
 	if scheduledUntil, active := c.scheduledPauseUntil(time.Now()); active && scheduledUntil.Unix() > pausedUntil {
@@ -103,18 +109,18 @@ func (c *Crawler) Stats() Stats {
 	} else if pausedUntil > time.Now().Unix() {
 		pausedReason = "manual"
 	}
-	if pressure.Paused {
+	if pressure.Paused && initialCrawls == 0 {
 		pausedReason = "adaptive_" + pressure.Reason
 	}
 	return Stats{
 		StartedAt: c.startedAt, UptimeSeconds: uptime,
-		ActiveCrawls: atomic.LoadInt64(&c.activeCrawls),
+		ActiveCrawls: atomic.LoadInt64(&c.activeCrawls), InitialCrawls: initialCrawls,
 		FilesStatted: files, DirectoriesRead: dirs, BytesStatted: bytes,
 		FilesPerSecond: float64(files) / uptime, DirsPerSecond: float64(dirs) / uptime,
 		BytesPerSecond: float64(bytes) / uptime,
 		HintCrawls:     atomic.LoadInt64(&c.hintCrawls), FullCrawls: atomic.LoadInt64(&c.fullCrawls),
 		LastActivityUnix: atomic.LoadInt64(&c.lastActivity),
-		Paused:           pausedUntil > time.Now().Unix() || pressure.Paused,
+		Paused:           pausedUntil > time.Now().Unix() || (pressure.Paused && initialCrawls == 0),
 		PausedUntilUnix:  pausedUntil,
 		PauseReason:      pausedReason,
 		AdaptivePaused:   pressure.Paused,
@@ -141,13 +147,68 @@ func (c *Crawler) CrawlRoot(ctx context.Context, rootID string) (catalog.CrawlRu
 	if !ok {
 		return catalog.CrawlRun{}, os.ErrNotExist
 	}
-	return c.crawl(ctx, root)
+	return c.crawl(ctx, root, true)
 }
 
 func (c *Crawler) IsRootRunning(rootID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.run[rootID]
+	return c.run[rootID] != nil
+}
+
+func (c *Crawler) CancelRoot(rootID string) bool {
+	c.mu.Lock()
+	cancel := c.run[rootID]
+	c.mu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+func (c *Crawler) CancelAll() {
+	c.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(c.run))
+	for _, cancel := range c.run {
+		cancels = append(cancels, cancel)
+	}
+	c.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (c *Crawler) WaitRoot(ctx context.Context, rootID string) bool {
+	c.mu.Lock()
+	done := c.done[rootID]
+	c.mu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (c *Crawler) WaitAll(ctx context.Context) bool {
+	c.mu.Lock()
+	done := make([]chan struct{}, 0, len(c.done))
+	for _, ch := range c.done {
+		done = append(done, ch)
+	}
+	c.mu.Unlock()
+	for _, ch := range done {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Crawler) CrawlHint(ctx context.Context, rootID string, path string, removed bool) (catalog.CrawlRun, error) {
@@ -159,12 +220,32 @@ func (c *Crawler) CrawlHint(ctx context.Context, rootID string, path string, rem
 }
 
 func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
+	return c.crawlRoots(ctx, false, func(config.RootConfig) bool { return true })
+}
+
+func (c *Crawler) CrawlUnindexedRoots(ctx context.Context) []catalog.CrawlRun {
+	states, err := c.cat.RootStates(ctx)
+	if err != nil {
+		c.log.Warn("could not read root crawl state; running initial reconciliation", "error", err)
+		return c.CrawlAll(ctx)
+	}
+	return c.crawlRoots(ctx, true, func(root config.RootConfig) bool {
+		state, exists := states[root.ID]
+		return needsInitialCrawl(root, exists, state)
+	})
+}
+
+func needsInitialCrawl(root config.RootConfig, exists bool, state catalog.RootState) bool {
+	return root.Enabled && (!exists || state.LastSuccessfulCrawlAt == nil)
+}
+
+func (c *Crawler) crawlRoots(ctx context.Context, initial bool, include func(config.RootConfig) bool) []catalog.CrawlRun {
 	sem := make(chan struct{}, c.cfg.Crawler.RootParallelism)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var runs []catalog.CrawlRun
 	for _, root := range c.cfg.Roots {
-		if !root.Enabled {
+		if !root.Enabled || !include(root) {
 			continue
 		}
 		root := root
@@ -173,7 +254,7 @@ func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			run, _ := c.crawl(ctx, root)
+			run, _ := c.crawl(ctx, root, initial)
 			mu.Lock()
 			runs = append(runs, run)
 			mu.Unlock()
@@ -184,19 +265,25 @@ func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
 }
 
 func (c *Crawler) Loop(ctx context.Context) {
-	go c.adaptiveMonitor(ctx)
-	c.startBackgroundWorkers(ctx)
-	go c.refillBackgroundLoop(ctx)
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	startCrawlerRoutine(ctx, &workers, c.adaptiveMonitor)
+	c.startBackgroundWorkers(ctx, &workers)
+	startCrawlerRoutine(ctx, &workers, c.refillBackgroundLoop)
 	ticker := time.NewTicker(c.cfg.Crawler.ScanInterval())
 	defer ticker.Stop()
-	_ = c.waitIfPaused(ctx)
-	c.CrawlAll(ctx)
+	if c.waitIfPaused(ctx, true) != nil {
+		return
+	}
+	// A restart should preserve existing index state. Only new or incomplete
+	// roots need an initial crawl; watcher events cover ordinary changes.
+	c.CrawlUnindexedRoots(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if c.waitIfPaused(ctx) != nil {
+			if c.waitIfPaused(ctx, true) != nil {
 				return
 			}
 			c.CrawlAll(ctx)
@@ -204,10 +291,21 @@ func (c *Crawler) Loop(ctx context.Context) {
 	}
 }
 
+func startCrawlerRoutine(ctx context.Context, workers *sync.WaitGroup, fn func(context.Context)) {
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		fn(ctx)
+	}()
+}
+
 func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		c.refillBackground(ctx)
 		select {
 		case <-ctx.Done():
@@ -239,6 +337,9 @@ type backgroundClaim func(context.Context, []string, int, int64) ([]catalog.Back
 // fillBackground shares capacity across roots so a sprawling root cannot starve
 // a smaller root's extraction, OCR, or hashing backlog.
 func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string) {
+	if ctx.Err() != nil {
+		return
+	}
 	available := cap(jobs) - len(jobs)
 	if available <= 0 {
 		return
@@ -267,27 +368,43 @@ func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs cha
 			}
 			item := batches[i][0]
 			batches[i] = batches[i][1:]
-			jobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}
+			select {
+			case jobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}:
+			case <-ctx.Done():
+				return
+			}
 			pending = true
 		}
 	}
 }
 
-func (c *Crawler) crawl(ctx context.Context, root config.RootConfig) (catalog.CrawlRun, error) {
+func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial bool) (catalog.CrawlRun, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
 	c.mu.Lock()
-	if c.run[root.ID] {
+	if c.run[root.ID] != nil {
 		c.mu.Unlock()
 		return catalog.CrawlRun{RootID: root.ID, Status: "already_running"}, nil
 	}
-	c.run[root.ID] = true
+	c.run[root.ID] = cancel
+	c.done[root.ID] = done
 	c.mu.Unlock()
 	atomic.AddInt64(&c.activeCrawls, 1)
 	atomic.AddInt64(&c.fullCrawls, 1)
+	if initial {
+		atomic.AddInt64(&c.initialCrawls, 1)
+	}
 	atomic.StoreInt64(&c.lastActivity, time.Now().Unix())
 	defer func() {
+		if initial {
+			atomic.AddInt64(&c.initialCrawls, -1)
+		}
 		atomic.AddInt64(&c.activeCrawls, -1)
 		c.mu.Lock()
 		delete(c.run, root.ID)
+		delete(c.done, root.ID)
+		close(done)
 		c.mu.Unlock()
 	}()
 
@@ -327,7 +444,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig) (catalog.Cr
 					return
 				default:
 				}
-				if c.waitIfPaused(ctx) != nil {
+				if c.waitIfPaused(ctx, !initial) != nil {
 					return
 				}
 				res, err := c.indexPath(ctx, root, path, generation)
@@ -348,7 +465,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig) (catalog.Cr
 		}()
 	}
 
-	walkErr := c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, true)
+	walkErr := c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, true, !initial)
 	close(jobs)
 	workers.Wait()
 
@@ -358,8 +475,12 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig) (catalog.Cr
 	run.FilesUnchanged = atomic.LoadInt64(&filesUnchanged)
 	run.Errors = atomic.LoadInt64(&errorsCount)
 	if walkErr != nil {
-		run.Status = "failed"
-		run.ErrorMessage = walkErr.Error()
+		if errors.Is(walkErr, context.Canceled) {
+			run.Status = "cancelled"
+		} else {
+			run.Status = "failed"
+			run.ErrorMessage = walkErr.Error()
+		}
 	} else {
 		missing, err := c.cat.MarkMissing(ctx, root.ID, generation, c.cfg.Crawler.MissingAfterSuccessfulCrawls)
 		if err != nil {
@@ -375,7 +496,13 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig) (catalog.Cr
 			}
 		}
 	}
-	if err := c.cat.FinishCrawl(ctx, run); err != nil {
+	finishCtx := ctx
+	if ctx.Err() != nil {
+		var finishCancel context.CancelFunc
+		finishCtx, finishCancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer finishCancel()
+	}
+	if err := c.cat.FinishCrawl(finishCtx, run); err != nil {
 		return run, err
 	}
 	c.log.Info("crawl finished", "root", root.ID, "status", run.Status, "seen", run.FilesSeen, "added", run.FilesAdded, "updated", run.FilesUpdated, "missing", run.FilesMissing, "errors", run.Errors)
@@ -436,7 +563,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 		go func() {
 			defer workers.Done()
 			for p := range jobs {
-				if c.waitIfPaused(ctx) != nil {
+				if c.waitIfPaused(ctx, true) != nil {
 					return
 				}
 				res, err := c.indexPath(ctx, root, p, generation)
@@ -458,7 +585,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	}
 	var walkErr error
 	if info.IsDir() {
-		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false)
+		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, true)
 	} else {
 		walkErr = sendPath(ctx, jobs, path)
 	}
@@ -483,7 +610,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	return run, walkErr
 }
 
-func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume bool) error {
+func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume bool, adaptivePause bool) error {
 	queue := newDirQueue()
 	go func() {
 		<-ctx.Done()
@@ -525,7 +652,7 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 				if !ok {
 					return
 				}
-				if c.waitIfPaused(ctx) != nil {
+				if c.waitIfPaused(ctx, adaptivePause) != nil {
 					queue.setErr(ctx.Err())
 					queue.done()
 					return
@@ -545,7 +672,7 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 						continue
 					}
 				}
-				c.walkDirectory(ctx, root, dir, queue, jobs, errorsCount, generation, resume)
+				c.walkDirectory(ctx, root, dir, queue, jobs, errorsCount, generation, resume, adaptivePause)
 				queue.done()
 			}
 		}()
@@ -554,7 +681,7 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 	return queue.err()
 }
 
-func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir string, queue *dirQueue, jobs chan<- string, errorsCount *int64, generation int64, checkpoint bool) {
+func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir string, queue *dirQueue, jobs chan<- string, errorsCount *int64, generation int64, checkpoint bool, adaptivePause bool) {
 	atomic.AddInt64(&c.dirsRead, 1)
 	atomic.StoreInt64(&c.lastActivity, time.Now().Unix())
 	entries, err := os.ReadDir(dir)
@@ -569,7 +696,7 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 			queue.setErr(ctx.Err())
 			return
 		}
-		if c.waitIfPaused(ctx) != nil {
+		if c.waitIfPaused(ctx, adaptivePause) != nil {
 			queue.setErr(ctx.Err())
 			return
 		}
@@ -601,7 +728,7 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 	}
 }
 
-func (c *Crawler) waitIfPaused(ctx context.Context) error {
+func (c *Crawler) waitIfPaused(ctx context.Context, adaptivePause bool) error {
 	for {
 		until := atomic.LoadInt64(&c.pausedUntil)
 		if scheduledUntil, active := c.scheduledPauseUntil(time.Now()); active && scheduledUntil.Unix() > until {
@@ -609,11 +736,11 @@ func (c *Crawler) waitIfPaused(ctx context.Context) error {
 		}
 		now := time.Now().Unix()
 		pressure := c.adaptiveStatus()
-		if until <= now && !pressure.Paused {
+		if until <= now && (!adaptivePause || !pressure.Paused) {
 			return ctx.Err()
 		}
 		wait := time.Second
-		if !pressure.Paused && until-now < 1 {
+		if (!adaptivePause || !pressure.Paused) && until-now < 1 {
 			wait = time.Duration(until-now) * time.Second
 		}
 		timer := time.NewTimer(wait)
@@ -631,8 +758,28 @@ func (c *Crawler) adaptiveMonitor(ctx context.Context) {
 	if !settings.Enabled {
 		return
 	}
-	previous, _ := disk.IOCountersWithContext(ctx)
+	self, selfErr := process.NewProcess(int32(os.Getpid()))
+	if selfErr == nil {
+		// Prime the process counter so each later reading covers the same window
+		// as the system-wide CPU sample.
+		_, _ = self.PercentWithContext(ctx, 0)
+	}
+	idleTicker := time.NewTicker(time.Second)
+	defer idleTicker.Stop()
 	for {
+		// System counter collection is comparatively expensive on some platforms.
+		// Only sample while indexing or enrichment work is actually in flight.
+		if !c.hasActiveWork() {
+			c.updateAdaptivePressure("", 0, 0, settings.RecoverySamples)
+			select {
+			case <-ctx.Done():
+				return
+			case <-idleTicker.C:
+				continue
+			}
+		}
+
+		previous, _ := disk.IOCountersWithContext(ctx)
 		cpuPercent, err := cpu.PercentWithContext(ctx, settings.SampleInterval(), false)
 		if err != nil || ctx.Err() != nil {
 			return
@@ -643,6 +790,11 @@ func (c *Crawler) adaptiveMonitor(ctx context.Context) {
 		cpuBusy := 0.0
 		if len(cpuPercent) > 0 {
 			cpuBusy = cpuPercent[0]
+		}
+		if selfErr == nil {
+			if selfPercent, err := self.PercentWithContext(ctx, 0); err == nil {
+				cpuBusy = externalCPUPercent(cpuBusy, selfPercent, runtime.NumCPU())
+			}
 		}
 		reason := ""
 		if cpuBusy >= settings.CPUPercentThreshold {
@@ -657,6 +809,26 @@ func (c *Crawler) adaptiveMonitor(ctx context.Context) {
 		}
 		c.updateAdaptivePressure(reason, cpuBusy, diskBusy, settings.RecoverySamples)
 	}
+}
+
+// externalCPUPercent removes this process's share from a system-wide CPU
+// reading. Process CPU is reported as a percentage of a single logical core.
+func externalCPUPercent(systemPercent, selfPercent float64, logicalCPUs int) float64 {
+	if logicalCPUs < 1 {
+		logicalCPUs = 1
+	}
+	external := systemPercent - selfPercent/float64(logicalCPUs)
+	if external < 0 {
+		return 0
+	}
+	return external
+}
+
+func (c *Crawler) hasActiveWork() bool {
+	return atomic.LoadInt64(&c.activeCrawls) > 0 ||
+		len(c.contentJobs) > 0 ||
+		len(c.ocrJobs) > 0 ||
+		len(c.hashJobs) > 0
 }
 
 func diskBusyPercent(previous, current map[string]disk.IOCountersStat, interval time.Duration) float64 {
@@ -938,15 +1110,15 @@ func (c *Crawler) recordPathFailure(ctx context.Context, root config.RootConfig,
 	_, _ = c.cat.MarkPathInaccessible(ctx, root.ID, path, generation)
 }
 
-func (c *Crawler) startBackgroundWorkers(ctx context.Context) {
+func (c *Crawler) startBackgroundWorkers(ctx context.Context, workers *sync.WaitGroup) {
 	for i := 0; i < c.cfg.Crawler.ContentExtraction.WorkerCount; i++ {
-		go c.contentWorker(ctx)
+		startCrawlerRoutine(ctx, workers, c.contentWorker)
 	}
 	for i := 0; i < c.cfg.Crawler.OCR.WorkerCount; i++ {
-		go c.ocrWorker(ctx)
+		startCrawlerRoutine(ctx, workers, c.ocrWorker)
 	}
 	for i := 0; i < c.cfg.Crawler.Hashing.WorkerCount; i++ {
-		go c.hashWorker(ctx)
+		startCrawlerRoutine(ctx, workers, c.hashWorker)
 	}
 }
 
@@ -956,7 +1128,10 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case job := <-c.contentJobs:
-			if c.waitIfPaused(ctx) != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if c.waitIfPaused(ctx, true) != nil {
 				return
 			}
 			root, exists := c.rootByID(job.rootID)
@@ -989,7 +1164,10 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case job := <-c.ocrJobs:
-			if c.waitIfPaused(ctx) != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if c.waitIfPaused(ctx, true) != nil {
 				return
 			}
 			settings := c.cfg.Crawler.OCR
@@ -1020,7 +1198,10 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case job := <-c.hashJobs:
-			if c.waitIfPaused(ctx) != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if c.waitIfPaused(ctx, true) != nil {
 				return
 			}
 			root, exists := c.rootByID(job.rootID)
@@ -1072,7 +1253,7 @@ func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHi
 	if ignoreHidden && strings.HasPrefix(name, ".") {
 		return true
 	}
-	if entry.IsDir() && matchesAny(path, root.ExcludeFolderPatterns) {
+	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || matchesAny(path, []string{"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**"})) {
 		return true
 	}
 	return matchesAny(path, root.ExcludePatterns)

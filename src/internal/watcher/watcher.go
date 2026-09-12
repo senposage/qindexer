@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type Watcher struct {
 	cfg     *config.Config
 	crawler *crawler.Crawler
 	log     *slog.Logger
+	ignore  string
 }
 
 type dirtyPath struct {
@@ -26,8 +28,8 @@ type dirtyPath struct {
 	removed bool
 }
 
-func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger) *Watcher {
-	return &Watcher{cfg: cfg, crawler: cr, log: log}
+func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
+	return &Watcher{cfg: cfg, crawler: cr, log: log, ignore: filepath.Clean(ignorePath)}
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
@@ -90,6 +92,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 				w.log.Warn("filesystem watcher error", "error", err)
 			}
 		case event := <-fsw.Events:
+			if w.shouldIgnore(event.Name) {
+				continue
+			}
 			rootID := rootForEvent(event.Name, rootsByPath)
 			if rootID == "" {
 				continue
@@ -129,6 +134,9 @@ func (w *Watcher) watchTree(fsw *fsnotify.Watcher, root config.RootConfig, path 
 		if !entry.IsDir() {
 			return nil
 		}
+		if w.shouldIgnore(p) {
+			return filepath.SkipDir
+		}
 		if remaining > 0 && count >= remaining {
 			return filepath.SkipDir
 		}
@@ -140,6 +148,14 @@ func (w *Watcher) watchTree(fsw *fsnotify.Watcher, root config.RootConfig, path 
 		return nil
 	})
 	return count, err
+}
+
+func (w *Watcher) shouldIgnore(path string) bool {
+	if w.ignore == "" || w.ignore == "." {
+		return false
+	}
+	rel, err := filepath.Rel(w.ignore, filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (w *Watcher) tryWatchCreatedDirectory(fsw *fsnotify.Watcher, path string, rootID string, rootsByPath map[string]string) error {

@@ -1,68 +1,271 @@
-# Operations Notes
+# Operations Guide
 
-## Default Bindings
+## Deployment Model
+
+QIndexer should run on a machine that can see the storage paths directly:
+
+- Windows workstation/server with mapped drives or UNC share access.
+- Linux host with CIFS/NFS mounts.
+- Test machine connected over VPN/WireGuard.
+
+The service account controls what can be indexed. QIndexer reports access and
+ownership metadata when configured, but opening files remains controlled by the
+OS, domain, NAS, and share permissions.
+
+## First Run
+
+1. Copy the binary and config.
+2. Start QIndexer:
+
+   ```powershell
+   .\qindexer_windows_amd64.exe run --config .\configs\example.yaml
+   ```
+
+3. Open `http://127.0.0.1:41974/`.
+4. Set the first admin token.
+5. Add or edit roots.
+6. Validate roots.
+7. Start a crawl.
+
+Until the first token is set, admin and search API calls return setup-required
+errors.
+
+## Default Ports
 
 - Search API: `127.0.0.1:41973`
-- Admin API: `127.0.0.1:41974`
-- Admin web UI: `http://127.0.0.1:41974/`
+- Admin API/UI: `127.0.0.1:41974`
 
-Remote bindings should be explicit in config and should normally sit behind TLS.
+For remote testing, add explicit bind addresses:
 
-## NAS Crawling
+```yaml
+server:
+  bind_addresses:
+    - "127.0.0.1:41973"
+    - "10.8.0.2:41973"
+management:
+  bind_addresses:
+    - "127.0.0.1:41974"
+    - "10.8.0.2:41974"
+```
 
-Use the host OS to make NAS paths visible.
+Restart after changing network settings.
 
-Windows:
+## NAS And VPN Notes
+
+Use the host OS to mount or map shares before indexing.
+
+Windows UNC:
 
 ```yaml
 path: "\\\\nas01\\finance"
-credential_ref: "os-service-account"
+credential_ref: "windows-service-account"
 ```
 
-Linux:
+Linux CIFS:
 
 ```yaml
 path: "/mnt/nas-finance"
-credential_ref: "systemd-user-or-mount-secret"
+credential_ref: "systemd-mount-secret"
 ```
 
-If a root is unreachable, the service records the failure and keeps existing active results. Missing/deleted transitions only happen after a successful crawl of that root.
+Mapped drive with aliases:
 
-## Performance Defaults
+```yaml
+path: "\\\\nas01\\shared"
+path_aliases:
+  - id: "shared-x"
+    platform: "windows-drive"
+    path: "X:\\"
+```
 
-The defaults are deliberately conservative:
+If the same root moves between machines, keep the root ID and update the
+canonical path/aliases. Then use `Repair index`.
 
-- One root crawled at a time.
-- Bounded metadata worker pool.
-- Bounded metadata queue.
-- One SQLite writer path.
-- Content extraction disabled in Phase 1.
+## Repair Workflow
 
-Raise worker counts per environment after observing NAS latency and service host load.
+Use root repair when:
+
+- A Windows path such as `X:\...` and a Linux mount path both appear in results.
+- A service-local path appears wrapped in a machine/UNC prefix.
+- A root was moved to another host and should not be re-indexed from scratch.
+- An alias target was corrected.
+
+Steps:
+
+1. Open the admin UI.
+2. Edit the root rules.
+3. Confirm the canonical `Root path`.
+4. Add aliases for other client views.
+5. Use `Save and repair index`, or save then click `Repair index`.
+
+Repair rewrites catalog rows and checkpoints only. It does not touch source
+files. The result shows aliases checked, paths rewritten, and duplicates merged.
+
+## Clearing And Deleting
+
+`Clear index` removes indexed records for one root but keeps the root
+configured. Use this when rules changed substantially and a root should be
+rebuilt.
+
+`Delete root` removes the root from config and marks its indexed records as
+deleted/no-op. Source files are never deleted.
+
+## Shutdown
+
+Use `Stop service` in the UI or send an OS signal. QIndexer cancels active
+crawls, waits for completed directory sets/checkpoints, flushes SQLite, and
+closes the DB.
+
+## Crawler Scheduling
+
+QIndexer crawls when:
+
+- The service starts and the crawler loop schedules enabled roots.
+- `scan_interval_seconds` elapses for reconciliation.
+- The watcher records dirty paths and schedules follow-up work.
+- An admin manually triggers a root crawl.
+
+Crawler state is visible in the admin UI metrics cards.
+
+## Performance Tuning
+
+Start conservatively on NAS/VPN paths:
+
+```yaml
+root_parallelism: 1
+directory_worker_count: 4
+metadata_worker_count: 8
+metadata_queue_size: 5000
+index_batch_size: 1000
+```
+
+For fast local disks or idle servers, raise:
+
+- `directory_worker_count`
+- `metadata_worker_count`
+- `metadata_queue_size`
+
+For slow VPN/NAS links, lower directory workers first. Watch:
+
+- Files/sec
+- Dirs/sec
+- I/O rate
+- CPU load
+- Disk busy
+- NAS latency
+
+Content extraction, OCR, hashing, and ownership collection can be expensive.
+Enable them per root and keep worker counts low until the host has headroom.
+
+## Adaptive Throttling
+
+Adaptive throttle pauses crawl scheduling when CPU or disk pressure crosses
+configured thresholds. It resumes after `recovery_samples` healthy samples.
+
+Initial indexing can be made more aggressive by raising thresholds or disabling
+adaptive throttle temporarily, but long-running shared machines should keep it
+enabled.
+
+## Watcher And Reconciliation
+
+Filesystem watchers are opportunistic. They provide speed by noticing changed
+directories, but they are not the only correctness mechanism. Periodic full
+reconciliation catches missed events, unavailable roots, and watcher overflow.
+
+## Backups
+
+Use:
+
+- `GET /admin/v1/config/export`
+- `POST /admin/v1/config/import`
+
+Exports exclude secrets. Back up the SQLite files only when the service is
+stopped or after a clean SQLite checkpoint.
+
+## Diagnostics
+
+Use `GET /admin/v1/diagnostics` or the UI diagnostics view. It includes:
+
+- Redacted config.
+- Service version and generation.
+- Root states.
+- Recent crawls.
+- Crawler metrics.
+- Log availability.
+
+HTTP request logs include method, path, status, duration, bytes, and remote.
+Admin mutations log root IDs, counts, paths, and failure reasons.
+
+## Troubleshooting
+
+No admin access:
+
+- Open from localhost for first token setup.
+- Confirm the bearer token in the UI.
+- Check for `401 unauthorized` in logs.
+
+No search results:
+
+- Confirm QSurfer is pointed at the search API port, not the admin port.
+- Check `GET /v1/health`.
+- Check root status and document count.
+- Verify scope aliases and include/exclude paths.
+
+Duplicate paths:
+
+- Confirm the same physical storage is one root ID, not multiple roots.
+- Add aliases for alternate client paths.
+- Use `Repair index`.
+- If paths contain a host prefix before the canonical mount path, repair should
+  strip that wrapper and merge duplicates.
+
+Slow NAS crawl:
+
+- Lower directory workers over VPN.
+- Raise workers only on idle hosts and fast links.
+- Check adaptive throttle state.
+- Disable expensive enrichment until metadata indexing is complete.
+
+Large database:
+
+- Content text, OCR text, and hashes increase DB size.
+- Clear roots that were accidentally indexed.
+- Stop the service cleanly so WAL files checkpoint.
+
+Wrong display path:
+
+- Check root aliases.
+- Add `target` when an alias maps to a subfolder under the canonical root.
+- Clients should display `display_path || path`.
 
 ## Windows Service
 
-Install:
+Install with your preferred service wrapper or deployment tooling. The binary
+supports:
 
 ```powershell
-.\deploy\install-windows-service.ps1 `
-  -BinaryPath "C:\Program Files\QSurferSearch\qindexer.exe" `
-  -ConfigPath "C:\ProgramData\QSurferSearch\config.yaml"
+qindexer_windows_amd64.exe run --config C:\ProgramData\QIndexer\config.yaml
 ```
 
-Start:
-
-```powershell
-Start-Service QSurferSearchService
-```
+Run as an account with read access to every root.
 
 ## systemd
 
-Copy files:
+Example unit:
 
-```bash
-sudo cp qindexer /usr/local/bin/
-sudo cp deploy/qsurfer-search.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now qsurfer-search.service
+```ini
+[Unit]
+Description=QIndexer
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/qindexer run --config /etc/qindexer/config.yaml
+Restart=on-failure
+User=qindexer
+Group=qindexer
+
+[Install]
+WantedBy=multi-user.target
 ```
+
+Mount CIFS/NFS shares before starting the service.

@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,7 +90,7 @@ func TestDescendantPathLikePreservesDriveRootSeparator(t *testing.T) {
 
 func TestContentMatchMetadataUsesBoundedExcerpt(t *testing.T) {
 	doc := Document{Name: "report.docx", Path: `C:\Finance\report.docx`, ContentText: "The quarterly revenue plan is ready for the finance review."}
-	addMatchMetadata(&doc, "revenue")
+	addMatchMetadata(&doc, "revenue", nil)
 	if len(doc.MatchedFields) != 1 || doc.MatchedFields[0] != "content" {
 		t.Fatalf("unexpected match fields: %#v", doc.MatchedFields)
 	}
@@ -113,6 +114,58 @@ func TestSearchMatchesFilenamePrefix(t *testing.T) {
 	resp, err := cat.Search(ctx, SearchRequest{Query: "zan", Limit: 10}, 10)
 	if err != nil || len(resp.Results) != 1 || resp.Results[0].Path != doc.Path {
 		t.Fatalf("prefix query did not match: %#v err=%v", resp.Results, err)
+	}
+}
+
+func TestSearchFoldersMustMatchTheirOwnName(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	add := func(id, path string, folder bool) {
+		t.Helper()
+		doc := Document{
+			ID:                 id,
+			RootID:             "shared",
+			Path:               path,
+			NormalizedPath:     NormalizePath(path),
+			Name:               filepath.Base(path),
+			Extension:          strings.TrimPrefix(filepath.Ext(path), "."),
+			IsFolder:           folder,
+			Size:               1,
+			ModifiedAt:         modified,
+			LastSeenGeneration: 1,
+			Signature:          Signature(1, modified),
+		}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("billing-folder", `X:\AA _ OFFICE ADMINISTRATION\BILLING`, true)
+	add("office-file", `X:\AA _ OFFICE ADMINISTRATION\report.txt`, false)
+
+	resp, err := cat.Search(ctx, SearchRequest{
+		Query:   "office",
+		Filters: SearchFilters{MatchFields: []string{"name", "path"}},
+		Limit:   10,
+	}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].ID != "office-file" {
+		t.Fatalf("ancestor path match returned a folder: %#v", resp.Results)
+	}
+
+	folders, err := cat.Search(ctx, SearchRequest{Query: "billing", Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folders.Results) != 1 || folders.Results[0].ID != "billing-folder" {
+		t.Fatalf("folder name query did not return BILLING: %#v", folders.Results)
 	}
 }
 
@@ -140,6 +193,174 @@ func TestClearRootRemovesOnlyThatRoot(t *testing.T) {
 	}
 }
 
+func TestRewriteRootPathMergesDuplicateActiveRows(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	oldPath := `X:\AA-MATRIMONIAL\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+	newRoot := `\\DRK-NAS9B372E.dimlaw.local\home\legitsu\.qsurfer\mounts\shared-02800937c0a4`
+	newPath := newRoot + `\AA-MATRIMONIAL\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+	for _, item := range []struct {
+		id   string
+		path string
+	}{
+		{"old", oldPath},
+		{"new", newPath},
+	} {
+		doc := Document{ID: item.id, RootID: "shared", Path: item.path, NormalizedPath: NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewritten, merged, err := cat.RewriteRootPath(ctx, "shared", `X:\`, newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten != 0 || merged != 1 {
+		t.Fatalf("expected one duplicate merge, got rewritten=%d merged=%d", rewritten, merged)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Query: "attorney", Filters: SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != newPath {
+		t.Fatalf("duplicate root paths remained: %#v", resp.Results)
+	}
+}
+
+func TestRewriteRootPathUpdatesPathAndFTS(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	oldPath := `X:\Cases\Budget.docx`
+	newRoot := `/mnt/shared-real`
+	doc := Document{ID: "old", RootID: "shared", Path: oldPath, NormalizedPath: NormalizePath(oldPath), Name: filepath.Base(oldPath), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, merged, err := cat.RewriteRootPath(ctx, "shared", `X:\`, newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten != 1 || merged != 0 {
+		t.Fatalf("expected one rewrite, got rewritten=%d merged=%d", rewritten, merged)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Query: "shared-real", Filters: SearchFilters{Roots: []string{"shared"}, MatchFields: []string{"path"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != `/mnt/shared-real/Cases/Budget.docx` {
+		t.Fatalf("rewritten path not searchable: %#v", resp.Results)
+	}
+}
+
+func TestRepairEmbeddedRootPathMergesUNCWrappedCanonicalPath(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	root := `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4`
+	wrapped := `\\DRK-NAS9B372E.dimlaw\.local\home\legitsu\\.qsurfer\mounts\shared-02800937c0a4\AA STAFF DIRECTORIES\KAT McEVOY DIRECTORY\KAT\Affidavits\Survey Affidavit of No Change.docx`
+	canonical := root + `/AA STAFF DIRECTORIES/KAT McEVOY DIRECTORY/KAT/Affidavits/Survey Affidavit of No Change.docx`
+	for _, item := range []struct {
+		id   string
+		path string
+	}{
+		{"wrapped", wrapped},
+		{"canonical", canonical},
+	} {
+		doc := Document{ID: item.id, RootID: "shared", Path: item.path, NormalizedPath: NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewritten, merged, err := cat.RepairEmbeddedRootPath(ctx, "shared", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rewritten != 0 || merged != 1 {
+		t.Fatalf("expected one embedded duplicate merge, got rewritten=%d merged=%d", rewritten, merged)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Query: "survey affidavit", Filters: SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != canonical {
+		t.Fatalf("embedded path repair left duplicate or wrong path: %#v", resp.Results)
+	}
+}
+
+func TestPruneRecoveryPathsRemovesOnlyRecoveryDirectories(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	add := func(id, rootID, path string) {
+		t.Helper()
+		doc := Document{ID: id, RootID: rootID, Path: path, NormalizedPath: NormalizePath(path), Name: filepath.Base(path), Extension: strings.TrimPrefix(filepath.Ext(path), "."), Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("snapshot", "shared", `X:\@Recently-Snapshot\GMT-05_2026-09-04_0000\budget.txt`)
+	add("recycle", "shared", `X:\$RECYCLE.BIN\S-1-5-21\deleted.txt`)
+	add("keep", "shared", `X:\AA _ OFFICE ADMINISTRATION\billing.txt`)
+	add("other-root", "other", `X:\@Recently-Snapshot\other.txt`)
+
+	removed, err := cat.PruneRecoveryPaths(ctx, "shared")
+	if err != nil || removed != 2 {
+		all, searchErr := cat.Search(ctx, SearchRequest{Limit: 10}, 10)
+		t.Fatalf("prune recovery paths = %d, %v; remaining=%#v, searchErr=%v", removed, err, all.Results, searchErr)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("unexpected remaining paths: %#v", resp.Results)
+	}
+	for _, result := range resp.Results {
+		if result.ID == "snapshot" || result.ID == "recycle" {
+			t.Fatalf("recovery path remained indexed: %#v", result)
+		}
+	}
+}
+
+func TestSearchOrderKeepsDescendingRelevanceBestFirst(t *testing.T) {
+	order, err := searchOrder("relevance", "desc", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(order, "bm25(documents_fts) ASC") {
+		t.Fatalf("expected best-first relevance to use ascending bm25, got %q", order)
+	}
+	order, err = searchOrder("relevance", "asc", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(order, "bm25(documents_fts) DESC") {
+		t.Fatalf("expected ascending relevance to use descending bm25, got %q", order)
+	}
+}
+
 func TestSearchMatchFieldsSeparatesMetadataAndContent(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())
@@ -163,8 +384,13 @@ func TestSearchMatchFieldsSeparatesMetadataAndContent(t *testing.T) {
 		t.Fatalf("metadata-only search returned content match: %#v", metadata.Results)
 	}
 	content, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"content"}}, Limit: 10}, 20)
-	if err != nil || len(content.Results) != 1 || content.Results[0].MatchedFields[0] != "content" {
+	if err != nil || len(content.Results) != 1 || len(content.Results[0].MatchedFields) != 1 || content.Results[0].MatchedFields[0] != "content" {
 		t.Fatalf("content-only search = %#v, %v", content.Results, err)
+	}
+	matchDoc := Document{Path: `D:\qindexer\orchid\notes.txt`, Name: "notes.txt", ContentText: "ORCHID"}
+	addMatchMetadata(&matchDoc, "orchid", []string{"content"})
+	if len(matchDoc.MatchedFields) != 1 || matchDoc.MatchedFields[0] != "content" {
+		t.Fatalf("content-only match metadata leaked other fields: %#v", matchDoc.MatchedFields)
 	}
 	if _, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"unknown"}}, Limit: 10}, 20); err == nil {
 		t.Fatal("expected invalid match field error")

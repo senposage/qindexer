@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,11 +35,22 @@ func (a App) Run(ctx context.Context) error {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
-	cat, err := catalog.Open(ctx, config.ResolveDataDir(a.ConfigPath, cfg.Index.DataDir))
+	dataDir := config.ResolveDataDir(a.ConfigPath, cfg.Index.DataDir)
+	cat, err := catalog.Open(ctx, dataDir)
 	if err != nil {
 		return err
 	}
 	defer cat.Close()
+	for _, root := range cfg.Roots {
+		if !root.Enabled {
+			continue
+		}
+		if removed, err := cat.PruneRecoveryPaths(ctx, root.ID); err != nil {
+			log.Warn("recovery path cleanup failed", "root", root.ID, "error", err)
+		} else if removed > 0 {
+			log.Info("recovery paths removed from index", "root", root.ID, "documents", removed)
+		}
+	}
 	cr := crawler.New(cfg, cat, log)
 	baseDir := filepath.Dir(a.ConfigPath)
 	searchToken, err := cfg.Server.Auth.ResolveToken(baseDir)
@@ -50,26 +62,24 @@ func (a App) Run(ctx context.Context) error {
 		return err
 	}
 	apiServer := api.New(cfg, a.ConfigPath, cat, cr, log, searchToken, adminToken)
-	searchHTTP := &http.Server{Addr: cfg.Server.Bind, Handler: apiServer.SearchHandler()}
-	adminHTTP := &http.Server{Addr: cfg.Management.Bind, Handler: apiServer.AdminHandler()}
+	apiServer.SetShutdown(cancel)
 
-	errs := make(chan error, 4)
-	go func() {
-		log.Info("search api listening", "addr", cfg.Server.Bind)
-		errs <- ignoreClosed(searchHTTP.ListenAndServe())
-	}()
+	errs := make(chan error, len(cfg.Server.BindAddresses)+len(cfg.Management.BindAddresses)+2)
+	servers := startHTTPServers("search api", cfg.Server.BindAddresses, apiServer.SearchHandler(), log, errs)
 	if cfg.Management.Enabled {
-		go func() {
-			log.Info("admin api listening", "addr", cfg.Management.Bind)
-			errs <- ignoreClosed(adminHTTP.ListenAndServe())
-		}()
+		servers = append(servers, startHTTPServers("admin api", cfg.Management.BindAddresses, apiServer.AdminHandler(), log, errs)...)
 	}
+	var workers sync.WaitGroup
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		cr.Loop(runCtx)
 		errs <- nil
 	}()
+	workers.Add(1)
 	go func() {
-		watch := watcher.New(cfg, cr, log)
+		defer workers.Done()
+		watch := watcher.New(cfg, cr, log, dataDir)
 		if err := watch.Run(runCtx); err != nil {
 			errs <- err
 		}
@@ -86,9 +96,34 @@ func (a App) Run(ctx context.Context) error {
 	cancel()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_ = searchHTTP.Shutdown(shutdownCtx)
-	_ = adminHTTP.Shutdown(shutdownCtx)
+	for _, server := range servers {
+		_ = server.Shutdown(shutdownCtx)
+	}
+	cr.CancelAll()
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-shutdownCtx.Done():
+		log.Warn("service shutdown timed out waiting for crawler or watcher")
+	}
 	return runErr
+}
+
+func startHTTPServers(name string, addresses []string, handler http.Handler, log *slog.Logger, errs chan<- error) []*http.Server {
+	servers := make([]*http.Server, 0, len(addresses))
+	for _, addr := range addresses {
+		server := &http.Server{Addr: addr, Handler: handler}
+		servers = append(servers, server)
+		go func(addr string, server *http.Server) {
+			log.Info(name+" listening", "addr", addr)
+			errs <- ignoreClosed(server.ListenAndServe())
+		}(addr, server)
+	}
+	return servers
 }
 
 func (a App) CrawlOnce(ctx context.Context, rootID string) error {

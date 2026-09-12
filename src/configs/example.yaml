@@ -1,5 +1,7 @@
 server:
   bind: "127.0.0.1:41973"
+  bind_addresses:
+    - "127.0.0.1:41973"
   public_base_url: "http://127.0.0.1:41973"
   auth:
     mode: "static-token"
@@ -7,6 +9,8 @@ server:
 management:
   enabled: true
   bind: "127.0.0.1:41974"
+  bind_addresses:
+    - "127.0.0.1:41974"
   auth:
     mode: "admin-token"
 
@@ -78,7 +82,16 @@ roots:
     exclude_folder_patterns:
       - "**/.git/**"
       - "**/node_modules/**"
+      - "**/@Recently-Snapshot/**"
+      - "**/@Recycle/**"
+      - "**/#recycle/**"
+      - "**/$RECYCLE.BIN/**"
+      - "**/RECYCLER/**"
+      - "**/.sync/**"
+      - "**/.qsync/**"
+      - "**/.qsync_sn/**"
     exclude_patterns: []
+    path_aliases: []
     # Per-root enrichment switches override the crawler-wide legacy defaults.
     content_extraction: false
     ocr: false

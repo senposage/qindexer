@@ -1,10 +1,10 @@
-# QIndexer API
+# QIndexer API Reference
 
-Base endpoints:
+Default endpoints:
 
 - Search API: `http://127.0.0.1:41973/v1`
 - Admin API: `http://127.0.0.1:41974/admin/v1`
-- Admin web UI: `http://127.0.0.1:41974/`
+- Admin UI: `http://127.0.0.1:41974/`
 
 Both APIs use bearer tokens when configured:
 
@@ -12,9 +12,7 @@ Both APIs use bearer tokens when configured:
 Authorization: Bearer <token>
 ```
 
-## Search API
-
-All search-facing endpoints use protocol version `1.1`. Health and capabilities include the service instance, build version, and current index generation. Errors always use this shape:
+Structured errors:
 
 ```json
 {
@@ -27,42 +25,114 @@ All search-facing endpoints use protocol version `1.1`. Health and capabilities 
 }
 ```
 
-### Health
+`retryable` is true for rate limits and server errors. `unavailable` is true
+for service-unavailable responses.
 
-```http
-GET /v1/health
-```
+## Search API
 
-### Capabilities
+### GET /v1/health
 
-```http
-GET /v1/capabilities
-```
-
-### Roots
-
-```http
-GET /v1/roots
-```
-
-Each root has a stable `root_id`, its service-local `canonical_path`, and an `aliases` list. An alias is `{ "alias_id", "platform", "path" }`; `alias_id` is configured when possible, otherwise deterministically derived from the root and alias path. Clients should use this response to recognize that mapped drives, UNC shares, and local mounts represent the same root. Free-text `query` is never rewritten; only an explicit folder scope may later be translated through an advertised alias.
-
-### Search
-
-```http
-POST /v1/search
-Content-Type: application/json
-```
+Returns service liveness, build identity, generation, and index usability.
 
 ```json
 {
-  "search_id": "qsurfer-request-42",
+  "status": "ok",
+  "protocol_version": "1.1",
+  "service_instance": "uuid",
+  "version": "1.0.0",
+  "commit": "local",
+  "generation": 42,
+  "index": {
+    "ready": true,
+    "document_count": 12345
+  }
+}
+```
+
+### GET /v1/capabilities
+
+Declares feature support, filters, sorts, and request limits.
+
+Important features:
+
+- `metadata_search`
+- `content_search`
+- `ocr_search`
+- `content_hashing`
+- `crawl_control`
+- `folder_search`
+- `folder_suggest`
+- `pagination`
+- `sorting`
+- `path_scopes`
+- `root_filtering`
+- `exclusions`
+
+Important limits:
+
+- `max_page_size`
+- `max_scope_paths`
+- `max_concurrent_searches`
+- `supported_sorts`
+
+### GET /v1/roots
+
+Returns friendly root metadata for root pickers, scope resolution, and index
+freshness display.
+
+Fields include:
+
+- `root_id`
+- `name`
+- `labels`
+- `canonical_path`
+- `aliases`
+- `available`
+- `document_count`
+- `missing_count`
+- `last_status`
+- `last_started_at`
+- `last_finished_at`
+- `last_error`
+- `last_generation`
+- `last_successful_generation`
+
+Aliases include:
+
+```json
+{
+  "alias_id": "finance-x",
+  "platform": "windows-drive",
+  "path": "X:\\Finance",
+  "target": "/mnt/finance",
+  "canonical": false
+}
+```
+
+`target` is optional. It is used when an alias maps to a canonical subfolder.
+
+### POST /v1/search
+
+Searches indexed files and folders.
+
+```json
+{
+  "search_id": "client-correlation-id",
   "query": "budget q3",
   "filters": {
-    "roots": ["local-sample"],
+    "roots": ["finance"],
     "extensions": ["pdf", "docx"],
-    "path_prefixes": ["C:\\Shares\\Finance", "C:\\Shares\\Legal"],
-    "exclude_paths": ["C:\\Shares\\Legal\\Archive"],
+    "path_prefix": "X:\\Finance",
+    "path_prefixes": ["X:\\Finance", "X:\\Legal"],
+    "include_paths": ["X:\\Finance\\Open"],
+    "exclude_paths": ["X:\\Finance\\Archive"],
+    "scope_aliases": [
+      {
+        "platform": "windows-drive",
+        "path": "X:\\",
+        "target": "\\\\nas01\\Shared"
+      }
+    ],
     "kind": "file",
     "modified_after": "2026-01-01T00:00:00Z",
     "modified_before": "2026-12-31T23:59:59Z",
@@ -77,71 +147,180 @@ Content-Type: application/json
 }
 ```
 
-`path_prefix` remains supported for compatibility. `path_prefixes` and `include_paths` are equivalent multi-scope include fields; `exclude_paths` removes scopes. Prefix matching is path-segment-aware, so `C:\Legal` matches `C:\Legal\brief.docx` but not `C:\Legalities\brief.docx`.
+Request fields:
 
-Search responses echo `search_id` and include `offset`, `has_more`, and `next_offset` for progressive paging. Results always contain `result_id`, `etag`, `root_id`, canonical `path`, `kind`, `is_folder`, `indexed_at`, and filename/path match metadata. The response `index` object includes per-root crawl status, generation, and freshness in seconds.
+- `search_id`: echoed back for logs and cancellation correlation.
+- `query`: free text FTS query. Raw query text is not path-alias rewritten.
+- `limit`: page size, capped by capabilities.
+- `offset`: result offset for paging.
+- `sort`: `name`, `modified`, `size`, or `relevance`.
+- `sort_direction`: `asc` or `desc`.
 
-`filters.match_fields` explicitly controls the FTS columns searched. Accepted
-values are `name`, `path`, `extension`, and `content`. Omit it to preserve the
-legacy all-fields search. QSurfer should use `["name", "path", "extension"]`
-when **Search contents** is off and add `"content"` when it is on. Invalid or
-empty supplied values return the structured `invalid_match_fields` error.
+Filters:
 
-### Directories and suggestions
+- `roots`: restrict to root IDs.
+- `extensions`: extension allow-list for this search.
+- `path_prefix`: legacy single path scope.
+- `path_prefixes`: multiple include scopes.
+- `include_paths`: equivalent to `path_prefixes`; preferred for QSurfer scoped
+  folder selection.
+- `exclude_paths`: multiple excluded scopes.
+- `scope_aliases`: request-local path translations supplied by a client.
+- `kind`: `file` or `folder`.
+- `modified_after` / `modified_before`: RFC3339 time bounds.
+- `min_size` / `max_size`: byte bounds.
+- `match_fields`: any of `name`, `path`, `extension`, `content`.
 
-```http
-POST /v1/directories
-POST /v1/suggest
-```
+Path scope matching is segment-aware. `C:\Legal` matches `C:\Legal\brief.docx`
+but not `C:\Legalities\brief.docx`.
 
-Both accept the same request shape as search and return the same response shape, but only return indexed folders. `suggest` is capped at 25 results for address-bar autocomplete. These endpoints never inspect the live filesystem.
+Folders only match by their own folder name. A child folder is not returned just
+because an ancestor folder matched the query.
 
-### Limits
-
-Read `GET /v1/capabilities` before integrating a client. It declares supported filters/sorts, max page size, the 100-path scope ceiling, and the bounded concurrent-search capacity.
-
-The shared QSurfer provider fixture is [qsurfer-search-v1.json](../contracts/qsurfer-search-v1.json). Both providers should validate the required response/result fields and the path-segment scope rule against it.
-
-## Admin API
-
-### Portable configuration backup and diagnostics
-
-```http
-GET /admin/v1/config/export
-POST /admin/v1/config/import
-GET /admin/v1/diagnostics
-```
-
-Export/import carries index, crawler, watcher, and root settings, including root path aliases. Authentication tokens and token-file paths are deliberately excluded. Import preserves the current service and management authentication settings and returns `restart_recommended: true` when the changed settings require process restart.
-
-Diagnostics returns the redacted backup, current service/index generation, root states, recent crawl runs, and metrics. It explicitly reports whether a file log sink is configured.
-
-### Service
-
-```http
-GET /admin/v1/service
-```
-
-### Config View
-
-```http
-GET /admin/v1/config
-```
-
-Tokens are redacted.
-
-### Optional Content and OCR Settings
-
-```http
-PUT /admin/v1/crawler/settings
-Content-Type: application/json
-```
+Response:
 
 ```json
 {
-  "collect_ownership": false,
+  "search_id": "client-correlation-id",
+  "query": "budget q3",
+  "limit": 50,
+  "offset": 0,
+  "has_more": true,
+  "next_offset": 50,
+  "sort": "modified",
+  "sort_direction": "desc",
+  "results": [
+    {
+      "id": "uuid",
+      "result_id": "uuid",
+      "root_id": "finance",
+      "path": "/mnt/finance/reports/q3-budget.docx",
+      "display_path": "X:\\Finance\\reports\\q3-budget.docx",
+      "normalized_path": "/mnt/finance/reports/q3-budget.docx",
+      "name": "q3-budget.docx",
+      "extension": "docx",
+      "kind": "file",
+      "is_folder": false,
+      "etag": "123:2026-09-11T12:00:00Z",
+      "signature": "123:2026-09-11T12:00:00Z",
+      "size": 123,
+      "modified_at": "2026-09-11T12:00:00Z",
+      "indexed_at": "2026-09-11T12:01:00Z",
+      "status": "active",
+      "access_status": "metadata_readable",
+      "owner": "DOMAIN\\user",
+      "content_status": "extracted",
+      "ocr_status": "not_requested",
+      "hash_status": "hashed",
+      "content_hash": "sha256...",
+      "matched_fields": ["name", "path"],
+      "highlights": {
+        "name": ["q3-budget.docx"]
+      }
+    }
+  ],
+  "index": {
+    "ready": true,
+    "generation": 42,
+    "freshness_seconds": 120,
+    "roots": {
+      "finance": {
+        "status": "ok",
+        "generation": 42,
+        "last_successful_generation": 42,
+        "document_count": 12345,
+        "freshness_seconds": 120
+      }
+    }
+  }
+}
+```
+
+`path` is the stable canonical service path. `display_path` is optional and
+client-friendly. QSurfer should display `display_path || path` while using
+canonical `path`, `root_id`, `result_id`, and `etag` for identity/cache logic.
+
+### POST /v1/directories
+
+Same request/response shape as search, but only returns folders.
+
+Use this for typed folder scope resolution and address autocomplete when the
+client needs folder-only results.
+
+### POST /v1/suggest
+
+Same request shape as search, capped for lightweight folder/path suggestions.
+It never crawls the live filesystem.
+
+## Admin API
+
+### POST /admin/v1/bootstrap
+
+Localhost-only first-run token setup:
+
+```json
+{"token":"at-least-sixteen-chars"}
+```
+
+### GET /admin/v1/service
+
+Admin-authenticated health view.
+
+### GET /admin/v1/config
+
+Returns effective configuration with tokens redacted.
+
+### GET /admin/v1/config/export
+
+Exports index, crawler, watcher, and root settings. Secrets and token paths are
+excluded.
+
+### POST /admin/v1/config/import
+
+Imports an exported config backup. Current search/admin auth is preserved.
+
+### POST /admin/v1/config/validate
+
+Validates the active config.
+
+### GET /admin/v1/metrics
+
+Returns crawler rates, I/O rate, active state, pause/throttle state, and
+`index_size_bytes`.
+
+### GET /admin/v1/diagnostics
+
+Returns redacted config, service info, root states, recent crawls, crawler
+metrics, and log availability.
+
+### POST /admin/v1/crawler/pause
+
+```json
+{"seconds":300}
+```
+
+Pauses crawler work for up to 24 hours.
+
+### POST /admin/v1/crawler/resume
+
+Clears manual pause.
+
+### POST /admin/v1/service/stop
+
+Cancels active crawls, waits briefly for checkpoints/catalog writes, then
+shuts the process down through the service lifecycle.
+
+### PUT /admin/v1/crawler/settings
+
+Updates global crawler enrichment settings:
+
+```json
+{
+  "collect_ownership": true,
   "content_extraction": {
     "enabled": true,
+    "worker_count": 1,
+    "queue_size": 1000,
     "max_file_size_mb": 64
   },
   "ocr": {
@@ -150,101 +329,122 @@ Content-Type: application/json
     "tesseract_command": "tesseract",
     "ocrmypdf_command": "ocrmypdf",
     "languages": "eng",
+    "worker_count": 1,
+    "queue_size": 100,
     "max_file_size_mb": 128,
     "timeout_seconds": 180
   },
   "hashing": {
-    "enabled": false,
+    "enabled": true,
+    "worker_count": 1,
+    "queue_size": 1000,
     "max_file_size_mb": 2048
   }
 }
 ```
 
-OCR is an optional local post-extraction stage. When enabled alongside content
-extraction, QIndexer sends image files with no embedded text to Tesseract and
-scanned PDFs with no embedded text to OCRmyPDF in `auto` mode. It never changes
-the source file. `ocr_status` on a result is one of `not_requested`, `pending`,
-`queued`, `extracted`, `failed`, or `unsupported`. `failed` commonly means the
-selected local executable is absent, timed out, or rejected the source file.
+### PUT /admin/v1/network
 
-`GET /v1/capabilities` reports `ocr_search: true` only when both content
-extraction and OCR are enabled. A client may search OCR text normally once the
-result reaches `ocr_status: "extracted"`; it does not need a separate endpoint.
+Updates search/admin bind addresses and public URL. A restart is required.
 
-### Validate Config
+### GET /admin/v1/roots
 
-```http
-POST /admin/v1/config/validate
-```
+Admin-authenticated root list.
 
-### Validate Root Path
+### POST /admin/v1/roots
 
-```http
-POST /admin/v1/roots/{root_id}/validate
-```
+Creates a root. Payload matches root rules.
 
-### Update Root Rules
+### PUT /admin/v1/roots/{root_id}/rules
 
-```http
-PUT /admin/v1/roots/{root_id}/rules
-Content-Type: application/json
-```
+Updates all rules for one root. The full payload is accepted:
 
 ```json
 {
+  "id": "finance",
+  "name": "Finance share",
   "path": "\\\\nas01\\finance\\*",
   "enabled": true,
   "labels": ["nas", "finance"],
   "credential_ref": "os-service-account",
-  "include_extensions": ["pdf", "docx", "xlsx"],
+  "path_aliases": [
+    {
+      "id": "finance-x",
+      "platform": "windows-drive",
+      "path": "X:\\Finance",
+      "target": "\\\\nas01\\finance"
+    }
+  ],
+  "include_extensions": ["pdf", "docx"],
   "exclude_extensions": ["tmp", "bak"],
-  "include_file_patterns": ["*.pdf", "report-*.xlsx"],
+  "include_file_patterns": ["*.pdf"],
   "exclude_file_patterns": ["~$*", "*.tmp"],
   "include_folder_patterns": ["**/Finance/**"],
-  "exclude_folder_patterns": ["**/.git/**", "**/node_modules/**"],
-  "exclude_patterns": []
+  "exclude_folder_patterns": ["**/.git/**"],
+  "exclude_patterns": [],
+  "content_extraction": true,
+  "ocr": false,
+  "hashing": true,
+  "collect_ownership": true
 }
 ```
 
-Rules are persisted to the YAML config. Secret values are not managed through this endpoint.
+When the canonical root path changes, QIndexer rewrites existing indexed rows
+from the previous path to the new path and preserves the previous path as an
+alias.
 
-The same root-rules payload also accepts `content_extraction`, `ocr`, `hashing`,
-and `collect_ownership` booleans. They are evaluated per root. Existing roots
-without these fields inherit the crawler-wide values for compatibility. Global
-settings retain queue size, worker count, file size, timeout, and OCR engine
-configuration; they do not force enrichment onto a root with its local switch
-off.
+### POST /admin/v1/roots/{root_id}/validate
 
-Root paths may be literal paths or filesystem glob patterns. Examples:
+Checks whether the root path can be expanded/reached.
 
-- `D:\Shares`
-- `X:\*`
-- `\\nas01\finance\*`
-- `/mnt/nas-finance/*`
+### POST /admin/v1/roots/{root_id}/crawl
 
-### Trigger Crawl
+Schedules a manual crawl for one root.
 
-```http
-POST /admin/v1/roots/{root_id}/crawl
-```
-
-### Clear One Root's Index
-
-```http
-POST /admin/v1/roots/{root_id}/clear-index
-Content-Type: application/json
-```
+### POST /admin/v1/roots/{root_id}/clear-index
 
 ```json
-{"confirm_root_id":"finance-share"}
+{"confirm_root_id":"finance"}
 ```
 
-Clearing removes only that root's indexed documents, search entries,
-checkpoints, crawl history, and root state. It never deletes source files. The
-request is rejected while that root has an active crawl.
+Clears documents, FTS rows, checkpoints, crawl history, and root state for one
+root. Source files are never deleted.
 
-### Recent Crawls
+### POST /admin/v1/roots/{root_id}/repair-index
 
-```http
-GET /admin/v1/crawls
+Repairs path identity for one root:
+
+- Rewrites alias-prefixed rows into the canonical root path.
+- Supports aliases with optional canonical `target`.
+- Merges duplicate rows when the canonical row already exists.
+- Repairs UNC/machine-prefixed wrappers around the canonical root path.
+- Rewrites crawl checkpoints at the same time.
+- Does not modify source files.
+
+Response:
+
+```json
+{
+  "status": "repaired",
+  "root_id": "finance",
+  "aliases_checked": 2,
+  "paths_rewritten": 100,
+  "duplicate_paths_merged": 12,
+  "embedded_paths_rewritten": 8,
+  "embedded_paths_merged": 4,
+  "aliases_repaired": ["X:\\Finance"]
+}
 ```
+
+### DELETE /admin/v1/roots/{root_id}
+
+```json
+{"confirm_root_id":"finance"}
+```
+
+Removes the root from config and marks its indexed rows as deleted/no-op for
+serving. Cleanup is deferred. Source files are never deleted.
+
+### GET /admin/v1/crawls
+
+Returns recent crawl activity.

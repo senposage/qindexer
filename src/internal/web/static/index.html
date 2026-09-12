@@ -65,6 +65,10 @@
         <strong id="document-count">0</strong>
       </div>
       <div class="metric">
+        <span>Index size</span>
+        <strong id="index-size">0 B</strong>
+      </div>
+      <div class="metric">
         <span>Roots</span>
         <strong id="root-count">0</strong>
       </div>
@@ -106,6 +110,7 @@
         </label>
         <button id="pause-crawler" type="button" class="secondary">Pause crawler</button>
         <button id="resume-crawler" type="button" class="secondary">Resume</button>
+        <button id="stop-service" type="button" class="danger">Stop service</button>
       </div>
       <span id="message" role="status"></span>
     </section>
@@ -175,7 +180,7 @@
             </label>
             <label class="wide-field">
               Client path aliases
-              <textarea id="rules-aliases" spellcheck="false" placeholder="finance-x | windows-drive | X:\Finance&#10;finance-unc | windows-unc | \\nas01\finance&#10;finance-linux | linux | /mnt/finance"></textarea>
+              <textarea id="rules-aliases" spellcheck="false" placeholder="finance-x | windows-drive | X:\Finance&#10;mat-x | windows-drive | X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY | /mnt/shared/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY&#10;finance-linux | linux | /mnt/finance"></textarea>
             </label>
           </div>
         </section>
@@ -245,6 +250,7 @@
 
         <div class="form-actions">
           <button id="save-rules" type="submit">Save Rules</button>
+          <button id="save-repair-rules" type="submit" class="secondary">Save and repair index</button>
           <button id="cancel-rules" type="button" class="secondary">Cancel</button>
         </div>
       </form>
@@ -273,6 +279,31 @@
         <div class="panel-title">
           <h2>Configuration</h2>
         </div>
+        <form id="network-settings-form" class="settings-form">
+          <div class="form-section-title">
+            <p class="eyebrow">Network interfaces</p>
+            <p>Changes are written to config and take effect after restart.</p>
+          </div>
+          <div class="rules-grid">
+            <label>
+              Search API listen addresses
+              <textarea id="settings-search-binds" spellcheck="false" placeholder="127.0.0.1:41973&#10;10.44.0.8:41973&#10;192.168.50.9:41973"></textarea>
+            </label>
+            <label>
+              Admin UI listen addresses
+              <textarea id="settings-admin-binds" spellcheck="false" placeholder="127.0.0.1:41974&#10;10.44.0.8:41974&#10;192.168.50.9:41974"></textarea>
+            </label>
+            <label>
+              Public search URL
+              <input id="settings-public-url" type="url" placeholder="http://10.44.0.8:41973">
+            </label>
+            <label class="check-row">
+              <input id="settings-admin-enabled" type="checkbox">
+              <span>Enable admin UI/API</span>
+            </label>
+          </div>
+          <div class="form-actions"><button type="submit">Save network settings</button></div>
+        </form>
         <form id="indexing-settings-form" class="settings-form">
           <div class="form-section-title">
             <p class="eyebrow">Optional indexing work</p>

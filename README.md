@@ -1,32 +1,48 @@
 # QIndexer
 
-QIndexer is a portable filesystem indexer and search service for QSurfer. It
-crawls local disks, UNC shares, and mounted NAS paths into a SQLite-backed
-metadata index, then exposes a small authenticated HTTP API for search, folder
-resolution, and autocomplete.
+QIndexer is a portable filesystem indexer and HTTP search service for QSurfer.
+It crawls local disks, mapped drives, UNC shares, Linux mounts, and NAS trees
+into a SQLite-backed catalog, then exposes QSurfer-compatible metadata,
+folder, content, and autocomplete search.
 
-It is built for sprawling file trees without treating a NAS like a stress test:
-bounded crawler queues, one serialized SQLite writer, concurrent search reads,
-filesystem-watch hints, checkpointed crawls, periodic reconciliation, and
-adaptive CPU/disk throttling are all built in.
+QIndexer is built for large office storage: bounded worker pools, checkpointed
+crawls, one serialized SQLite writer, concurrent search reads, incremental
+filesystem hints, periodic reconciliation, repair tools, and adaptive CPU/disk
+throttling are included.
 
-## What It Does
+QIndexer indexes and reports what the service account can see. It does not
+replace operating system, domain, or NAS permissions.
 
-- Indexes files and folders as first-class results.
-- Searches filename, path, extension, and optionally extracted content.
-- Crawls Windows drive letters, UNC shares, Linux mounts, and wildcard roots.
-- Persists crawl checkpoints and catalog state in SQLite.
-- Offers a local web admin UI for roots, rules, crawl controls, and diagnostics.
-- Returns QSurfer-ready paging, result IDs, ETags, root status, freshness, and folder-only search/suggest responses.
-- Advertises root aliases so `X:\`, `\\server\share`, and `/mnt/share` can be recognized as views of the same indexed root.
+## Highlights
 
-QIndexer observes filesystem access; it does not replace OS or NAS permissions.
-The service can report best-effort owner and access metadata, but the host and
-share remain the authority for opening files.
+- File and folder indexing with stable result IDs.
+- Filename, path, extension, metadata, and optional content search.
+- Optional Office, PDF, text, OCR, hash, and owner metadata enrichment.
+- Folder-only search and indexed path suggestion for address bars.
+- Windows drive letters, UNC paths, Linux mounts, and wildcard roots.
+- Root aliases for cross-machine path translation.
+- Canonical `path` plus client-friendly `display_path` in search results.
+- Segment-aware path scopes so `C:\Legal` does not match `C:\Legalities`.
+- Root-scoped include/exclude rules for file types, file wildcards, folder
+  wildcards, and legacy path patterns.
+- Search pagination, sorting, highlights, matched fields, freshness, and root
+  status metadata.
+- Local admin web UI for first-run token setup, root/rule management, crawler
+  controls, diagnostics, network bindings, repair, and index clearing.
+- Multi-interface listening for search and admin APIs.
+- Root repair tools that merge duplicate rows after moving between mapped
+  drives, UNC paths, and mounted NAS paths.
 
 ## Quick Start
 
-Requirements: Go 1.24.1 or newer.
+Requirements:
+
+- Go 1.24.1 or newer for building from source.
+- Windows, Linux, or another Go-supported host with filesystem access to the
+  roots being indexed.
+- Optional: Tesseract and OCRmyPDF for OCR.
+
+Windows:
 
 ```powershell
 cd src
@@ -34,68 +50,115 @@ cd src
 .\dist\qindexer_windows_amd64.exe run --config .\configs\example.yaml
 ```
 
+Linux:
+
 ```bash
 cd src
 ./scripts/build.sh
 ./dist/qindexer_linux_amd64 run --config ./configs/example.yaml
 ```
 
-Open the admin UI at `http://127.0.0.1:41974/`. On a fresh configuration, set
-an admin token there before either API accepts requests. The initial token
-secures both search and administration by default.
+Open the admin UI:
 
-## Endpoints
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /v1/health` | Service, protocol, and index health |
-| `GET /v1/capabilities` | Supported filters, sorts, limits, and features |
-| `GET /v1/roots` | Indexed roots, canonical paths, aliases, and crawl state |
-| `POST /v1/search` | Paged metadata/content search |
-| `POST /v1/directories` | Indexed folder-only lookup |
-| `POST /v1/suggest` | Indexed folder/path autocomplete |
-| `http://127.0.0.1:41974/` | Local management UI |
-
-The protocol is documented in [src/docs/api.md](src/docs/api.md). QSurfer
-integration notes and the shared provider contract live in
-[AGENT-WATCH.md](AGENT-WATCH.md) and
-[src/contracts/qsurfer-search-v1.json](src/contracts/qsurfer-search-v1.json).
-
-## Roots And NAS Paths
-
-Roots are configured independently, each with its own include/exclude rules.
-Examples are in [src/configs](src/configs), including Windows UNC and Linux NAS
-setups. A root may advertise client-facing aliases:
-
-```yaml
-path: "\\\\nas01\\finance"
-path_aliases:
-  - id: finance-x-drive
-    platform: windows-drive
-    path: "X:\\Finance"
-  - id: finance-linux-mount
-    platform: linux
-    path: "/mnt/finance"
+```text
+http://127.0.0.1:41974/
 ```
 
-Aliases translate an explicit folder scope only. Raw search terms are never
-rewritten.
+On a fresh config, QIndexer waits for an admin token to be set from the local
+management UI. Once set, the same token secures both search and admin APIs
+unless separate token files are configured.
 
-## Performance And Optional Work
+## Command Line
 
-The crawler defaults to bounded concurrency and pauses itself under configured
-CPU or disk pressure. Filesystem watches supply incremental hints where the OS
-supports them; scheduled full crawls reconcile anything missed.
+```text
+qindexer run --config configs/example.yaml
+qindexer crawl --config configs/example.yaml --root root-id
+qindexer crawl --config configs/example.yaml
+qindexer status --config configs/example.yaml
+qindexer version
+```
 
-Office/PDF/plain-text extraction and SHA-256 hashing run in separate bounded
-background queues and are disabled by default. Enable them only after deciding
-the appropriate I/O budget for the host and NAS.
+`run` starts the search API, admin API, crawler loop, watcher, and background
+content/OCR/hash workers. `crawl` performs a one-shot crawl and exits.
+
+## Documentation
+
+- [Configuration](src/docs/configuration.md): every config field, root rule,
+  alias format, and enrichment setting.
+- [API](src/docs/api.md): search/admin protocol, request and response shapes,
+  errors, pagination, sorting, scopes, repair, and diagnostics.
+- [Operations](src/docs/operations.md): deployment, tuning, NAS behavior,
+  shutdown, troubleshooting, backup/export/import, and repair workflows.
+- [Changelog](CHANGELOG.md): release history.
+
+## Default Ports
+
+| Surface | Default |
+| --- | --- |
+| Search API | `127.0.0.1:41973` |
+| Admin API | `127.0.0.1:41974` |
+| Admin UI | `http://127.0.0.1:41974/` |
+
+Both APIs can listen on multiple interfaces:
+
+```yaml
+server:
+  bind: "127.0.0.1:41973"
+  bind_addresses:
+    - "127.0.0.1:41973"
+    - "10.8.0.2:41973"
+management:
+  bind: "127.0.0.1:41974"
+  bind_addresses:
+    - "127.0.0.1:41974"
+```
+
+Expose remote admin endpoints only on trusted networks or behind TLS and
+network access controls.
+
+## Root Aliases
+
+Each root has one canonical service path. Aliases describe client-visible paths
+for the same storage:
+
+```yaml
+roots:
+  - id: "shared"
+    path: "/home/legitsu/.qsurfer/mounts/shared-02800937c0a4"
+    path_aliases:
+      - id: "shared-x"
+        platform: "windows-drive"
+        path: "X:\\"
+      - id: "mat-x"
+        platform: "windows-drive"
+        path: "X:\\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY"
+        target: "/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY"
+```
+
+Search responses keep `path` stable and canonical. `display_path` is filled
+from the best matching alias so a Windows client can show `X:\...` while still
+using canonical paths for identity, caching, and repair.
+
+## Admin UI
+
+The web UI supports:
+
+- First-run admin token bootstrap.
+- Root creation, deletion, validation, manual crawl, clear-index, and repair.
+- Per-root path aliases and include/exclude rules.
+- Per-root content extraction, OCR, hashing, and ownership toggles.
+- Crawler pause/resume and service stop.
+- Network binding configuration.
+- Live metrics including operations/sec, I/O rate, active crawler state, and
+  index size.
+- Recent crawl activity and diagnostics.
 
 ## Development
 
 ```powershell
 cd src
 go test ./...
+go build ./cmd/qindexer
 ```
 
-Operational deployment notes are in [src/docs/operations.md](src/docs/operations.md).
+The public repository is `https://github.com/senposage/qindexer`.

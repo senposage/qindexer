@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"qindexer/internal/catalog"
 	"qindexer/internal/config"
@@ -74,6 +75,67 @@ func TestAdminBootstrapLocksManagementUntilTokenIsSet(t *testing.T) {
 	if len(cfg.Roots) != 1 || cfg.Roots[0].ID != "finance" || cfg.Roots[0].Name != "Finance share" {
 		t.Fatalf("unexpected created roots: %#v", cfg.Roots)
 	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/admin/v1/roots/finance", bytes.NewBufferString(`{"confirm_root_id":"finance"}`))
+	deleteReq.Header.Set("Authorization", "Bearer sixteen-character-token")
+	deleteResult := httptest.NewRecorder()
+	handler.ServeHTTP(deleteResult, deleteReq)
+	if deleteResult.Code != http.StatusOK {
+		t.Fatalf("expected root deletion success, got %d: %s", deleteResult.Code, deleteResult.Body.String())
+	}
+	if len(cfg.Roots) != 0 {
+		t.Fatalf("root configuration was not removed: %#v", cfg.Roots)
+	}
+}
+
+func TestMetricsIncludesIndexSize(t *testing.T) {
+	ctx := context.Background()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	cat, err := catalog.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics", nil)
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK || !bytes.Contains(result.Body.Bytes(), []byte(`"index_size_bytes"`)) {
+		t.Fatalf("expected index size metric, got %d: %s", result.Code, result.Body.String())
+	}
+}
+
+func TestUpdateNetworkSettingsSavesMultipleBindAddresses(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPut, "/admin/v1/network", bytes.NewBufferString(`{"server":{"bind_addresses":["127.0.0.1:41973","10.44.0.8:41973"],"public_base_url":"http://10.44.0.8:41973"},"management":{"enabled":true,"bind_addresses":["127.0.0.1:41974","192.168.50.9:41974"]}}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected network settings save, got %d: %s", result.Code, result.Body.String())
+	}
+	if cfg.Server.Bind != "127.0.0.1:41973" || len(cfg.Server.BindAddresses) != 2 || cfg.Server.BindAddresses[1] != "10.44.0.8:41973" {
+		t.Fatalf("unexpected server binds: %#v", cfg.Server)
+	}
+	if !cfg.Management.Enabled || cfg.Management.Bind != "127.0.0.1:41974" || len(cfg.Management.BindAddresses) != 2 || cfg.Management.BindAddresses[1] != "192.168.50.9:41974" {
+		t.Fatalf("unexpected management binds: %#v", cfg.Management)
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"restart_required":true`)) {
+		t.Fatalf("expected restart flag, got %s", result.Body.String())
+	}
 }
 
 func TestRootAliasesUseConfiguredOrDeterministicIDs(t *testing.T) {
@@ -90,11 +152,230 @@ func TestRootAliasesUseConfiguredOrDeterministicIDs(t *testing.T) {
 	}
 }
 
+func TestUpdateRootRulesPreservesPreviousRootPathAsAlias(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots:      []config.RootConfig{{ID: "shared", Path: `X:\`, Enabled: true}},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPut, "/admin/v1/roots/shared/rules", bytes.NewBufferString(`{"path":"/mnt/shared-somenumbershre","enabled":true,"path_aliases":[{"id":"linux-cifs","platform":"linux","path":"/mnt/shared-somenumbershre"}]}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected update success, got %d: %s", result.Code, result.Body.String())
+	}
+	if cfg.Roots[0].Path != "/mnt/shared-somenumbershre" {
+		t.Fatalf("root path was not updated: %#v", cfg.Roots[0])
+	}
+	if len(cfg.Roots[0].PathAliases) != 2 {
+		t.Fatalf("expected linux alias plus preserved windows alias: %#v", cfg.Roots[0].PathAliases)
+	}
+	if cfg.Roots[0].PathAliases[1].Platform != "windows-drive" || cfg.Roots[0].PathAliases[1].Path != `X:\` {
+		t.Fatalf("previous Windows root path was not preserved: %#v", cfg.Roots[0].PathAliases)
+	}
+}
+
+func TestUpdateRootRulesRewritesIndexedRootPath(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots:      []config.RootConfig{{ID: "shared", Path: `X:\`, Enabled: true}},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now().UTC()
+	doc := catalog.Document{ID: "doc", RootID: "shared", Path: `X:\Cases\Budget.docx`, NormalizedPath: catalog.NormalizePath(`X:\Cases\Budget.docx`), Name: "Budget.docx", Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPut, "/admin/v1/roots/shared/rules", bytes.NewBufferString(`{"path":"/mnt/shared-real","enabled":true}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected update success, got %d: %s", result.Code, result.Body.String())
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"paths_rewritten":1`)) {
+		t.Fatalf("expected rewrite count in response, got %s", result.Body.String())
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != `/mnt/shared-real/Cases/Budget.docx` {
+		t.Fatalf("indexed path was not rewritten: %#v", resp.Results)
+	}
+}
+
+func TestRepairRootIndexRewritesAliasPaths(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots: []config.RootConfig{{
+			ID:      "shared",
+			Path:    `/mnt/shared-real`,
+			Enabled: true,
+			PathAliases: []config.PathAlias{
+				{ID: "old-x", Platform: "windows-drive", Path: `X:\`},
+			},
+		}},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now().UTC()
+	for _, item := range []struct {
+		id   string
+		path string
+	}{
+		{"old", `X:\Cases\Budget.docx`},
+		{"new", `/mnt/shared-real/Cases/Budget.docx`},
+	} {
+		doc := catalog.Document{ID: item.id, RootID: "shared", Path: item.path, NormalizedPath: catalog.NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/roots/shared/repair-index", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected repair success, got %d: %s", result.Code, result.Body.String())
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"duplicate_paths_merged":1`)) {
+		t.Fatalf("expected duplicate merge in response, got %s", result.Body.String())
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Query: "budget", Filters: catalog.SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != `/mnt/shared-real/Cases/Budget.docx` {
+		t.Fatalf("repair left duplicate or wrong path: %#v", resp.Results)
+	}
+}
+
+func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots: []config.RootConfig{{
+			ID:      "AA-MAT",
+			Path:    `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4`,
+			Enabled: true,
+			PathAliases: []config.PathAlias{
+				{ID: "old-x", Platform: "windows-drive", Path: `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY`},
+			},
+		}},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now().UTC()
+	oldPath := `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\MATRIMONIAL\BATTAGLIA, ESTHER\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+	newPath := `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY/MATRIMONIAL/BATTAGLIA, ESTHER/ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+	for _, item := range []struct {
+		id   string
+		path string
+	}{
+		{"old", oldPath},
+		{"new", newPath},
+	} {
+		doc := catalog.Document{ID: item.id, RootID: "AA-MAT", Path: item.path, NormalizedPath: catalog.NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/roots/AA-MAT/repair-index", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected repair success, got %d: %s", result.Code, result.Body.String())
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"duplicate_paths_merged":1`)) {
+		t.Fatalf("expected duplicate merge in response, got %s", result.Body.String())
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Query: "attorney", Filters: catalog.SearchFilters{Roots: []string{"AA-MAT"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != newPath {
+		t.Fatalf("subfolder alias repair left duplicate or wrong path: %#v", resp.Results)
+	}
+}
+
+func TestResolveScopeAliasesInfersSubfolderAliasTarget(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{
+		ID:   "AA-MAT",
+		Path: `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4`,
+		PathAliases: []config.PathAlias{
+			{Platform: "windows-drive", Path: `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY`},
+		},
+	}}}
+	server := &Server{cfg: cfg}
+	req := catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\MATRIMONIAL`}}}
+	if _, err := server.resolveScopeAliases(&req); err != nil {
+		t.Fatal(err)
+	}
+	want := `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY/MATRIMONIAL`
+	if req.Filters.IncludePaths[0] != want {
+		t.Fatalf("scope alias resolved to %q, want %q", req.Filters.IncludePaths[0], want)
+	}
+	resp := catalog.SearchResponse{Results: []catalog.Document{{
+		RootID: "AA-MAT",
+		Path:   `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY/MATRIMONIAL/example.docx`,
+	}}}
+	resolution, err := server.resolveScopeAliases(&catalog.SearchRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution.applyDisplayAliases(&resp)
+	wantDisplay := `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\MATRIMONIAL\example.docx`
+	if resp.Results[0].DisplayPath != wantDisplay {
+		t.Fatalf("display path = %q, want %q", resp.Results[0].DisplayPath, wantDisplay)
+	}
+}
+
 func TestResolveScopeAliasesOnlyChangesExplicitScopes(t *testing.T) {
 	cfg := &config.Config{Roots: []config.RootConfig{{ID: "finance", Path: `\\nas\finance`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Finance`}}}}}
 	server := &Server{cfg: cfg}
 	req := catalog.SearchRequest{Query: `X:\Finance budget`, Filters: catalog.SearchFilters{IncludePaths: []string{`X:\Finance\Q3`}}}
-	if err := server.resolveScopeAliases(&req); err != nil {
+	if _, err := server.resolveScopeAliases(&req); err != nil {
 		t.Fatal(err)
 	}
 	if req.Query != `X:\Finance budget` {
@@ -112,7 +393,55 @@ func TestResolveScopeAliasesRejectsAmbiguity(t *testing.T) {
 	cfg := &config.Config{Roots: []config.RootConfig{{ID: "one", Path: `C:\One`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Shared`}}}, {ID: "two", Path: `C:\Two`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Shared`}}}}}
 	server := &Server{cfg: cfg}
 	req := catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`X:\Shared\docs`}}}
-	if err := server.resolveScopeAliases(&req); err == nil {
+	if _, err := server.resolveScopeAliases(&req); err == nil {
 		t.Fatal("expected ambiguous alias error")
+	}
+}
+
+func TestResolveScopeAliasesUsesEphemeralAliasAndPreservesQuery(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "shared", Path: `\\nas\Shared`}}}
+	server := &Server{cfg: cfg}
+	req := catalog.SearchRequest{
+		Query: `name:"budget" path:X:\Cases`,
+		Filters: catalog.SearchFilters{
+			IncludePaths: []string{`X:\Cases\Active`},
+			ScopeAliases: []catalog.ScopeAlias{{Path: `X:\`, Target: `\\nas\Shared`, Platform: "windows-drive"}},
+		},
+	}
+	resolution, err := server.resolveScopeAliases(&req)
+	if err != nil {
+		t.Fatalf("expected request alias to resolve: %v", err)
+	}
+	if req.Query != `name:"budget" path:X:\Cases` {
+		t.Fatalf("raw query was rewritten: %q", req.Query)
+	}
+	if got := req.Filters.IncludePaths[0]; got != `\\nas\Shared\Cases\Active` {
+		t.Fatalf("unexpected canonical scope %q", got)
+	}
+	response := catalog.SearchResponse{Results: []catalog.Document{{RootID: "shared", Path: `\\nas\Shared\Cases\Active\budget.docx`}}}
+	resolution.applyDisplayAliases(&response)
+	if got := response.Results[0].DisplayPath; got != `X:\Cases\Active\budget.docx` {
+		t.Fatalf("unexpected display path %q", got)
+	}
+}
+
+func TestResolveScopeAliasesRejectsConflictingEphemeralAliases(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "one", Path: `\\nas\One`}, {ID: "two", Path: `\\nas\Two`}}}
+	server := &Server{cfg: cfg}
+	req := catalog.SearchRequest{Filters: catalog.SearchFilters{
+		IncludePaths: []string{`X:\Cases`},
+		ScopeAliases: []catalog.ScopeAlias{{Path: `X:\`, Target: `\\nas\One`}, {Path: `X:\`, Target: `\\nas\Two`}},
+	}}
+	if _, err := server.resolveScopeAliases(&req); err == nil {
+		t.Fatal("expected conflicting request aliases to fail")
+	}
+}
+
+func TestScopedPathSuffixPreservesLinuxCaseAndWindowsCaseFolding(t *testing.T) {
+	if _, ok := scopedPathSuffix(`/mnt/Shared/Cases`, `/mnt/shared`); ok {
+		t.Fatal("linux path comparison must be case sensitive")
+	}
+	if _, ok := scopedPathSuffix(`X:\CASES`, `x:\cases`); !ok {
+		t.Fatal("windows path comparison must be case insensitive")
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"qindexer/internal/extract"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -105,18 +107,27 @@ type SearchRequest struct {
 }
 
 type SearchFilters struct {
-	Roots          []string `json:"roots"`
-	Extensions     []string `json:"extensions"`
-	PathPrefix     string   `json:"path_prefix"`
-	PathPrefixes   []string `json:"path_prefixes"`
-	IncludePaths   []string `json:"include_paths"`
-	ExcludePaths   []string `json:"exclude_paths"`
-	Kind           string   `json:"kind"`
-	ModifiedAfter  string   `json:"modified_after"`
-	ModifiedBefore string   `json:"modified_before"`
-	MinSize        *int64   `json:"min_size"`
-	MaxSize        *int64   `json:"max_size"`
-	MatchFields    []string `json:"match_fields"`
+	Roots          []string     `json:"roots"`
+	Extensions     []string     `json:"extensions"`
+	PathPrefix     string       `json:"path_prefix"`
+	PathPrefixes   []string     `json:"path_prefixes"`
+	IncludePaths   []string     `json:"include_paths"`
+	ExcludePaths   []string     `json:"exclude_paths"`
+	ScopeAliases   []ScopeAlias `json:"scope_aliases"`
+	Kind           string       `json:"kind"`
+	ModifiedAfter  string       `json:"modified_after"`
+	ModifiedBefore string       `json:"modified_before"`
+	MinSize        *int64       `json:"min_size"`
+	MaxSize        *int64       `json:"max_size"`
+	MatchFields    []string     `json:"match_fields"`
+}
+
+// ScopeAlias is an ephemeral client path relationship used only to resolve a
+// request's explicit scope fields. It is never persisted in QIndexer config.
+type ScopeAlias struct {
+	Path     string `json:"path"`
+	Target   string `json:"target"`
+	Platform string `json:"platform,omitempty"`
 }
 
 type SearchResponse struct {
@@ -172,6 +183,10 @@ func Open(ctx context.Context, dataDir string) (*Catalog, error) {
 }
 
 func (c *Catalog) Close() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, _ = c.db.Exec(`PRAGMA optimize;`)
+	_, _ = c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE);`)
 	return c.db.Close()
 }
 
@@ -204,6 +219,255 @@ func (c *Catalog) ClearRoot(ctx context.Context, rootID string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return count, tx.Commit()
+}
+
+func (c *Catalog) DeactivateRoot(ctx context.Context, rootID string) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO deleted_roots(root_id, deleted_at) VALUES (?, ?)`, rootID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'deleted', access_status = 'root_removed' WHERE root_id = ? AND status <> 'deleted'`, rootID)
+	if err != nil {
+		return 0, err
+	}
+	count, _ := result.RowsAffected()
+	return count, tx.Commit()
+}
+
+func (c *Catalog) RewriteRootPath(ctx context.Context, rootID, oldRootPath, newRootPath string) (int64, int64, error) {
+	oldRootPath = strings.TrimSpace(oldRootPath)
+	newRootPath = strings.TrimSpace(newRootPath)
+	if rootPathSame(oldRootPath, newRootPath) {
+		return 0, 0, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id, path, normalized_path, extension FROM documents WHERE root_id = ?`, rootID)
+	if err != nil {
+		return 0, 0, err
+	}
+	type rewriteCandidate struct {
+		id, path, normalizedPath, extension string
+		suffix                              string
+	}
+	candidates := []rewriteCandidate{}
+	existing := map[string]string{}
+	for rows.Next() {
+		var candidate rewriteCandidate
+		if err := rows.Scan(&candidate.id, &candidate.path, &candidate.normalizedPath, &candidate.extension); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		existing[candidate.normalizedPath] = candidate.id
+		suffix, ok := rootPathSuffix(candidate.path, oldRootPath)
+		if !ok {
+			continue
+		}
+		candidate.suffix = suffix
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, err
+	}
+	var rewritten, merged int64
+	for _, candidate := range candidates {
+		newPath := joinRootPath(newRootPath, candidate.suffix)
+		newNormalized := NormalizePath(newPath)
+		if existingID := existing[newNormalized]; existingID != "" && existingID != candidate.id {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, candidate.id); err != nil {
+				return 0, 0, err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, candidate.id); err != nil {
+				return 0, 0, err
+			}
+			merged++
+			continue
+		}
+		name := filepath.Base(newPath)
+		var content string
+		if err := tx.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, candidate.id).Scan(&content); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE documents SET path = ?, normalized_path = ?, name = ? WHERE id = ?`, newPath, newNormalized, name, candidate.id); err != nil {
+			return 0, 0, err
+		}
+		if err := upsertFTS(ctx, tx, candidate.id, rootID, name, newPath, candidate.extension, content); err != nil {
+			return 0, 0, err
+		}
+		delete(existing, candidate.normalizedPath)
+		existing[newNormalized] = candidate.id
+		rewritten++
+	}
+	checkpoints, err := tx.QueryContext(ctx, `SELECT path FROM crawl_checkpoints WHERE root_id = ?`, rootID)
+	if err != nil {
+		return 0, 0, err
+	}
+	checkpointPaths := []string{}
+	for checkpoints.Next() {
+		var path string
+		if err := checkpoints.Scan(&path); err != nil {
+			checkpoints.Close()
+			return 0, 0, err
+		}
+		checkpointPaths = append(checkpointPaths, path)
+	}
+	if err := checkpoints.Close(); err != nil {
+		return 0, 0, err
+	}
+	for _, path := range checkpointPaths {
+		suffix, ok := rootPathSuffix(path, oldRootPath)
+		if !ok {
+			continue
+		}
+		newPath := joinRootPath(newRootPath, suffix)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ? AND normalized_path = ?`, rootID, NormalizePath(path)); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO crawl_checkpoints(root_id, normalized_path, path, completed_at) VALUES (?, ?, ?, ?)`,
+			rootID, NormalizePath(newPath), newPath, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return 0, 0, err
+		}
+	}
+	return rewritten, merged, tx.Commit()
+}
+
+func (c *Catalog) RepairEmbeddedRootPath(ctx context.Context, rootID, canonicalRootPath string) (int64, int64, error) {
+	canonicalRootPath = strings.TrimSpace(canonicalRootPath)
+	if canonicalRootPath == "" {
+		return 0, 0, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id, path, normalized_path, extension FROM documents WHERE root_id = ?`, rootID)
+	if err != nil {
+		return 0, 0, err
+	}
+	type repairCandidate struct {
+		id, path, normalizedPath, extension string
+		suffix                              string
+	}
+	candidates := []repairCandidate{}
+	existing := map[string]string{}
+	for rows.Next() {
+		var candidate repairCandidate
+		if err := rows.Scan(&candidate.id, &candidate.path, &candidate.normalizedPath, &candidate.extension); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		existing[candidate.normalizedPath] = candidate.id
+		suffix, ok := embeddedRootPathSuffix(candidate.path, canonicalRootPath)
+		if !ok {
+			continue
+		}
+		candidate.suffix = suffix
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, err
+	}
+	var rewritten, merged int64
+	for _, candidate := range candidates {
+		newPath := joinRootPath(canonicalRootPath, candidate.suffix)
+		newNormalized := NormalizePath(newPath)
+		if existingID := existing[newNormalized]; existingID != "" && existingID != candidate.id {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, candidate.id); err != nil {
+				return 0, 0, err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, candidate.id); err != nil {
+				return 0, 0, err
+			}
+			merged++
+			continue
+		}
+		name := filepath.Base(newPath)
+		var content string
+		if err := tx.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, candidate.id).Scan(&content); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE documents SET path = ?, normalized_path = ?, name = ? WHERE id = ?`, newPath, newNormalized, name, candidate.id); err != nil {
+			return 0, 0, err
+		}
+		if err := upsertFTS(ctx, tx, candidate.id, rootID, name, newPath, candidate.extension, content); err != nil {
+			return 0, 0, err
+		}
+		delete(existing, candidate.normalizedPath)
+		existing[newNormalized] = candidate.id
+		rewritten++
+	}
+	checkpoints, err := tx.QueryContext(ctx, `SELECT path FROM crawl_checkpoints WHERE root_id = ?`, rootID)
+	if err != nil {
+		return 0, 0, err
+	}
+	checkpointPaths := []string{}
+	for checkpoints.Next() {
+		var path string
+		if err := checkpoints.Scan(&path); err != nil {
+			checkpoints.Close()
+			return 0, 0, err
+		}
+		checkpointPaths = append(checkpointPaths, path)
+	}
+	if err := checkpoints.Close(); err != nil {
+		return 0, 0, err
+	}
+	for _, path := range checkpointPaths {
+		suffix, ok := embeddedRootPathSuffix(path, canonicalRootPath)
+		if !ok {
+			continue
+		}
+		newPath := joinRootPath(canonicalRootPath, suffix)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ? AND normalized_path = ?`, rootID, NormalizePath(path)); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO crawl_checkpoints(root_id, normalized_path, path, completed_at) VALUES (?, ?, ?, ?)`,
+			rootID, NormalizePath(newPath), newPath, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return 0, 0, err
+		}
+	}
+	return rewritten, merged, tx.Commit()
+}
+
+func (c *Catalog) PruneRecoveryPaths(ctx context.Context, rootID string) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	patterns := []string{"%@recently-snapshot%", "%@recycle%", "%#recycle%", "%$recycle.bin%", "%recycler%", "%.sync%", "%.qsync%", "%.qsync_sn%"}
+	clauses := make([]string, len(patterns))
+	args := []any{rootID}
+	for i, pattern := range patterns {
+		clauses[i] = "normalized_path LIKE ?"
+		args = append(args, pattern)
+	}
+	where := "root_id = ? AND (" + strings.Join(clauses, " OR ") + ")"
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id IN (SELECT id FROM documents WHERE `+where+`)`, args...); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE `+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	count, _ := result.RowsAffected()
 	return count, tx.Commit()
 }
 
@@ -277,6 +541,7 @@ func (c *Catalog) migrate(ctx context.Context) error {
 			completed_at TEXT NOT NULL,
 			PRIMARY KEY(root_id, normalized_path)
 		);`,
+		`CREATE TABLE IF NOT EXISTS deleted_roots (root_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := c.db.ExecContext(ctx, stmt); err != nil {
@@ -371,6 +636,92 @@ func NormalizePath(path string) string {
 	return strings.ToLower(filepath.Clean(path))
 }
 
+func rootPathSuffix(path, root string) (string, bool) {
+	windowsStyle := isWindowsRootPath(path) || isWindowsRootPath(root)
+	path = strings.ReplaceAll(filepath.Clean(path), "\\", "/")
+	root = strings.TrimRight(strings.ReplaceAll(filepath.Clean(root), "\\", "/"), "/")
+	if root == "." || root == "" {
+		return "", false
+	}
+	if rootPathEqual(path, root, windowsStyle) {
+		return "", true
+	}
+	if len(path) > len(root) && rootPathEqual(path[:len(root)], root, windowsStyle) && path[len(root)] == '/' {
+		return path[len(root)+1:], true
+	}
+	return "", false
+}
+
+func embeddedRootPathSuffix(path, root string) (string, bool) {
+	pathParts := normalizedPathParts(path)
+	rootParts := normalizedPathParts(root)
+	if len(pathParts) == 0 || len(rootParts) == 0 {
+		return "", false
+	}
+	if len(pathParts) == len(rootParts) && pathPartsEqual(pathParts, rootParts) {
+		return "", false
+	}
+	for start := 1; start+len(rootParts) <= len(pathParts); start++ {
+		if pathPartsEqual(pathParts[start:start+len(rootParts)], rootParts) {
+			return strings.Join(pathParts[start+len(rootParts):], "/"), true
+		}
+	}
+	return "", false
+}
+
+func normalizedPathParts(value string) []string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	raw := strings.Split(value, "/")
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func pathPartsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func joinRootPath(root, suffix string) string {
+	if suffix == "" {
+		return root
+	}
+	if isWindowsRootPath(root) {
+		return strings.TrimRight(root, "\\/") + "\\" + strings.ReplaceAll(suffix, "/", "\\")
+	}
+	return strings.TrimRight(root, "\\/") + "/" + strings.ReplaceAll(suffix, "\\", "/")
+}
+
+func rootPathSame(a, b string) bool {
+	windowsStyle := isWindowsRootPath(a) || isWindowsRootPath(b)
+	return rootPathEqual(strings.TrimRight(strings.ReplaceAll(filepath.Clean(a), "\\", "/"), "/"), strings.TrimRight(strings.ReplaceAll(filepath.Clean(b), "\\", "/"), "/"), windowsStyle)
+}
+
+func isWindowsRootPath(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.Contains(value, "\\") || (len(value) >= 2 && value[1] == ':')
+}
+
+func rootPathEqual(a, b string, windowsStyle bool) bool {
+	if windowsStyle {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 func Signature(size int64, modifiedAt time.Time) string {
 	return fmt.Sprintf("%d:%s", size, modifiedAt.UTC().Format(time.RFC3339Nano))
 }
@@ -439,6 +790,13 @@ func (c *Catalog) FinishCrawl(ctx context.Context, run CrawlRun) error {
 func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResult, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	var deleted int
+	if err := c.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM deleted_roots WHERE root_id = ?)`, doc.RootID).Scan(&deleted); err != nil {
+		return UpsertResult{}, err
+	}
+	if deleted != 0 {
+		return UpsertResult{Unchanged: true}, nil
+	}
 	if doc.AccessStatus == "" {
 		doc.AccessStatus = "metadata_readable"
 	}
@@ -583,18 +941,18 @@ func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, st
 }
 
 func (c *Catalog) ClaimPendingContent(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "content_status", "not_indexed", "queued", rootIDs, limit, maxSize)
+	return c.claimPending(ctx, "content_status", "not_indexed", "queued", rootIDs, extract.IndexableExtensions(), limit, maxSize)
 }
 
 func (c *Catalog) ClaimPendingOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "ocr_status", "pending", "queued", rootIDs, limit, maxSize)
+	return c.claimPending(ctx, "ocr_status", "pending", "queued", rootIDs, nil, limit, maxSize)
 }
 
 func (c *Catalog) ClaimPendingHashes(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", rootIDs, limit, maxSize)
+	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", rootIDs, nil, limit, maxSize)
 }
 
-func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
 	if len(rootIDs) == 0 || limit <= 0 || maxSize <= 0 {
 		return nil, nil
 	}
@@ -605,13 +963,20 @@ func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed str
 		return nil, err
 	}
 	defer tx.Rollback()
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(rootIDs)), ",")
+	rootPlaceholders := strings.TrimRight(strings.Repeat("?,", len(rootIDs)), ",")
 	args := []any{pending, maxSize}
 	for _, rootID := range rootIDs {
 		args = append(args, rootID)
 	}
+	extensionClause := ""
+	if len(extensions) > 0 {
+		extensionClause = " AND extension IN (" + placeholders(len(extensions)) + ")"
+		for _, extension := range extensions {
+			args = append(args, extension)
+		}
+	}
 	args = append(args, limit)
-	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ? AND root_id IN (` + placeholders + `) LIMIT ?`
+	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ? AND root_id IN (` + rootPlaceholders + `)` + extensionClause + ` LIMIT ?`
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -805,8 +1170,14 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 			return SearchResponse{}, err
 		}
 		from = "documents d JOIN documents_fts ON documents_fts.id = d.id"
+		// Files can match any requested indexed field, including their parent
+		// path. Folders represent destinations, so an ancestor-path match must
+		// not make an unrelated descendant folder a result.
 		where = append(where, "documents_fts MATCH ?")
 		args = append(args, matchQuery)
+		folderClause, folderArgs := folderNameMatchClause(req.Query)
+		where = append(where, "(d.is_folder = 0 OR ("+folderClause+"))")
+		args = append(args, folderArgs...)
 	}
 	if len(req.Filters.Roots) > 0 {
 		where = append(where, "d.root_id IN ("+placeholders(len(req.Filters.Roots))+")")
@@ -919,7 +1290,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 			doc.Kind = "file"
 		}
 		if hasQuery {
-			addMatchMetadata(&doc, req.Query)
+			addMatchMetadata(&doc, req.Query, req.Filters.MatchFields)
 		}
 		docs = append(docs, doc)
 	}
@@ -1010,7 +1381,13 @@ func searchOrder(sort, direction string, hasQuery bool) (string, error) {
 		if !hasQuery {
 			return "", &RequestError{Code: "invalid_sort", Message: "relevance sort requires a query"}
 		}
-		return "bm25(documents_fts) " + dir + ", d.normalized_path ASC", nil
+		// SQLite bm25 returns lower scores for better matches. Keep the public
+		// direction conventional: descending relevance means best match first.
+		rankDir := "ASC"
+		if dir == "ASC" {
+			rankDir = "DESC"
+		}
+		return "bm25(documents_fts) " + rankDir + ", d.normalized_path ASC", nil
 	default:
 		return "", &RequestError{Code: "invalid_sort", Message: "sort must be name, modified, size, or relevance"}
 	}
@@ -1114,14 +1491,21 @@ func scanDocument(row documentScanner) (Document, error) {
 	return d, nil
 }
 
-func addMatchMetadata(doc *Document, query string) {
+func addMatchMetadata(doc *Document, query string, requestedFields []string) {
 	terms := strings.Fields(strings.ToLower(query))
 	if len(terms) == 0 {
 		return
 	}
+	selected := map[string]bool{}
+	for _, field := range requestedFields {
+		selected[strings.ToLower(strings.TrimSpace(field))] = true
+	}
 	fields := []struct{ name, value string }{{"name", doc.Name}, {"path", doc.Path}, {"extension", doc.Extension}, {"content", doc.ContentText}}
 	doc.Highlights = map[string][]string{}
 	for _, field := range fields {
+		if len(selected) > 0 && !selected[field.name] {
+			continue
+		}
 		if excerpt, ok := matchedExcerpt(field.value, terms); ok {
 			doc.MatchedFields = append(doc.MatchedFields, field.name)
 			doc.Highlights[field.name] = []string{excerpt}
@@ -1199,4 +1583,15 @@ func scopedFTSQuery(query string, fields []string) (string, error) {
 		return "", &RequestError{Code: "invalid_match_fields", Message: "match_fields must not be empty when provided"}
 	}
 	return "{" + strings.Join(selected, " ") + "} : (" + terms + ")", nil
+}
+
+func folderNameMatchClause(query string) (string, []any) {
+	terms := strings.Fields(query)
+	clauses := make([]string, 0, len(terms))
+	args := make([]any, 0, len(terms))
+	for _, term := range terms {
+		clauses = append(clauses, "d.name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+		args = append(args, "%"+escapeLike(term)+"%")
+	}
+	return strings.Join(clauses, " AND "), args
 }

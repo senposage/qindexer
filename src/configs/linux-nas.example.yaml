@@ -1,5 +1,9 @@
 server:
   bind: "127.0.0.1:41973"
+  bind_addresses:
+    - "127.0.0.1:41973"
+    # Add a VPN or dedicated adapter address when QSurfer should query remotely.
+    # - "10.8.0.2:41973"
   public_base_url: "http://127.0.0.1:41973"
   auth:
     mode: "static-token"
@@ -8,6 +12,8 @@ server:
 management:
   enabled: true
   bind: "127.0.0.1:41974"
+  bind_addresses:
+    - "127.0.0.1:41974"
   auth:
     mode: "admin-token"
     token_file: "/etc/qsurfer-search/secrets/admin-api-token"
@@ -37,6 +43,15 @@ watcher:
 roots:
   - id: "nas-finance"
     path: "/mnt/nas-finance"
+    path_aliases:
+      - id: "finance-x-drive"
+        platform: "windows-drive"
+        path: "X:\\Finance"
+        target: "/mnt/nas-finance"
+      - id: "finance-unc"
+        platform: "windows-unc"
+        path: "\\\\nas01\\finance"
+        target: "/mnt/nas-finance"
     enabled: true
     labels: ["nas", "finance"]
     include_extensions: ["pdf", "docx", "xlsx", "pptx", "txt", "csv", "md"]
@@ -51,8 +66,20 @@ roots:
       - "**/.git/**"
       - "**/node_modules/**"
       - "**/tmp/**"
+      - "**/@Recently-Snapshot/**"
+      - "**/@Recycle/**"
+      - "**/#recycle/**"
+      - "**/$RECYCLE.BIN/**"
+      - "**/RECYCLER/**"
+      - "**/.sync/**"
+      - "**/.qsync/**"
+      - "**/.qsync_sn/**"
     exclude_patterns: []
     credential_ref: "systemd-user-or-mount-secret"
+    content_extraction: true
+    ocr: false
+    hashing: false
+    collect_ownership: true
 
   - id: "nas-projects"
     path: "/mnt/nas-projects"
