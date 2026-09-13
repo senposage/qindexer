@@ -47,6 +47,13 @@ func (a App) Run(ctx context.Context) error {
 	} else {
 		log.Info("file logging enabled", "path", logPath)
 	}
+	accessLogFile, accessLogPath, accessLogErr := openNamedLogFile(dataDir, "qindexer-access.log")
+	if accessLogFile != nil {
+		defer accessLogFile.Close()
+	}
+	if accessLogErr != nil {
+		log.Warn("access logging unavailable; using operational log", "path", accessLogPath, "error", accessLogErr)
+	}
 	cat, err := catalog.Open(ctx, dataDir)
 	if err != nil {
 		return err
@@ -81,6 +88,10 @@ func (a App) Run(ctx context.Context) error {
 	apiServer := api.New(cfg, a.ConfigPath, cat, cr, log, searchToken, adminToken)
 	apiServer.SetConfigChanged(watch.ApplyConfig)
 	apiServer.SetLogPath(logPath)
+	if accessLogFile != nil {
+		apiServer.SetAccessLogger(slog.New(slog.NewTextHandler(accessLogFile, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug})))
+		log.Info("http access logging enabled", "path", accessLogPath)
+	}
 	apiServer.SetShutdown(cancel)
 
 	errs := make(chan error, len(cfg.Server.BindAddresses)+len(cfg.Management.BindAddresses)+2)
@@ -137,7 +148,11 @@ func (a App) Run(ctx context.Context) error {
 }
 
 func openLogFile(dataDir string) (*os.File, string, error) {
-	logPath := filepath.Join(dataDir, "logs", "qindexer.log")
+	return openNamedLogFile(dataDir, "qindexer.log")
+}
+
+func openNamedLogFile(dataDir, filename string) (*os.File, string, error) {
+	logPath := filepath.Join(dataDir, "logs", filename)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return nil, logPath, err
 	}

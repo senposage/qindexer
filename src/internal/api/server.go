@@ -32,6 +32,7 @@ type Server struct {
 	cat           *catalog.Catalog
 	crawler       *crawler.Crawler
 	log           *slog.Logger
+	accessLog     *slog.Logger
 	mu            sync.RWMutex
 	searchToken   string
 	adminToken    string
@@ -83,6 +84,14 @@ func (s *Server) SetLogPath(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logPath = path
+}
+
+// SetAccessLogger keeps routine HTTP access records out of the operational
+// log, where crawler, storage, and extraction failures need to stay visible.
+func (s *Server) SetAccessLogger(log *slog.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accessLog = log
 }
 
 // SetConfigChanged publishes durable configuration changes to long-running
@@ -1702,14 +1711,30 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 		} else if recorder.status >= 400 {
 			level = slog.LevelWarn
 		}
-		s.log.Log(r.Context(), level, "http request",
+		duration := time.Since(start)
+		s.mu.RLock()
+		accessLog := s.accessLog
+		s.mu.RUnlock()
+		if accessLog == nil {
+			accessLog = s.log
+		}
+		accessLog.Log(r.Context(), level, "http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", recorder.status,
 			"bytes", recorder.bytes,
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration_ms", duration.Milliseconds(),
 			"remote", r.RemoteAddr,
 		)
+		if recorder.status >= http.StatusBadRequest || duration >= 2*time.Second {
+			s.log.Log(r.Context(), level, "http request needs attention",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", recorder.status,
+				"duration_ms", duration.Milliseconds(),
+				"remote", r.RemoteAddr,
+			)
+		}
 	})
 }
 

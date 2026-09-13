@@ -47,6 +47,8 @@ type Crawler struct {
 	filesStatted        int64
 	bytesStatted        int64
 	dirsRead            int64
+	rateMu              sync.RWMutex
+	rate                throughputSample
 	hintCrawls          int64
 	fullCrawls          int64
 	initialCrawls       int64
@@ -74,6 +76,16 @@ type Crawler struct {
 type backgroundJob struct {
 	id, rootID, path, signature string
 	size                        int64
+}
+
+// throughputSample is a one-second counter snapshot. Totals remain available
+// separately; rates must describe current crawler activity rather than uptime.
+type throughputSample struct {
+	at                 time.Time
+	files, dirs, bytes int64
+	filesPerSecond     float64
+	dirsPerSecond      float64
+	bytesPerSecond     float64
 }
 
 type suppressedLog struct {
@@ -147,6 +159,7 @@ func (c *Crawler) Stats() Stats {
 	files := atomic.LoadInt64(&c.filesStatted)
 	dirs := atomic.LoadInt64(&c.dirsRead)
 	bytes := atomic.LoadInt64(&c.bytesStatted)
+	rate := c.currentThroughput()
 	pausedUntil := atomic.LoadInt64(&c.pausedUntil)
 	initialCrawls := atomic.LoadInt64(&c.initialCrawls)
 	pausedReason := ""
@@ -165,8 +178,8 @@ func (c *Crawler) Stats() Stats {
 		ActiveCrawls: atomic.LoadInt64(&c.activeCrawls), InitialCrawls: initialCrawls,
 		ActiveRoots:  c.ActiveRoots(),
 		FilesStatted: files, DirectoriesRead: dirs, BytesStatted: bytes,
-		FilesPerSecond: float64(files) / uptime, DirsPerSecond: float64(dirs) / uptime,
-		BytesPerSecond: float64(bytes) / uptime,
+		FilesPerSecond: rate.filesPerSecond, DirsPerSecond: rate.dirsPerSecond,
+		BytesPerSecond: rate.bytesPerSecond,
 		HintCrawls:     atomic.LoadInt64(&c.hintCrawls), FullCrawls: atomic.LoadInt64(&c.fullCrawls),
 		LastActivityUnix:  atomic.LoadInt64(&c.lastActivity),
 		Paused:            pausedUntil > time.Now().Unix() || (pressure.Paused && initialCrawls == 0),
@@ -180,6 +193,44 @@ func (c *Crawler) Stats() Stats {
 		OCRQueueDepth:     len(c.ocrJobs),
 		HashQueueDepth:    len(c.hashJobs),
 	}
+}
+
+func (c *Crawler) throughputMonitor(ctx context.Context) {
+	c.sampleThroughput(time.Now())
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			c.sampleThroughput(now)
+		}
+	}
+}
+
+func (c *Crawler) sampleThroughput(now time.Time) {
+	files := atomic.LoadInt64(&c.filesStatted)
+	dirs := atomic.LoadInt64(&c.dirsRead)
+	bytes := atomic.LoadInt64(&c.bytesStatted)
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	previous := c.rate
+	if !previous.at.IsZero() {
+		elapsed := now.Sub(previous.at).Seconds()
+		if elapsed > 0 {
+			c.rate.filesPerSecond = float64(files-previous.files) / elapsed
+			c.rate.dirsPerSecond = float64(dirs-previous.dirs) / elapsed
+			c.rate.bytesPerSecond = float64(bytes-previous.bytes) / elapsed
+		}
+	}
+	c.rate.at, c.rate.files, c.rate.dirs, c.rate.bytes = now, files, dirs, bytes
+}
+
+func (c *Crawler) currentThroughput() throughputSample {
+	c.rateMu.RLock()
+	defer c.rateMu.RUnlock()
+	return c.rate
 }
 
 func (c *Crawler) Pause(duration time.Duration) time.Time {
@@ -612,6 +663,7 @@ func (c *Crawler) Loop(ctx context.Context) {
 		// held hostage by that work; the OS closes any stragglers on exit.
 		go func() { workers.Wait() }()
 	}()
+	startCrawlerRoutine(ctx, &workers, c.log, c.throughputMonitor)
 	startCrawlerRoutine(ctx, &workers, c.log, c.adaptiveMonitor)
 	c.startBackgroundWorkers(ctx, &workers)
 	startCrawlerRoutine(ctx, &workers, c.log, c.refillBackgroundLoop)

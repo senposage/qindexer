@@ -11,6 +11,10 @@ const state = {
   network: {},
 };
 
+let liveMetricsTimer = null;
+let liveDashboardTimer = null;
+let liveDashboardRefreshing = false;
+
 tokenInput.value = state.token;
 endpoint.textContent = `${location.origin}/admin/v1`;
 
@@ -135,6 +139,48 @@ async function refresh(options = {}) {
   }
 }
 
+function startLiveMetrics() {
+  if (liveMetricsTimer) return;
+  liveMetricsTimer = setInterval(async () => {
+    if (document.hidden || !state.token) return;
+    try {
+      renderMetrics(await api("/admin/v1/metrics"));
+    } catch {
+      // The next full refresh will present any authentication or service error.
+    }
+  }, 2000);
+
+  liveDashboardTimer = setInterval(refreshLiveDashboard, 5000);
+}
+
+async function refreshLiveDashboard() {
+  if (document.hidden || !state.token || liveDashboardRefreshing) return;
+  liveDashboardRefreshing = true;
+  try {
+    const [service, roots, crawls, metrics, logs] = await Promise.all([
+      api("/admin/v1/service"),
+      api("/admin/v1/roots"),
+      api("/admin/v1/crawls"),
+      api("/admin/v1/metrics"),
+      api("/admin/v1/logs?limit=160").catch((err) => ({ error: err.message, lines: [] })),
+    ]);
+    renderService(service);
+    renderMetrics(metrics);
+    renderRoots(roots.roots || []);
+    renderCrawls(crawls.crawls || []);
+    renderRootErrors(roots.roots || []);
+    renderLogs(logs);
+  } catch {
+    // The normal refresh path presents authentication and availability errors.
+  } finally {
+    liveDashboardRefreshing = false;
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.token) refresh({ quiet: true });
+});
+
 async function bootstrapAdmin(event) {
   event.preventDefault();
   const token = document.querySelector("#bootstrap-token").value;
@@ -215,9 +261,17 @@ function renderMetrics(metrics) {
     document.querySelector("#crawler-state").textContent = active ? `${active} active; background deferred` : "Idle";
     const roots = Array.isArray(metrics.active_roots) && metrics.active_roots.length ? ` ${metrics.active_roots.join(", ")}.` : "";
     const throughput = `${formatRate(metrics.files_per_second || 0)} files/s, ${formatRate(metrics.directories_per_second || 0)} dirs/s, ${formatBytes(metrics.bytes_per_second || 0)}/s.`;
+    const activity = metrics.last_activity_unix ? ` Last observed crawl activity ${formatActivityAge(metrics.last_activity_unix)}.` : "";
     const deferred = ` Content, OCR, and hash backlogs wait for the structural crawl to finish; OCR candidates appear after content extraction identifies scanned or empty documents.`;
-    renderOps(active ? "Crawler active" : "Crawler idle", active ? `${active} root crawl${active === 1 ? "" : "s"} running:${roots} ${throughput}${deferred}` : `No active crawl. Background backlogs are eligible to drain. Next full reconciliation ${formatFuture(metrics.next_full_crawl_unix)}.`);
+    renderOps(active ? "Crawler active" : "Crawler idle", active ? `${active} root crawl${active === 1 ? "" : "s"} running:${roots} ${throughput}.${activity}${deferred}` : `No active crawl. Background backlogs are eligible to drain. Next full reconciliation ${formatFuture(metrics.next_full_crawl_unix)}.`);
   }
+}
+
+function formatActivityAge(unix) {
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - Number(unix)));
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ago`;
 }
 
 function renderOps(title, detail) {
@@ -943,6 +997,7 @@ function escapeAttr(value) {
 }
 
 refresh().then(() => {
+  startLiveMetrics();
   if (location.pathname === "/config" || location.hash === "#config") {
     showView("config");
   }

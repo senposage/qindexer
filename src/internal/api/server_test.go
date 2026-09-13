@@ -108,6 +108,26 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 	}
 }
 
+func TestRequestAccessLogIsSeparateFromOperationalLog(t *testing.T) {
+	var operational, access bytes.Buffer
+	server := &Server{
+		log:       slog.New(slog.NewTextHandler(&operational, nil)),
+		accessLog: slog.New(slog.NewTextHandler(&access, nil)),
+	}
+	handler := server.requestLog(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics", nil)
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, request)
+	if !strings.Contains(access.String(), "http request") {
+		t.Fatalf("expected access log entry, got %q", access.String())
+	}
+	if operational.Len() != 0 {
+		t.Fatalf("routine request should not occupy operational log: %q", operational.String())
+	}
+}
+
 func TestPublicAdminStatusDoesNotExposeRootDetails(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))

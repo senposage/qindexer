@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +103,25 @@ func TestExternalCPUPercentExcludesIndexerWork(t *testing.T) {
 	}
 	if got := externalCPUPercent(75, 200, 8); got != 50 {
 		t.Fatalf("expected 50%% external CPU pressure, got %v", got)
+	}
+}
+
+func TestThroughputUsesRollingSample(t *testing.T) {
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	started := time.Now()
+	c.sampleThroughput(started)
+	atomic.AddInt64(&c.filesStatted, 12)
+	atomic.AddInt64(&c.dirsRead, 4)
+	atomic.AddInt64(&c.bytesStatted, 2048)
+	c.sampleThroughput(started.Add(2 * time.Second))
+	rate := c.currentThroughput()
+	if rate.filesPerSecond != 6 || rate.dirsPerSecond != 2 || rate.bytesPerSecond != 1024 {
+		t.Fatalf("rolling throughput = %#v", rate)
+	}
+	c.sampleThroughput(started.Add(3 * time.Second))
+	rate = c.currentThroughput()
+	if rate.filesPerSecond != 0 || rate.dirsPerSecond != 0 || rate.bytesPerSecond != 0 {
+		t.Fatalf("idle rolling throughput = %#v", rate)
 	}
 }
 
