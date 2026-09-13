@@ -179,3 +179,7 @@ go build ./cmd/qindexer
 ```
 
 The public repository is `https://github.com/senposage/qindexer`.
+
+## License
+
+QIndexer is released under the [MIT License](LICENSE).
