@@ -12,7 +12,7 @@
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
         <h1>QIndexer</h1>
-        <p>Search service administration <span class="build">UI 0.1.7</span></p>
+        <p>Search service administration <span class="build">UI 1.1.0</span></p>
       </div>
     </div>
     <div class="auth">
@@ -64,34 +64,39 @@
         <span>Documents</span>
         <strong id="document-count">0</strong>
       </div>
-      <div class="metric">
+      <div class="metric admin-metric">
         <span>Index size</span>
         <strong id="index-size">0 B</strong>
       </div>
-      <div class="metric">
+      <div class="metric admin-metric">
         <span>Roots</span>
         <strong id="root-count">0</strong>
       </div>
-      <div class="metric">
+      <div class="metric admin-metric">
         <span>Files/sec</span>
         <strong id="files-rate">0</strong>
       </div>
-      <div class="metric">
+      <div class="metric admin-metric">
         <span>Dirs/sec</span>
         <strong id="dirs-rate">0</strong>
       </div>
-      <div class="metric">
+      <div class="metric admin-metric">
         <span>I/O rate</span>
         <strong id="io-rate">0 B/s</strong>
       </div>
-      <div class="metric">
+      <div class="metric admin-metric">
         <span>Crawler</span>
         <strong id="crawler-state">Idle</strong>
       </div>
       </div>
     </section>
 
-    <section class="toolbar">
+    <section id="auth-notice" class="auth-notice hidden" role="alert">
+      <strong>Administration is locked</strong>
+      <span>Enter a valid admin token to view or manage indexed roots, paths, rules, crawler activity, and logs.</span>
+    </section>
+
+    <section id="admin-toolbar" class="toolbar">
       <div class="view-toggle" aria-label="View selection">
         <button id="view-roots" type="button">Roots</button>
         <button id="view-config" type="button" class="secondary">Configuration</button>
@@ -346,6 +351,17 @@
           <div class="form-actions"><button type="submit">Save network settings</button></div>
         </form>
         <form id="indexing-settings-form" class="settings-form">
+          <div class="form-section-title">
+            <p class="eyebrow">Adaptive resource throttle</p>
+            <p>Pause background indexing when other work is using the machine. QIndexer excludes its own CPU use from this check.</p>
+          </div>
+          <div class="rules-grid">
+            <label class="check-row"><input id="settings-throttle-enabled" type="checkbox"><span>Pause indexing under system pressure</span></label>
+            <label>CPU threshold (%)<input id="settings-throttle-cpu" type="number" min="1" max="100" step="1"></label>
+            <label>Disk busy threshold (%)<input id="settings-throttle-disk" type="number" min="1" max="100" step="1"></label>
+            <label>Sample interval (seconds)<input id="settings-throttle-sample" type="number" min="1" max="3600" step="1"></label>
+            <label>Healthy samples before resuming<input id="settings-throttle-recovery" type="number" min="1" max="3600" step="1"></label>
+          </div>
           <div class="form-section-title">
             <p class="eyebrow">Optional indexing work</p>
             <p>Extraction and hashing use bounded background workers and obey crawler throttling.</p>

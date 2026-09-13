@@ -33,6 +33,13 @@ crawler:
   ignore_hidden: false
   follow_symlinks: false
   missing_after_successful_crawls: 3
+  collect_ownership: false
+  adaptive_throttle:
+    enabled: true
+    sample_interval_seconds: 5
+    cpu_percent_threshold: 80
+    disk_busy_percent_threshold: 70
+    recovery_samples: 3
   # Local service time. Crawls and watcher updates wait until the window ends.
   pause_windows:
     - start: "08:30"
@@ -87,7 +94,7 @@ roots:
     content_extraction: true
     ocr: false
     hashing: false
-    collect_ownership: true
+    collect_ownership: false
 
   - id: "nas-projects"
     name: "Projects share"

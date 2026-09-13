@@ -28,7 +28,8 @@ replace operating system, domain, or NAS permissions.
 - Search pagination, sorting, highlights, matched fields, freshness, and root
   status metadata.
 - Local admin web UI for first-run token setup, root/rule management, crawler
-  controls, diagnostics, network bindings, repair, and index clearing.
+  controls, diagnostics, network bindings, repair, index clearing, and
+  configurable CPU/disk pressure throttling.
 - Multi-interface listening for search and admin APIs.
 - Root repair tools that merge duplicate rows after moving between mapped
   drives, UNC paths, and mounted NAS paths.
@@ -97,6 +98,8 @@ content/OCR/hash workers. `crawl` performs a one-shot crawl and exits.
   alias format, and enrichment setting.
 - [API](src/docs/api.md): search/admin protocol, request and response shapes,
   errors, pagination, sorting, scopes, repair, and diagnostics.
+- [HTTP Client Guide](src/docs/http-client.md): copy-ready requests for any
+  client, without a QSurfer dependency.
 - [Operations](src/docs/operations.md): deployment, tuning, NAS behavior,
   shutdown, troubleshooting, backup/export/import, and repair workflows.
 - [Changelog](CHANGELOG.md): release history.
@@ -154,13 +157,15 @@ using canonical paths for identity, caching, and repair.
 The web UI supports:
 
 - First-run admin token bootstrap.
+- Locked-state health overview with no root, path, rule, activity, or log data
+  until the admin token is accepted.
 - Root creation, deletion, validation, manual crawl, clear-index, and repair.
 - Per-root path aliases and include/exclude rules.
 - Per-root content extraction, OCR, hashing, and ownership toggles.
 - Crawler pause/resume and service stop.
 - Network binding configuration.
-- Live metrics including operations/sec, I/O rate, active crawler state, and
-  index size.
+- Live metrics including operations/sec, I/O rate, active crawler state, index
+  size, and adaptive CPU/disk throttle state.
 - Recent crawl activity, root errors, log tail, and diagnostics.
 - File logging at `<data_dir>/logs/qindexer.log` with debug entries and panic
   stack traces.

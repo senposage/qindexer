@@ -24,7 +24,7 @@ document.querySelector("#clear-token").addEventListener("click", () => {
   state.token = "";
   tokenInput.value = "";
   sessionStorage.removeItem("qindexer.admin.token");
-  setMessage("Token cleared");
+  refresh({ quiet: true, message: "Admin token cleared" });
 });
 
 document.querySelector("#refresh").addEventListener("click", refresh);
@@ -91,9 +91,24 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function publicAPI(path) {
+  const res = await fetch(path, { cache: "no-store" });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new Error(data.error?.message || res.statusText);
+  return data;
+}
+
 async function refresh(options = {}) {
+  let publicStatus;
   try {
     if (!options.quiet) setMessage("Refreshing...");
+    publicStatus = await publicAPI("/admin/v1/status");
+    renderService(publicStatus);
+    if (!state.token) {
+      showLockedStatus(publicStatus, options.message || "Enter an admin token to manage this service");
+      return;
+    }
     const [service, roots, crawls, config, metrics, logs] = await Promise.all([
       api("/admin/v1/service"),
       api("/admin/v1/roots"),
@@ -113,14 +128,10 @@ async function refresh(options = {}) {
     renderNetworkSettings(state.network);
     renderIndexingSettings(state.crawler);
     document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
+    setAdminVisibility(true);
     setMessage(options.message || "Ready");
   } catch (err) {
-    if (err.code === "admin_setup_required") {
-      showBootstrap();
-      setMessage("Set an admin token to continue");
-      return;
-    }
-    setMessage(err.message);
+    showLockedStatus(publicStatus, err.code === "admin_setup_required" ? "Set an admin token to continue" : "Admin token is missing or invalid");
   }
 }
 
@@ -148,6 +159,40 @@ async function bootstrapAdmin(event) {
 
 function showBootstrap() {
   document.querySelector("#bootstrap-panel").classList.remove("hidden");
+}
+
+function showLockedStatus(status, detail) {
+  resetPrivateDashboard();
+  setAdminVisibility(false);
+  const notice = document.querySelector("#auth-notice");
+  notice.querySelector("span").textContent = status?.admin_configured === false
+    ? "Set the first admin token locally to unlock administration. Root paths, rules, crawler activity, and logs remain hidden."
+    : "Enter a valid admin token to view or manage indexed roots, paths, rules, crawler activity, and logs.";
+  notice.classList.remove("hidden");
+  if (status?.admin_configured === false) showBootstrap();
+  else document.querySelector("#bootstrap-panel").classList.add("hidden");
+  setMessage(detail);
+}
+
+function setAdminVisibility(authenticated) {
+  document.querySelector("#admin-toolbar").classList.toggle("hidden", !authenticated);
+  document.querySelector("#roots-view").classList.toggle("hidden", !authenticated);
+  document.querySelector("#auth-notice").classList.toggle("hidden", authenticated);
+  document.querySelectorAll(".admin-metric").forEach((element) => element.classList.toggle("hidden", !authenticated));
+  if (authenticated) document.querySelector("#bootstrap-panel").classList.add("hidden");
+}
+
+function resetPrivateDashboard() {
+  state.roots = [];
+  state.crawler = {};
+  state.network = {};
+  document.querySelector("#roots").innerHTML = "";
+  document.querySelector("#crawls").innerHTML = "";
+  document.querySelector("#root-errors").innerHTML = "";
+  document.querySelector("#logs").innerHTML = "";
+  document.querySelector("#config").textContent = "{}";
+  document.querySelector("#rules-panel").classList.add("hidden");
+  document.querySelector("#validation-panel").classList.add("hidden");
 }
 
 function renderMetrics(metrics) {
@@ -335,20 +380,26 @@ async function saveRules(event) {
 
 function renderIndexingSettings(crawler) {
   const extraction = crawler.content_extraction || {};
-	const ocr = crawler.ocr || {};
+  const ocr = crawler.ocr || {};
   const hashing = crawler.hashing || {};
+  const throttle = crawler.adaptive_throttle || {};
   document.querySelector("#settings-extraction").checked = Boolean(extraction.enabled);
   document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
-	document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
-	document.querySelector("#settings-ocr-engine").value = ocr.engine || "auto";
-	document.querySelector("#settings-ocr-languages").value = ocr.languages || "eng";
-	document.querySelector("#settings-ocr-size").value = ocr.max_file_size_mb || 128;
-	document.querySelector("#settings-ocr-timeout").value = ocr.timeout_seconds || 180;
-	document.querySelector("#settings-tesseract-command").value = ocr.tesseract_command || "tesseract";
-	document.querySelector("#settings-ocrmypdf-command").value = ocr.ocrmypdf_command || "ocrmypdf";
+  document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
+  document.querySelector("#settings-ocr-engine").value = ocr.engine || "auto";
+  document.querySelector("#settings-ocr-languages").value = ocr.languages || "eng";
+  document.querySelector("#settings-ocr-size").value = ocr.max_file_size_mb || 128;
+  document.querySelector("#settings-ocr-timeout").value = ocr.timeout_seconds || 180;
+  document.querySelector("#settings-tesseract-command").value = ocr.tesseract_command || "tesseract";
+  document.querySelector("#settings-ocrmypdf-command").value = ocr.ocrmypdf_command || "ocrmypdf";
   document.querySelector("#settings-hashing").checked = Boolean(hashing.enabled);
   document.querySelector("#settings-hashing-size").value = hashing.max_file_size_mb || 2048;
   document.querySelector("#settings-ownership").checked = Boolean(crawler.collect_ownership);
+  document.querySelector("#settings-throttle-enabled").checked = Boolean(throttle.enabled);
+  document.querySelector("#settings-throttle-cpu").value = throttle.cpu_percent_threshold || 80;
+  document.querySelector("#settings-throttle-disk").value = throttle.disk_busy_percent_threshold || 70;
+  document.querySelector("#settings-throttle-sample").value = throttle.sample_interval_seconds || 5;
+  document.querySelector("#settings-throttle-recovery").value = throttle.recovery_samples || 3;
 }
 
 function renderNetworkSettings(network) {
@@ -388,8 +439,9 @@ async function saveIndexingSettings(event) {
   const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf" };
   const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64 };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
+  const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
   try {
-    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, content_extraction: content, ocr, hashing }) });
+    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing }) });
     await refresh({ quiet: true, message: "Indexing settings saved" });
   } catch (err) { setMessage(err.message); }
 }

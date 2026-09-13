@@ -313,6 +313,19 @@ func (c *Config) Validate() error {
 	if engine != "" && engine != "auto" && engine != "tesseract" && engine != "ocrmypdf" {
 		return fmt.Errorf("invalid OCR engine %q; expected auto, tesseract, or ocrmypdf", c.Crawler.OCR.Engine)
 	}
+	throttle := c.Crawler.AdaptiveThrottle
+	if throttle.SampleIntervalSeconds < 1 || throttle.SampleIntervalSeconds > 3600 {
+		return fmt.Errorf("adaptive throttle sample interval must be between 1 and 3600 seconds")
+	}
+	if throttle.CPUPercentThreshold <= 0 || throttle.CPUPercentThreshold > 100 {
+		return fmt.Errorf("adaptive throttle CPU threshold must be greater than 0 and at most 100")
+	}
+	if throttle.DiskBusyPercentThreshold <= 0 || throttle.DiskBusyPercentThreshold > 100 {
+		return fmt.Errorf("adaptive throttle disk-busy threshold must be greater than 0 and at most 100")
+	}
+	if throttle.RecoverySamples < 1 || throttle.RecoverySamples > 3600 {
+		return fmt.Errorf("adaptive throttle recovery samples must be between 1 and 3600")
+	}
 	ids := map[string]bool{}
 	for _, root := range c.Roots {
 		if strings.TrimSpace(root.ID) == "" {

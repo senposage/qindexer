@@ -31,3 +31,17 @@ func TestBindAddressesValidateHostPort(t *testing.T) {
 		t.Fatal("expected bind address without port to fail")
 	}
 }
+
+func TestAdaptiveThrottleValidation(t *testing.T) {
+	cfg := Config{
+		Server:     ServerConfig{Bind: "127.0.0.1:41973"},
+		Management: ManagementConfig{Bind: "127.0.0.1:41974"},
+		Crawler: CrawlerConfig{AdaptiveThrottle: AdaptiveThrottleConfig{
+			Enabled: true, SampleIntervalSeconds: 5, CPUPercentThreshold: 101, DiskBusyPercentThreshold: 70, RecoverySamples: 3,
+		}},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid CPU threshold to fail validation")
+	}
+}

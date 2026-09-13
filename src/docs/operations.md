@@ -107,8 +107,11 @@ files. The result shows aliases checked, paths rewritten, and duplicates merged.
 configured. Use this when rules changed substantially and a root should be
 rebuilt.
 
-`Delete root` removes the root from config and marks its indexed records as
-deleted/no-op. Source files are never deleted.
+`Delete root` stops an active crawl for that root, waits for pending indexing
+and shared enrichment work to drain, removes the root from live configuration,
+then marks its indexed records deleted/no-op. If draining exceeds the bounded
+wait, the action returns a retryable conflict and leaves the root unchanged.
+Source files are never deleted.
 
 ## Shutdown
 

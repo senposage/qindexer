@@ -108,6 +108,65 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 	}
 }
 
+func TestPublicAdminStatusDoesNotExposeRootDetails(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	cfg := &config.Config{
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots:      []config.RootConfig{{ID: "private-root", Name: "Private root", Path: `Z:\Private\Client Matters`, Enabled: true}},
+	}
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/status", nil)
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, request)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected public status, got %d: %s", result.Code, result.Body.String())
+	}
+	body := result.Body.String()
+	if !bytes.Contains([]byte(body), []byte(`"admin_configured":true`)) {
+		t.Fatalf("expected setup state in public status, got %s", body)
+	}
+	if bytes.Contains([]byte(body), []byte("private-root")) || bytes.Contains([]byte(body), []byte("Client Matters")) {
+		t.Fatalf("public status leaked root data: %s", body)
+	}
+}
+
+func TestUpdateCrawlerSettingsSavesAdaptiveThrottle(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	request := httptest.NewRequest(http.MethodPut, "/admin/v1/crawler/settings", bytes.NewBufferString(`{
+		"collect_ownership":false,
+		"adaptive_throttle":{"enabled":true,"sample_interval_seconds":7,"cpu_percent_threshold":63,"disk_busy_percent_threshold":58,"recovery_samples":5},
+		"content_extraction":{"enabled":false},
+		"ocr":{"enabled":false},
+		"hashing":{"enabled":false}
+	}`))
+	request.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, request)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected crawler settings update, got %d: %s", result.Code, result.Body.String())
+	}
+	throttle := cfg.Crawler.AdaptiveThrottle
+	if !throttle.Enabled || throttle.SampleIntervalSeconds != 7 || throttle.CPUPercentThreshold != 63 || throttle.DiskBusyPercentThreshold != 58 || throttle.RecoverySamples != 5 {
+		t.Fatalf("adaptive throttle was not saved: %#v", throttle)
+	}
+}
+
 func TestSearchDoesNotServeStaleUnconfiguredRoots(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))

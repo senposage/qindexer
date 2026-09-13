@@ -12,6 +12,12 @@ Both APIs use bearer tokens when configured:
 Authorization: Bearer <token>
 ```
 
+The management UI itself is safe to open without a token. It calls the public
+`GET /admin/v1/status` endpoint, which reveals only service health, version,
+index readiness, document count, and whether first-run administration has been
+configured. All root, path, rule, activity, log, metric, and configuration
+endpoints require the admin token.
+
 Structured errors:
 
 ```json
@@ -248,6 +254,23 @@ It never crawls the live filesystem.
 
 ## Admin API
 
+### GET /admin/v1/status
+
+Unauthenticated, service-level status for the locked admin UI. It intentionally
+does not return root count, root IDs/names/paths, crawler activity, logs,
+configuration, or index size.
+
+```json
+{
+  "status": "ok",
+  "protocol_version": "1.1",
+  "service_instance": "uuid",
+  "version": "1.1.0",
+  "admin_configured": true,
+  "index": {"ready": true, "document_count": 12345}
+}
+```
+
 ### POST /admin/v1/bootstrap
 
 Localhost-only first-run token setup:
@@ -306,11 +329,18 @@ shuts the process down through the service lifecycle.
 
 ### PUT /admin/v1/crawler/settings
 
-Updates global crawler enrichment settings:
+Updates global crawler resource and enrichment settings:
 
 ```json
 {
   "collect_ownership": true,
+  "adaptive_throttle": {
+    "enabled": true,
+    "sample_interval_seconds": 5,
+    "cpu_percent_threshold": 80,
+    "disk_busy_percent_threshold": 70,
+    "recovery_samples": 3
+  },
   "content_extraction": {
     "enabled": true,
     "worker_count": 1,
@@ -436,8 +466,11 @@ Response:
 {"confirm_root_id":"finance"}
 ```
 
-Removes the root from config and marks its indexed rows as deleted/no-op for
-serving. Cleanup is deferred. Source files are never deleted.
+Cancels an active crawl for the root and shared enrichment work, waits for them
+to drain, removes the root from config, then marks its indexed rows as
+deleted/no-op for serving. If the bounded wait expires, the endpoint returns
+the retryable `root_still_stopping` conflict and changes nothing. Cleanup is
+deferred. Source files are never deleted.
 
 ### GET /admin/v1/crawls
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0
+
+### Added
+
+- Public, minimal admin status endpoint for a locked UI: service health,
+  version, index readiness, document count, and setup state only.
+- Configurable adaptive crawler throttle in the management UI and API:
+  enablement, CPU threshold, disk-busy threshold, sample interval, and
+  recovery samples.
+- Standalone HTTP client guide with raw requests for health, capabilities,
+  roots, search, paging, folder search, and suggestions.
+
+### Changed
+
+- Admin UI now explicitly reports its locked state and removes all private root
+  details, paths, rules, crawl activity, logs, settings, and runtime metrics
+  until a valid admin token is accepted.
+- Empty-root crawl passes are debug-level diagnostics with configured-root
+  count, rather than visible informational noise.
+- Adaptive throttle values are range-validated before configuration is saved.
+- Documentation now reflects active metadata write batching.
+
 ## 1.0.0
 
 First public QIndexer release for QSurfer-compatible filesystem indexing.

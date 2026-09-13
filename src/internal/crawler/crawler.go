@@ -501,7 +501,7 @@ func (c *Crawler) crawlRoots(ctx context.Context, initial bool, include func(con
 		}()
 	}
 	if selected == 0 {
-		c.log.Info("crawl pass skipped", "initial", initial, "reason", "no_enabled_roots_selected")
+		c.log.Debug("crawl pass skipped", "initial", initial, "configured_roots", len(cfg.Roots), "reason", "no_enabled_roots_selected")
 	}
 	wg.Wait()
 	c.scheduleRetries(ctx, runs)

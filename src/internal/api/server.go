@@ -140,6 +140,9 @@ func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	s.mountAdminUI(mux)
 	mux.HandleFunc("POST /admin/v1/bootstrap", s.bootstrapAdmin)
+	// The admin UI needs a small unauthenticated status view. Keep this payload
+	// deliberately service-level: configuration and root details stay protected.
+	mux.HandleFunc("GET /admin/v1/status", s.publicStatus)
 	mux.HandleFunc("GET /admin/v1/service", s.withAdminAuth(s.health))
 	mux.HandleFunc("GET /admin/v1/config", s.withAdminAuth(s.configView))
 	mux.HandleFunc("GET /admin/v1/config/export", s.withAdminAuth(s.exportConfig))
@@ -165,6 +168,37 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("PUT /admin/v1/roots/{root_id}/rules", s.withAdminAuth(s.updateRootRules))
 	mux.HandleFunc("GET /admin/v1/crawls", s.withAdminAuth(s.crawls))
 	return s.requestLog(mux)
+}
+
+func (s *Server) publicStatus(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	adminConfigured := s.adminToken != ""
+	s.mu.RUnlock()
+
+	states, err := s.cat.RootStates(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":           "degraded",
+			"protocol_version": "1.1",
+			"service_instance": s.instanceID,
+			"version":          version.Version,
+			"admin_configured": adminConfigured,
+			"index":            map[string]any{"ready": false, "document_count": 0},
+		})
+		return
+	}
+	var count int64
+	for _, state := range states {
+		count += state.DocumentCount
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":           "ok",
+		"protocol_version": "1.1",
+		"service_instance": s.instanceID,
+		"version":          version.Version,
+		"admin_configured": adminConfigured,
+		"index":            map[string]any{"ready": true, "document_count": count},
+	})
 }
 
 func (s *Server) mountAdminUI(mux *http.ServeMux) {
@@ -1471,6 +1505,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("crawler settings update requested")
 	var req struct {
 		CollectOwnership  bool                           `json:"collect_ownership"`
+		AdaptiveThrottle  config.AdaptiveThrottleConfig  `json:"adaptive_throttle"`
 		ContentExtraction config.ContentExtractionConfig `json:"content_extraction"`
 		OCR               config.OCRConfig               `json:"ocr"`
 		Hashing           config.HashingConfig           `json:"hashing"`
@@ -1483,6 +1518,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	candidate := config.Clone(s.cfg)
 	candidate.Crawler.CollectOwnership = req.CollectOwnership
+	candidate.Crawler.AdaptiveThrottle = req.AdaptiveThrottle
 	candidate.Crawler.ContentExtraction = req.ContentExtraction
 	candidate.Crawler.OCR = req.OCR
 	candidate.Crawler.Hashing = req.Hashing
@@ -1496,7 +1532,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
-	s.log.Info("crawler settings update completed", "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership)
+	s.log.Info("crawler settings update completed", "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler})
 }
 

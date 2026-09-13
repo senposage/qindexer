@@ -83,8 +83,9 @@ crawler:
 - `directory_worker_count`: directory traversal concurrency per crawl.
 - `metadata_worker_count`: file stat/enrichment scheduling concurrency.
 - `metadata_queue_size`: bounded file queue.
-- `index_batch_size`: reserved for future catalog batching; it does not alter
-  current write behavior.
+- `index_batch_size`: maximum number of metadata records committed together.
+  Metadata workers split this budget so the total in-flight write batch stays
+  bounded while high-latency shares do not pay one SQLite transaction per file.
 - `ignore_hidden`: skips hidden files where supported.
 - `follow_symlinks`: follows symlinked directories when true.
 - `collect_ownership`: default owner metadata collection.
@@ -102,9 +103,18 @@ adaptive_throttle:
   recovery_samples: 3
 ```
 
-When enabled, QIndexer pauses crawl scheduling while host CPU or disk pressure
-is above threshold. QIndexer subtracts its own CPU share when evaluating host
-pressure, so the thresholds reflect other workload on the workstation or NAS.
+When enabled, QIndexer pauses crawl and enrichment work while host CPU or disk
+pressure is above threshold. QIndexer subtracts its own CPU share when
+evaluating host pressure, so the thresholds reflect other workload on the
+workstation or NAS. The management UI can change all five settings live.
+
+- `enabled`: turns adaptive pressure pausing on or off.
+- `sample_interval_seconds`: system sampling interval; valid range `1`-`3600`.
+- `cpu_percent_threshold`: external CPU percentage that pauses work; valid
+  range greater than `0` through `100`.
+- `disk_busy_percent_threshold`: busiest observed local disk busy percentage
+  that pauses work; valid range greater than `0` through `100`.
+- `recovery_samples`: consecutive healthy samples required before work resumes.
 
 ## Pause Windows
 

@@ -613,14 +613,14 @@ This is a service/crawler responsibility. QSurfer will retain its own result
 rules as defense in depth, but it must not be the only place these records are
 removed.
 
-## 2026-09-11 TODO: Graceful Running Root Removal
+## 2026-09-11 Completed: Graceful Running Root Removal
 
-When removing a root while its crawler is active, QIndexer should stop that
-root's crawl deliberately, flush pending catalog writes, and close or quiesce
-the database work touching that root before marking the root deleted. The
-current deletion path is intentionally deferred/no-op cleanup oriented, but a
-later pass should make running-root removal graceful instead of relying on the
-process-level lifecycle.
+Root deletion now cancels the target crawl and shared enrichment work, waits
+for checkpoint/catalog work to drain, removes the root from live configuration
+so it is immediately excluded from search responses, then marks its catalog
+rows deleted/no-op. It returns the retryable `root_still_stopping` conflict if
+the root cannot drain within the bounded wait; it does not delete underneath a
+live writer and does not require a service restart.
 
 ## 2026-09-11 Required: Canonicalize Crawled Paths Before Indexing
 
