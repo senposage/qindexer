@@ -212,10 +212,11 @@ function renderMetrics(metrics) {
     document.querySelector("#crawler-state").textContent = `Paused ${formatPause(metrics.paused_until_unix)}`;
     renderOps("Crawler paused", `Manual or maintenance pause ends in ${formatPause(metrics.paused_until_unix) || "less than a second"}.`);
   } else {
-    document.querySelector("#crawler-state").textContent = active ? `${active} active` : "Idle";
+    document.querySelector("#crawler-state").textContent = active ? `${active} active; background deferred` : "Idle";
     const roots = Array.isArray(metrics.active_roots) && metrics.active_roots.length ? ` ${metrics.active_roots.join(", ")}.` : "";
     const throughput = `${formatRate(metrics.files_per_second || 0)} files/s, ${formatRate(metrics.directories_per_second || 0)} dirs/s, ${formatBytes(metrics.bytes_per_second || 0)}/s.`;
-    renderOps(active ? "Crawler active" : "Crawler idle", active ? `${active} root crawl${active === 1 ? "" : "s"} running:${roots} ${throughput}` : `No active crawl. Next full reconciliation ${formatFuture(metrics.next_full_crawl_unix)}.`);
+    const deferred = ` Content, OCR, and hash backlogs wait for the structural crawl to finish; OCR candidates appear after content extraction identifies scanned or empty documents.`;
+    renderOps(active ? "Crawler active" : "Crawler idle", active ? `${active} root crawl${active === 1 ? "" : "s"} running:${roots} ${throughput}${deferred}` : `No active crawl. Background backlogs are eligible to drain. Next full reconciliation ${formatFuture(metrics.next_full_crawl_unix)}.`);
   }
 }
 
