@@ -8,7 +8,7 @@ $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
 
 $commit = "local"
-if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $root ".git"))) {
+if (Get-Command git -ErrorAction SilentlyContinue) {
   try { $commit = git -C $root rev-parse --short HEAD } catch { $commit = "local" }
 }
 
