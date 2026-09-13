@@ -23,6 +23,7 @@ import (
 	"qindexer/internal/config"
 	"qindexer/internal/crawler"
 	"qindexer/internal/version"
+	"qindexer/internal/watcher"
 	"qindexer/internal/web"
 )
 
@@ -31,6 +32,7 @@ type Server struct {
 	configPath    string
 	cat           *catalog.Catalog
 	crawler       *crawler.Crawler
+	watcher       *watcher.Watcher
 	log           *slog.Logger
 	accessLog     *slog.Logger
 	mu            sync.RWMutex
@@ -84,6 +86,12 @@ func (s *Server) SetLogPath(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logPath = path
+}
+
+func (s *Server) SetWatcher(w *watcher.Watcher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watcher = w
 }
 
 // SetAccessLogger keeps routine HTTP access records out of the operational
@@ -1412,15 +1420,26 @@ func (s *Server) readLogTail(limit int, maxBytes int64) ([]string, error) {
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	dataDir := config.ResolveDataDir(s.configPath, s.cfg.Index.DataDir)
+	watch := s.watcher
 	s.mu.RUnlock()
 	size, err := indexSizeBytes(dataDir)
 	if err != nil {
 		s.log.Debug("could not read index size", "error", err)
 	}
+	indexStats, statsErr := s.cat.IndexStats(r.Context())
+	if statsErr != nil {
+		s.log.Debug("could not read index type stats", "error", statsErr)
+	}
+	watcherStats := watcher.Stats{}
+	if watch != nil {
+		watcherStats = watch.Stats()
+	}
 	writeJSON(w, http.StatusOK, struct {
 		crawler.Stats
-		IndexSizeBytes int64 `json:"index_size_bytes"`
-	}{Stats: s.crawler.Stats(), IndexSizeBytes: size})
+		IndexSizeBytes int64              `json:"index_size_bytes"`
+		IndexStats     catalog.IndexStats `json:"index_stats"`
+		Watcher        watcher.Stats      `json:"watcher"`
+	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, Watcher: watcherStats})
 }
 
 func indexSizeBytes(dataDir string) (int64, error) {
@@ -1518,6 +1537,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		ContentExtraction config.ContentExtractionConfig `json:"content_extraction"`
 		OCR               config.OCRConfig               `json:"ocr"`
 		Hashing           config.HashingConfig           `json:"hashing"`
+		Watcher           config.WatcherConfig           `json:"watcher"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -1531,6 +1551,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	candidate.Crawler.ContentExtraction = req.ContentExtraction
 	candidate.Crawler.OCR = req.OCR
 	candidate.Crawler.Hashing = req.Hashing
+	candidate.Watcher = req.Watcher
 	candidate.ApplyDefaults()
 	if err := candidate.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_crawler_settings", err.Error())
@@ -1541,8 +1562,8 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
-	s.log.Info("crawler settings update completed", "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler})
+	s.log.Info("crawler settings update completed", "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler, "watcher": s.cfg.Watcher})
 }
 
 func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {

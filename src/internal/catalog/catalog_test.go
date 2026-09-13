@@ -103,6 +103,36 @@ func TestCheckDatabaseUsesReadOnlySQLiteURI(t *testing.T) {
 	}
 }
 
+func TestFolderActivityPersistsAndRanksFolders(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cat, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.RecordFolderActivity(ctx, "shared", []string{`X:\Active\one.docx`, `X:\Active\two.docx`}, 5, 60*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.RecordFolderActivity(ctx, "shared", []string{`X:\Cold\old.docx`}, 1, 60*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cat, err = Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	hot, err := cat.HotFolders(ctx, []string{"shared"}, 60*24*time.Hour, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hot) != 2 || hot[0].Path != `X:\Active` || hot[0].Score <= hot[1].Score {
+		t.Fatalf("unexpected hot folder ranking: %#v", hot)
+	}
+}
+
 func TestUpsertDocumentsRestoresMissingRecordsInOneBatch(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

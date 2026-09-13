@@ -136,7 +136,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 28px clamp(22px, 3vw, 
 
 .operations {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(420px, 1.4fr);
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.75fr) minmax(180px, 0.45fr);
   gap: 18px;
   align-items: stretch;
   margin-bottom: 18px;
@@ -145,9 +145,14 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 28px clamp(22px, 3vw, 
   border-radius: 8px;
   background: var(--surface);
 }
+.ops-main { min-width: 0; }
 .ops-main h2 { font-size: 18px; }
-.ops-main p:last-child { margin-top: 5px; color: var(--muted); }
-.ops-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.ops-summary { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 7px 12px; margin: 12px 0 0; }
+.ops-summary div { min-width: 0; }
+.ops-summary dt { color: var(--muted); font-size: 11px; font-weight: 650; }
+.ops-summary dd { min-width: 0; margin: 2px 0 0; overflow: hidden; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.ops-summary div { display: contents; }
+.ops-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .ops-metrics span {
   display: grid;
   gap: 4px;
@@ -160,6 +165,12 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 28px clamp(22px, 3vw, 
   font-size: 11px;
 }
 .ops-metrics b { color: var(--text); font-size: 17px; font-variant-numeric: tabular-nums; }
+.ops-types { display: grid; align-content: start; gap: 8px; min-width: 0; padding: 10px 2px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.type-summary { display: grid; gap: 4px; min-width: 0; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+.type-summary span { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.type-summary b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.type-summary em { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-style: normal; font-weight: 500; }
+.ops-alert { margin: 8px 0 0; color: #9f2432; font-weight: 600; }
 .view-toggle, .toolbar-actions, .pause-control { display: flex; align-items: center; gap: 7px; }
 .view-toggle { padding-right: 10px; border-right: 1px solid var(--line); }
 .view-toggle button { border-color: transparent; }
@@ -272,7 +283,7 @@ pre { max-height: 480px; margin: 0; padding: 16px; overflow: auto; color: #24313
   .toolbar { align-items: stretch; }
   .view-toggle, .pause-control { padding: 0; border: 0; }
   .section-heading { align-items: start; flex-direction: column; }
-  .status-grid, .rules-grid, .root-settings-grid, .split, .operations, .ops-metrics { grid-template-columns: 1fr; }
+  .status-grid, .rules-grid, .root-settings-grid, .split, .operations, .ops-metrics, .ops-summary { grid-template-columns: 1fr; }
   .activity-item { grid-template-columns: 1fr; align-items: start; }
   .activity-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bootstrap-form { grid-template-columns: 1fr; }

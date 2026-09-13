@@ -56,6 +56,16 @@ func TestNeedsInitialCrawlSkipsCompletedRoot(t *testing.T) {
 	}
 }
 
+func TestNeedsInitialCrawlResumesInterruptedCompletedRoot(t *testing.T) {
+	completed := time.Now().UTC()
+	root := config.RootConfig{ID: "resume", Enabled: true}
+	for _, status := range []string{"cancelled", "interrupted", "running", "hint_running"} {
+		if !needsInitialCrawl(root, true, catalog.RootState{LastSuccessfulCrawlAt: &completed, LastCrawlStatus: status}) {
+			t.Fatalf("expected %s crawl to resume at startup", status)
+		}
+	}
+}
+
 func TestMatchesAnyIsWindowsPathAware(t *testing.T) {
 	tests := []struct {
 		path     string
@@ -86,6 +96,24 @@ func TestMatchesAnyRecognizesRecoveryDirectoryItself(t *testing.T) {
 	}
 	if !matchesAny(`X:\$RECYCLE.BIN`, []string{"**/$RECYCLE.BIN/**"}) {
 		t.Fatal("expected recycle directory itself to match its exclusion pattern")
+	}
+}
+
+func TestDirectoryQueueInterleavesTopLevelBranches(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	queue := newDirQueue([]string{root})
+	first := filepath.Join(root, "A", "one")
+	second := filepath.Join(root, "B", "one")
+	third := filepath.Join(root, "A", "two")
+	queue.add(first)
+	queue.add(second)
+	queue.add(third)
+	for index, expected := range []string{first, second, third} {
+		got, ok := queue.next(context.Background())
+		if !ok || got != expected {
+			t.Fatalf("turn %d: got %q (ok=%v), want %q", index, got, ok, expected)
+		}
+		queue.done()
 	}
 }
 

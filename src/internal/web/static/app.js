@@ -128,9 +128,10 @@ async function refresh(options = {}) {
     renderRootErrors(roots.roots || []);
     renderLogs(logs);
     state.crawler = config.crawler || {};
+    state.watcher = config.watcher || {};
     state.network = { server: config.server || {}, management: config.management || {} };
     renderNetworkSettings(state.network);
-    renderIndexingSettings(state.crawler);
+    renderIndexingSettings(state.crawler, state.watcher);
     document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
     setAdminVisibility(true);
     setMessage(options.message || "Ready");
@@ -242,29 +243,72 @@ function resetPrivateDashboard() {
 }
 
 function renderMetrics(metrics) {
+
+  const indexStats = metrics.index_stats || {};
+  document.querySelector("#file-count").textContent = Number(indexStats.files || 0).toLocaleString();
+  document.querySelector("#folder-count").textContent = Number(indexStats.folders || 0).toLocaleString();
+  const typeCount = Number(indexStats.types || 0);
+  const extensions = array(indexStats.extensions);
+  const typeSummary = extensions.map((item) => `${item.extension || "no extension"}: ${Number(item.count || 0).toLocaleString()} files`).join(", ");
+  const typeMetric = document.querySelector("#type-count");
+  typeMetric.textContent = typeCount.toLocaleString();
+  typeMetric.closest(".metric").title = typeSummary || "No indexed file types yet";
+  const typeList = document.querySelector("#type-summary");
+  typeList.replaceChildren();
+  if (!extensions.length) {
+    typeList.textContent = "-";
+  } else {
+    for (const item of extensions) {
+      const row = document.createElement("span");
+      const extension = document.createElement("b");
+      const count = document.createElement("em");
+      extension.textContent = item.extension || "no extension";
+      count.textContent = `${Number(item.count || 0).toLocaleString()} files`;
+      row.append(extension, count);
+      typeList.append(row);
+    }
+  }
   document.querySelector("#files-rate").textContent = formatRate(metrics.files_per_second || 0);
   document.querySelector("#dirs-rate").textContent = formatRate(metrics.directories_per_second || 0);
   document.querySelector("#io-rate").textContent = `${formatBytes(metrics.bytes_per_second || 0)}/s`;
   document.querySelector("#index-size").textContent = formatBytes(metrics.index_size_bytes || 0);
   const active = metrics.active_crawls || 0;
+  const progress = array(metrics.active_progress);
   document.querySelector("#content-queue").textContent = Number(metrics.content_queue_depth || 0).toLocaleString();
   document.querySelector("#ocr-queue").textContent = Number(metrics.ocr_queue_depth || 0).toLocaleString();
   document.querySelector("#hash-queue").textContent = Number(metrics.hash_queue_depth || 0).toLocaleString();
   document.querySelector("#next-crawl").textContent = formatFuture(metrics.next_full_crawl_unix);
+  renderOpsSummary(metrics, progress);
   if (metrics.adaptive_paused) {
     document.querySelector("#crawler-state").textContent = `Throttled: ${String(metrics.pause_reason || "system").replace("adaptive_", "")}`;
-    renderOps("Crawler throttled", `Paused by ${String(metrics.pause_reason || "system").replace("adaptive_", "")}. CPU ${formatRate(metrics.cpu_percent || 0)}%, disk busy ${formatRate(metrics.disk_busy_percent || 0)}%.`);
+    renderOps("Crawler throttled");
   } else if (metrics.paused) {
     document.querySelector("#crawler-state").textContent = `Paused ${formatPause(metrics.paused_until_unix)}`;
-    renderOps("Crawler paused", `Manual or maintenance pause ends in ${formatPause(metrics.paused_until_unix) || "less than a second"}.`);
+    renderOps("Crawler paused");
   } else {
     document.querySelector("#crawler-state").textContent = active ? `${active} active; background deferred` : "Idle";
-    const roots = Array.isArray(metrics.active_roots) && metrics.active_roots.length ? ` ${metrics.active_roots.join(", ")}.` : "";
-    const throughput = `${formatRate(metrics.files_per_second || 0)} files/s, ${formatRate(metrics.directories_per_second || 0)} dirs/s, ${formatBytes(metrics.bytes_per_second || 0)}/s.`;
-    const activity = metrics.last_activity_unix ? ` Last observed crawl activity ${formatActivityAge(metrics.last_activity_unix)}.` : "";
-    const deferred = ` Content, OCR, and hash backlogs wait for the structural crawl to finish; OCR candidates appear after content extraction identifies scanned or empty documents.`;
-    renderOps(active ? "Crawler active" : "Crawler idle", active ? `${active} root crawl${active === 1 ? "" : "s"} running:${roots} ${throughput}.${activity}${deferred}` : `No active crawl. Background backlogs are eligible to drain. Next full reconciliation ${formatFuture(metrics.next_full_crawl_unix)}.`);
+    renderOps(active ? "Crawler active" : "Crawler idle");
   }
+  renderOpsAlert(progress);
+}
+
+function renderOpsAlert(progress) {
+  const alert = document.querySelector("#ops-alert");
+  const accessErrors = array(progress).reduce((total, item) => total + Number(item.access_errors || 0), 0);
+  const errors = array(progress).reduce((total, item) => total + Number(item.errors || 0), 0);
+  const lastError = array(progress).map((item) => item.last_error).find(Boolean);
+  if (accessErrors > 0) {
+    alert.textContent = `${accessErrors.toLocaleString()} access or permission skip${accessErrors === 1 ? "" : "s"} in the active crawl. ${lastError || "The crawler will retry on a later pass."}`;
+    alert.classList.remove("hidden");
+    return;
+  }
+  if (errors > 0) {
+    alert.textContent = `${errors.toLocaleString()} crawl error${errors === 1 ? "" : "s"} in the active crawl. ${lastError || "See service logs for details."}`;
+    alert.classList.remove("hidden");
+    return;
+  }
+  alert.classList.add("hidden");
+  alert.textContent = "";
 }
 
 function formatActivityAge(unix) {
@@ -274,9 +318,22 @@ function formatActivityAge(unix) {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ago`;
 }
 
-function renderOps(title, detail) {
+function renderOpsSummary(metrics, progress) {
+  const first = progress[0];
+  const roots = array(metrics.active_roots);
+  const watch = metrics.watcher || {};
+  document.querySelector("#ops-root").textContent = roots.length ? roots.join(", ") : "-";
+  const directory = document.querySelector("#ops-directory");
+  directory.textContent = first?.current_directory || "-";
+  directory.title = first?.current_directory || "";
+  document.querySelector("#ops-directory-counts").textContent = first ? `${Number(first.directory_files || 0).toLocaleString()} files, ${Number(first.directory_folders || 0).toLocaleString()} folders` : "-";
+  document.querySelector("#ops-activity").textContent = metrics.last_activity_unix ? `${formatActivityAge(metrics.last_activity_unix)} | ${formatRate(metrics.files_per_second || 0)} files/s | ${formatRate(metrics.directories_per_second || 0)} dirs/s` : "-";
+  document.querySelector("#ops-watcher").textContent = watch.enabled ? `${Number(watch.watched_directories || 0).toLocaleString()} / ${Number(watch.max_watched_directories || 0).toLocaleString()} folders` : "Disabled";
+  document.querySelector("#ops-background").textContent = metrics.active_crawls ? "Deferred until crawl completes" : "Eligible to run";
+}
+
+function renderOps(title) {
   document.querySelector("#ops-state").textContent = title;
-  document.querySelector("#ops-detail").textContent = detail;
 }
 
 function renderService(service) {
@@ -433,7 +490,7 @@ async function saveRules(event) {
   }
 }
 
-function renderIndexingSettings(crawler) {
+function renderIndexingSettings(crawler, watcher = {}) {
   const extraction = crawler.content_extraction || {};
   const ocr = crawler.ocr || {};
   const hashing = crawler.hashing || {};
@@ -455,6 +512,10 @@ function renderIndexingSettings(crawler) {
   document.querySelector("#settings-throttle-disk").value = throttle.disk_busy_percent_threshold || 70;
   document.querySelector("#settings-throttle-sample").value = throttle.sample_interval_seconds || 5;
   document.querySelector("#settings-throttle-recovery").value = throttle.recovery_samples || 3;
+  document.querySelector("#settings-watcher-enabled").checked = watcher.enabled !== false;
+  document.querySelector("#settings-watcher-limit").value = watcher.max_watched_directories || 5000;
+  document.querySelector("#settings-watcher-half-life").value = watcher.activity_half_life_days || 60;
+  document.querySelector("#settings-watcher-rebalance").value = watcher.rebalance_minutes || 15;
 }
 
 function renderNetworkSettings(network) {
@@ -495,8 +556,9 @@ async function saveIndexingSettings(event) {
   const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64 };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
+  const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
   try {
-    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing }) });
+    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
     await refresh({ quiet: true, message: "Indexing settings saved" });
   } catch (err) { setMessage(err.message); }
 }
@@ -683,7 +745,13 @@ async function repairRootIndex(root, options = {}) {
 			const processed = progress.paths_processed || 0;
 			const pathProgress = matched ? `; ${processed.toLocaleString()} / ${matched.toLocaleString()} matching paths processed` : "";
 			const detail = `${progress.phase || "working"}; ${progress.aliases_checked || 0} aliases checked${pathProgress}, ${progress.paths_rewritten || 0} paths rewritten, ${progress.duplicate_paths_merged || 0} duplicates merged. ${seconds}s elapsed.`;
-			renderOps(`Repairing ${root}`, detail);
+			renderOps(`Repairing ${root}`);
+			document.querySelector("#ops-root").textContent = root;
+			document.querySelector("#ops-directory").textContent = progress.phase || "Working";
+			document.querySelector("#ops-directory-counts").textContent = `${processed.toLocaleString()} / ${matched.toLocaleString()} paths`;
+			document.querySelector("#ops-activity").textContent = `${seconds}s elapsed`;
+			document.querySelector("#ops-watcher").textContent = "Paused for repair";
+			document.querySelector("#ops-background").textContent = "Stopped for repair";
 			setMessage(`${root}: ${detail}`);
 		} catch (_) {
 			// The repair request itself reports failures; polling is supplementary.

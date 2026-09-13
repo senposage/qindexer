@@ -112,6 +112,8 @@ type WatcherConfig struct {
 	DebounceMilliseconds  int  `yaml:"debounce_milliseconds" json:"debounce_milliseconds"`
 	MaxWatchedDirectories int  `yaml:"max_watched_directories" json:"max_watched_directories"`
 	MaxDirtyPathsPerFlush int  `yaml:"max_dirty_paths_per_flush" json:"max_dirty_paths_per_flush"`
+	ActivityHalfLifeDays  int  `yaml:"activity_half_life_days" json:"activity_half_life_days"`
+	RebalanceMinutes      int  `yaml:"rebalance_minutes" json:"rebalance_minutes"`
 }
 
 type RootConfig struct {
@@ -297,6 +299,12 @@ func (c *Config) applyDefaults() {
 	if c.Watcher.MaxDirtyPathsPerFlush <= 0 {
 		c.Watcher.MaxDirtyPathsPerFlush = 500
 	}
+	if c.Watcher.ActivityHalfLifeDays <= 0 {
+		c.Watcher.ActivityHalfLifeDays = 60
+	}
+	if c.Watcher.RebalanceMinutes <= 0 {
+		c.Watcher.RebalanceMinutes = 15
+	}
 }
 
 // ApplyDefaults normalizes configuration submitted through the management API.
@@ -325,6 +333,15 @@ func (c *Config) Validate() error {
 	}
 	if throttle.RecoverySamples < 1 || throttle.RecoverySamples > 3600 {
 		return fmt.Errorf("adaptive throttle recovery samples must be between 1 and 3600")
+	}
+	if c.Watcher.ActivityHalfLifeDays < 1 || c.Watcher.ActivityHalfLifeDays > 3650 {
+		return fmt.Errorf("watcher activity half-life must be between 1 and 3650 days")
+	}
+	if c.Watcher.MaxWatchedDirectories < 1 || c.Watcher.MaxWatchedDirectories > 250000 {
+		return fmt.Errorf("watcher directory limit must be between 1 and 250000")
+	}
+	if c.Watcher.RebalanceMinutes < 1 || c.Watcher.RebalanceMinutes > 1440 {
+		return fmt.Errorf("watcher rebalance interval must be between 1 and 1440 minutes")
 	}
 	ids := map[string]bool{}
 	for _, root := range c.Roots {
@@ -484,4 +501,12 @@ func (a AdaptiveThrottleConfig) SampleInterval() time.Duration {
 
 func (w WatcherConfig) Debounce() time.Duration {
 	return time.Duration(w.DebounceMilliseconds) * time.Millisecond
+}
+
+func (w WatcherConfig) ActivityHalfLife() time.Duration {
+	return time.Duration(w.ActivityHalfLifeDays) * 24 * time.Hour
+}
+
+func (w WatcherConfig) RebalanceInterval() time.Duration {
+	return time.Duration(w.RebalanceMinutes) * time.Minute
 }

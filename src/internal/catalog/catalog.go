@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,34 @@ import (
 type Catalog struct {
 	db      *sql.DB
 	writeMu sync.Mutex
+	statsMu sync.Mutex
+	stats   indexStatsCache
+}
+
+type indexStatsCache struct {
+	at    time.Time
+	value IndexStats
+}
+
+// FolderActivity is a compact, persisted signal used to allocate a bounded
+// filesystem-watch budget. It is deliberately separate from documents.
+type FolderActivity struct {
+	RootID         string
+	Path           string
+	Score          float64
+	LastActivityAt time.Time
+}
+
+type ExtensionCount struct {
+	Extension string `json:"extension"`
+	Count     int64  `json:"count"`
+}
+
+type IndexStats struct {
+	Files      int64            `json:"files"`
+	Folders    int64            `json:"folders"`
+	Types      int64            `json:"types"`
+	Extensions []ExtensionCount `json:"extensions"`
 }
 
 type Document struct {
@@ -263,6 +293,9 @@ func (c *Catalog) ClearRoot(ctx context.Context, rootID string) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM root_states WHERE root_id = ?`, rootID); err != nil {
 		return 0, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM folder_activity WHERE root_id = ?`, rootID); err != nil {
+		return 0, err
+	}
 	count, err := result.RowsAffected()
 	if err != nil {
 		return 0, err
@@ -279,6 +312,9 @@ func (c *Catalog) DeactivateRoot(ctx context.Context, rootID string) (int64, err
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO deleted_roots(root_id, deleted_at) VALUES (?, ?)`, rootID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM folder_activity WHERE root_id = ?`, rootID); err != nil {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'deleted', access_status = 'root_removed' WHERE root_id = ? AND status <> 'deleted'`, rootID)
@@ -662,6 +698,142 @@ func (c *Catalog) PruneRecoveryPaths(ctx context.Context, rootID string) (int64,
 	return count, tx.Commit()
 }
 
+// RecordFolderActivity keeps a small, decaying signal for the watcher. Paths
+// are reduced to their containing directory so one busy folder is one row.
+func (c *Catalog) RecordFolderActivity(ctx context.Context, rootID string, paths []string, weight float64, halfLife time.Duration) error {
+	if strings.TrimSpace(rootID) == "" || len(paths) == 0 || weight <= 0 {
+		return nil
+	}
+	if halfLife <= 0 {
+		halfLife = 60 * 24 * time.Hour
+	}
+	now := time.Now().UTC()
+	directories := map[string]string{}
+	for _, path := range paths {
+		dir := filepath.Dir(path)
+		if strings.TrimSpace(dir) == "" || dir == "." {
+			continue
+		}
+		directories[NormalizePath(dir)] = dir
+	}
+	if len(directories) == 0 {
+		return nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for normalized, path := range directories {
+		var score float64
+		var recorded string
+		err := tx.QueryRowContext(ctx, `SELECT score, last_activity_at FROM folder_activity WHERE root_id = ? AND normalized_path = ?`, rootID, normalized).Scan(&score, &recorded)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			if at, parseErr := time.Parse(time.RFC3339Nano, recorded); parseErr == nil {
+				score = decayActivity(score, now.Sub(at), halfLife)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO folder_activity(root_id, normalized_path, path, score, last_activity_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(root_id, normalized_path) DO UPDATE SET path = excluded.path, score = excluded.score, last_activity_at = excluded.last_activity_at`,
+			rootID, normalized, path, score+weight, now.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (c *Catalog) HotFolders(ctx context.Context, rootIDs []string, halfLife time.Duration, limit int) ([]FolderActivity, error) {
+	if len(rootIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	if halfLife <= 0 {
+		halfLife = 60 * 24 * time.Hour
+	}
+	rows, err := c.db.QueryContext(ctx, `SELECT root_id, path, score, last_activity_at FROM folder_activity WHERE root_id IN (`+placeholders(len(rootIDs))+`)`, stringsToAny(rootIDs)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	now := time.Now().UTC()
+	values := make([]FolderActivity, 0)
+	for rows.Next() {
+		var item FolderActivity
+		var recorded string
+		if err := rows.Scan(&item.RootID, &item.Path, &item.Score, &recorded); err != nil {
+			return nil, err
+		}
+		item.LastActivityAt, _ = time.Parse(time.RFC3339Nano, recorded)
+		item.Score = decayActivity(item.Score, now.Sub(item.LastActivityAt), halfLife)
+		if item.Score > 0 {
+			values = append(values, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].Score > values[j].Score })
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	return values, nil
+}
+
+func (c *Catalog) IndexStats(ctx context.Context) (IndexStats, error) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+	if time.Since(c.stats.at) < 5*time.Second {
+		return c.stats.value, nil
+	}
+	var stats IndexStats
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE status = 'active' AND is_folder = 0`).Scan(&stats.Files); err != nil {
+		return IndexStats{}, err
+	}
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE status = 'active' AND is_folder = 1`).Scan(&stats.Folders); err != nil {
+		return IndexStats{}, err
+	}
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT extension) FROM documents WHERE status = 'active' AND is_folder = 0`).Scan(&stats.Types); err != nil {
+		return IndexStats{}, err
+	}
+	rows, err := c.db.QueryContext(ctx, `SELECT extension, COUNT(*) FROM documents WHERE status = 'active' AND is_folder = 0 GROUP BY extension ORDER BY COUNT(*) DESC, extension ASC LIMIT 8`)
+	if err != nil {
+		return IndexStats{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item ExtensionCount
+		if err := rows.Scan(&item.Extension, &item.Count); err != nil {
+			return IndexStats{}, err
+		}
+		stats.Extensions = append(stats.Extensions, item)
+	}
+	if err := rows.Err(); err != nil {
+		return IndexStats{}, err
+	}
+	c.stats = indexStatsCache{at: time.Now(), value: stats}
+	return stats, nil
+}
+
+func decayActivity(score float64, elapsed, halfLife time.Duration) float64 {
+	if score <= 0 || elapsed <= 0 || halfLife <= 0 {
+		return score
+	}
+	return score * math.Pow(0.5, elapsed.Seconds()/halfLife.Seconds())
+}
+
+func stringsToAny(values []string) []any {
+	args := make([]any, len(values))
+	for i := range values {
+		args[i] = values[i]
+	}
+	return args
+}
+
 func (c *Catalog) migrate(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode=WAL;`,
@@ -733,6 +905,15 @@ func (c *Catalog) migrate(ctx context.Context) error {
 			PRIMARY KEY(root_id, normalized_path)
 		);`,
 		`CREATE TABLE IF NOT EXISTS deleted_roots (root_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS folder_activity (
+			root_id TEXT NOT NULL,
+			normalized_path TEXT NOT NULL,
+			path TEXT NOT NULL,
+			score REAL NOT NULL,
+			last_activity_at TEXT NOT NULL,
+			PRIMARY KEY(root_id, normalized_path)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_folder_activity_root_score ON folder_activity(root_id, score DESC);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := c.db.ExecContext(ctx, stmt); err != nil {

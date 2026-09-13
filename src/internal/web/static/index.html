@@ -73,6 +73,18 @@
         <strong id="root-count">0</strong>
       </div>
       <div class="metric admin-metric">
+        <span>Files</span>
+        <strong id="file-count">0</strong>
+      </div>
+      <div class="metric admin-metric">
+        <span>Folders</span>
+        <strong id="folder-count">0</strong>
+      </div>
+      <div class="metric admin-metric" title="Most common indexed file types">
+        <span>File types</span>
+        <strong id="type-count">0</strong>
+      </div>
+      <div class="metric admin-metric">
         <span>Files/sec</span>
         <strong id="files-rate">0</strong>
       </div>
@@ -126,13 +138,25 @@
       <div class="ops-main">
         <p class="eyebrow">Operations</p>
         <h2 id="ops-state">Waiting for status</h2>
-        <p id="ops-detail">Crawler state will appear after the first refresh.</p>
+        <dl class="ops-summary" aria-label="crawler status details">
+          <div><dt>Root</dt><dd id="ops-root">-</dd></div>
+          <div><dt>Directory</dt><dd id="ops-directory">-</dd></div>
+          <div><dt>Current folder</dt><dd id="ops-directory-counts">-</dd></div>
+          <div><dt>Activity</dt><dd id="ops-activity">-</dd></div>
+          <div><dt>Watcher</dt><dd id="ops-watcher">-</dd></div>
+          <div><dt>Background</dt><dd id="ops-background">-</dd></div>
+        </dl>
+        <p id="ops-alert" class="ops-alert hidden" role="alert"></p>
       </div>
       <div class="ops-metrics" aria-label="crawler background work">
         <span><b id="next-crawl">-</b>Next full crawl</span>
         <span><b id="content-queue">0</b>Content backlog</span>
         <span><b id="ocr-queue">0</b>OCR backlog</span>
         <span><b id="hash-queue">0</b>Hash backlog</span>
+      </div>
+      <div class="ops-types" aria-label="top indexed file types">
+        <span>Top file types</span>
+        <div id="type-summary" class="type-summary">-</div>
       </div>
     </section>
 
@@ -247,7 +271,7 @@
         <section class="form-section">
           <div class="form-section-title">
             <p class="eyebrow">This root's folder filters</p>
-            <p>Use wildcards to scope or omit folders from this crawl.</p>
+            <p>One folder pattern per line. A bare name such as <code>.Trash-1000</code> matches that folder at any depth; use <code>**/name/**</code> for an explicit folder path pattern.</p>
           </div>
           <div class="rules-grid">
             <label>
@@ -256,7 +280,7 @@
             </label>
             <label>
               Exclude folder wildcards
-              <textarea id="rules-exclude-folder" spellcheck="false" placeholder="**/.git/**&#10;**/node_modules/**&#10;**/tmp/**"></textarea>
+              <textarea id="rules-exclude-folder" spellcheck="false" placeholder=".Trash-1000&#10;**/.git/**&#10;**/node_modules/**"></textarea>
             </label>
           </div>
         </section>
@@ -361,6 +385,16 @@
             <label>Disk busy threshold (%)<input id="settings-throttle-disk" type="number" min="1" max="100" step="1"></label>
             <label>Sample interval (seconds)<input id="settings-throttle-sample" type="number" min="1" max="3600" step="1"></label>
             <label>Healthy samples before resuming<input id="settings-throttle-recovery" type="number" min="1" max="3600" step="1"></label>
+          </div>
+          <div class="form-section-title">
+            <p class="eyebrow">Filesystem watcher</p>
+            <p>Uses OS change notifications for active folders; the periodic crawl remains the source of truth.</p>
+          </div>
+          <div class="rules-grid">
+            <label class="check-row"><input id="settings-watcher-enabled" type="checkbox"><span>Use filesystem change notifications</span></label>
+            <label>Watched folder limit<input id="settings-watcher-limit" type="number" min="1" max="250000" step="1"></label>
+            <label>Activity retention (days)<input id="settings-watcher-half-life" type="number" min="1" max="3650" step="1"></label>
+            <label>Watch rebalance interval (minutes)<input id="settings-watcher-rebalance" type="number" min="1" max="1440" step="1"></label>
           </div>
           <div class="form-section-title">
             <p class="eyebrow">Optional indexing work</p>

@@ -87,6 +87,7 @@ func (a App) Run(ctx context.Context) error {
 	watch := watcher.New(cfg, cr, log, dataDir)
 	apiServer := api.New(cfg, a.ConfigPath, cat, cr, log, searchToken, adminToken)
 	apiServer.SetConfigChanged(watch.ApplyConfig)
+	apiServer.SetWatcher(watch)
 	apiServer.SetLogPath(logPath)
 	if accessLogFile != nil {
 		apiServer.SetAccessLogger(slog.New(slog.NewTextHandler(accessLogFile, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug})))

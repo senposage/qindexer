@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,8 @@ type Crawler struct {
 	mu                  sync.Mutex
 	run                 map[string]context.CancelFunc
 	done                map[string]chan struct{}
+	progressMu          sync.RWMutex
+	progress            map[string]*crawlProgress
 	startedAt           time.Time
 	activeCrawls        int64
 	filesStatted        int64
@@ -88,6 +91,25 @@ type throughputSample struct {
 	bytesPerSecond     float64
 }
 
+type CrawlProgress struct {
+	RootID           string    `json:"root_id"`
+	StartedAt        time.Time `json:"started_at"`
+	CurrentDirectory string    `json:"current_directory,omitempty"`
+	DirectoryFiles   int       `json:"directory_files"`
+	DirectoryFolders int       `json:"directory_folders"`
+	DirectoriesRead  int64     `json:"directories_read"`
+	FilesIndexed     int64     `json:"files_indexed"`
+	Errors           int64     `json:"errors"`
+	AccessErrors     int64     `json:"access_errors"`
+	LastError        string    `json:"last_error,omitempty"`
+	LastActivityUnix int64     `json:"last_activity_unix"`
+}
+
+type crawlProgress struct {
+	mu sync.RWMutex
+	CrawlProgress
+}
+
 type suppressedLog struct {
 	message    string
 	count      int
@@ -106,7 +128,7 @@ func New(cfg *config.Config, cat *catalog.Catalog, log *slog.Logger) *Crawler {
 	snapshot := config.Clone(cfg)
 	zero := make(chan struct{})
 	close(zero)
-	return &Crawler{cfg: snapshot, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, retry: map[string]bool{}, logState: map[string]suppressedLog{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, snapshot.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, snapshot.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, snapshot.Crawler.Hashing.QueueSize), backgroundZero: zero}
+	return &Crawler{cfg: snapshot, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, progress: map[string]*crawlProgress{}, retry: map[string]bool{}, logState: map[string]suppressedLog{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, snapshot.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, snapshot.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, snapshot.Crawler.Hashing.QueueSize), backgroundZero: zero}
 }
 
 func (c *Crawler) snapshot() *config.Config {
@@ -124,31 +146,44 @@ func (c *Crawler) ApplyConfig(cfg *config.Config) {
 	c.cfgMu.Unlock()
 }
 
+// RecordFolderActivity is intentionally best-effort: watcher optimization
+// must never block indexing if its small auxiliary table is unavailable.
+func (c *Crawler) RecordFolderActivity(ctx context.Context, rootID string, paths []string, weight float64) {
+	if err := c.cat.RecordFolderActivity(ctx, rootID, paths, weight, c.snapshot().Watcher.ActivityHalfLife()); err != nil {
+		c.log.Debug("folder activity update failed", "root", rootID, "error", err)
+	}
+}
+
+func (c *Crawler) HotFolders(ctx context.Context, rootIDs []string, halfLife time.Duration, limit int) ([]catalog.FolderActivity, error) {
+	return c.cat.HotFolders(ctx, rootIDs, halfLife, limit)
+}
+
 type Stats struct {
-	StartedAt         time.Time `json:"started_at"`
-	UptimeSeconds     float64   `json:"uptime_seconds"`
-	ActiveCrawls      int64     `json:"active_crawls"`
-	ActiveRoots       []string  `json:"active_roots"`
-	InitialCrawls     int64     `json:"initial_crawls"`
-	FilesStatted      int64     `json:"files_statted"`
-	DirectoriesRead   int64     `json:"directories_read"`
-	BytesStatted      int64     `json:"bytes_statted"`
-	FilesPerSecond    float64   `json:"files_per_second"`
-	DirsPerSecond     float64   `json:"directories_per_second"`
-	BytesPerSecond    float64   `json:"bytes_per_second"`
-	HintCrawls        int64     `json:"hint_crawls"`
-	FullCrawls        int64     `json:"full_crawls"`
-	LastActivityUnix  int64     `json:"last_activity_unix"`
-	Paused            bool      `json:"paused"`
-	PausedUntilUnix   int64     `json:"paused_until_unix"`
-	PauseReason       string    `json:"pause_reason,omitempty"`
-	AdaptivePaused    bool      `json:"adaptive_paused"`
-	CPUPercent        float64   `json:"cpu_percent"`
-	DiskBusyPercent   float64   `json:"disk_busy_percent"`
-	NextFullCrawlUnix int64     `json:"next_full_crawl_unix"`
-	ContentQueueDepth int       `json:"content_queue_depth"`
-	OCRQueueDepth     int       `json:"ocr_queue_depth"`
-	HashQueueDepth    int       `json:"hash_queue_depth"`
+	StartedAt         time.Time       `json:"started_at"`
+	UptimeSeconds     float64         `json:"uptime_seconds"`
+	ActiveCrawls      int64           `json:"active_crawls"`
+	ActiveRoots       []string        `json:"active_roots"`
+	InitialCrawls     int64           `json:"initial_crawls"`
+	FilesStatted      int64           `json:"files_statted"`
+	DirectoriesRead   int64           `json:"directories_read"`
+	BytesStatted      int64           `json:"bytes_statted"`
+	FilesPerSecond    float64         `json:"files_per_second"`
+	DirsPerSecond     float64         `json:"directories_per_second"`
+	BytesPerSecond    float64         `json:"bytes_per_second"`
+	HintCrawls        int64           `json:"hint_crawls"`
+	FullCrawls        int64           `json:"full_crawls"`
+	LastActivityUnix  int64           `json:"last_activity_unix"`
+	Paused            bool            `json:"paused"`
+	PausedUntilUnix   int64           `json:"paused_until_unix"`
+	PauseReason       string          `json:"pause_reason,omitempty"`
+	AdaptivePaused    bool            `json:"adaptive_paused"`
+	CPUPercent        float64         `json:"cpu_percent"`
+	DiskBusyPercent   float64         `json:"disk_busy_percent"`
+	NextFullCrawlUnix int64           `json:"next_full_crawl_unix"`
+	ContentQueueDepth int             `json:"content_queue_depth"`
+	OCRQueueDepth     int             `json:"ocr_queue_depth"`
+	HashQueueDepth    int             `json:"hash_queue_depth"`
+	ActiveProgress    []CrawlProgress `json:"active_progress"`
 }
 
 func (c *Crawler) Stats() Stats {
@@ -192,7 +227,86 @@ func (c *Crawler) Stats() Stats {
 		ContentQueueDepth: len(c.contentJobs),
 		OCRQueueDepth:     len(c.ocrJobs),
 		HashQueueDepth:    len(c.hashJobs),
+		ActiveProgress:    c.ActiveProgress(),
 	}
+}
+
+func (c *Crawler) ActiveProgress() []CrawlProgress {
+	c.progressMu.RLock()
+	items := make([]*crawlProgress, 0, len(c.progress))
+	for _, item := range c.progress {
+		items = append(items, item)
+	}
+	c.progressMu.RUnlock()
+	result := make([]CrawlProgress, 0, len(items))
+	for _, item := range items {
+		item.mu.RLock()
+		result = append(result, item.CrawlProgress)
+		item.mu.RUnlock()
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].RootID < result[j].RootID })
+	return result
+}
+
+func (c *Crawler) beginProgress(rootID, directory string) func() {
+	item := &crawlProgress{CrawlProgress: CrawlProgress{RootID: rootID, StartedAt: time.Now().UTC(), CurrentDirectory: directory, LastActivityUnix: time.Now().Unix()}}
+	c.progressMu.Lock()
+	c.progress[rootID] = item
+	c.progressMu.Unlock()
+	return func() {
+		c.progressMu.Lock()
+		if c.progress[rootID] == item {
+			delete(c.progress, rootID)
+		}
+		c.progressMu.Unlock()
+	}
+}
+
+func (c *Crawler) updateDirectoryProgress(rootID, directory string, files, folders int) {
+	c.progressMu.RLock()
+	item := c.progress[rootID]
+	c.progressMu.RUnlock()
+	if item == nil {
+		return
+	}
+	item.mu.Lock()
+	item.CurrentDirectory, item.DirectoryFiles, item.DirectoryFolders = directory, files, folders
+	item.DirectoriesRead++
+	item.LastActivityUnix = time.Now().Unix()
+	item.mu.Unlock()
+}
+
+func (c *Crawler) recordProgressFiles(rootID string, count int64) {
+	c.progressMu.RLock()
+	item := c.progress[rootID]
+	c.progressMu.RUnlock()
+	if item == nil {
+		return
+	}
+	item.mu.Lock()
+	item.FilesIndexed += count
+	item.LastActivityUnix = time.Now().Unix()
+	item.mu.Unlock()
+}
+
+func (c *Crawler) recordProgressError(rootID, path string, err error) {
+	c.progressMu.RLock()
+	item := c.progress[rootID]
+	c.progressMu.RUnlock()
+	if item == nil {
+		return
+	}
+	item.mu.Lock()
+	item.Errors++
+	if isPermissionError(err) {
+		item.AccessErrors++
+	}
+	item.LastError = err.Error()
+	if path != "" {
+		item.CurrentDirectory = path
+	}
+	item.LastActivityUnix = time.Now().Unix()
+	item.mu.Unlock()
 }
 
 func (c *Crawler) throughputMonitor(ctx context.Context) {
@@ -524,7 +638,17 @@ func (c *Crawler) CrawlUnindexedRoots(ctx context.Context) []catalog.CrawlRun {
 }
 
 func needsInitialCrawl(root config.RootConfig, exists bool, state catalog.RootState) bool {
-	return root.Enabled && (!exists || state.LastSuccessfulCrawlAt == nil)
+	if !root.Enabled || !exists || state.LastSuccessfulCrawlAt == nil {
+		return root.Enabled && (!exists || state.LastSuccessfulCrawlAt == nil)
+	}
+	// A deliberate stop or service shutdown during a crawl leaves checkpoints
+	// behind. Resume it at startup instead of waiting for the next full scan.
+	switch state.LastCrawlStatus {
+	case "cancelled", "interrupted", "running", "hint_running":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Crawler) crawlRoots(ctx context.Context, initial bool, include func(config.RootConfig) bool) []catalog.CrawlRun {
@@ -815,6 +939,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 		return catalog.CrawlRun{RootID: root.ID, Status: "already_running"}, nil
 	}
 	defer finish()
+	defer c.beginProgress(root.ID, root.Path)()
 	atomic.AddInt64(&c.activeCrawls, 1)
 	atomic.AddInt64(&c.fullCrawls, 1)
 	if initial {
@@ -878,22 +1003,27 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 				if err != nil {
 					if !isCrawlerCancellation(ctx, err) {
 						atomic.AddInt64(&errorsCount, int64(len(batch)))
+						c.recordProgressError(root.ID, "", err)
 						c.log.Warn("metadata batch index failed", "root", root.ID, "entries", len(batch), "error", err)
 						batch = batch[:0]
 						return true
 					}
 					return false
 				}
-				for _, res := range results {
+				activityPaths := make([]string, 0)
+				for i, res := range results {
 					atomic.AddInt64(&filesSeen, 1)
 					if res.Added {
 						atomic.AddInt64(&filesAdded, 1)
 					} else if res.Updated {
 						atomic.AddInt64(&filesUpdated, 1)
+						activityPaths = append(activityPaths, batch[i].Path)
 					} else if res.Unchanged {
 						atomic.AddInt64(&filesUnchanged, 1)
 					}
 				}
+				c.recordProgressFiles(root.ID, int64(len(results)))
+				c.RecordFolderActivity(ctx, root.ID, activityPaths, 1)
 				batch = batch[:0]
 				return true
 			}
@@ -918,6 +1048,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 						continue
 					}
 					atomic.AddInt64(&errorsCount, 1)
+					c.recordProgressError(root.ID, path, err)
 					c.log.Warn("metadata index failed", "root", root.ID, "path", path, "error", err)
 					continue
 				}
@@ -1019,6 +1150,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 		return catalog.CrawlRun{RootID: root.ID, Status: "already_running"}, nil
 	}
 	defer finish()
+	defer c.beginProgress(root.ID, path)()
 	atomic.AddInt64(&c.activeCrawls, 1)
 	atomic.AddInt64(&c.hintCrawls, 1)
 	atomic.StoreInt64(&c.lastActivity, time.Now().Unix())
@@ -1121,7 +1253,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 }
 
 func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume bool, adaptivePause bool) error {
-	queue := newDirQueue()
+	queue := newDirQueue(paths)
 	go func() {
 		<-ctx.Done()
 		queue.finish()
@@ -1214,11 +1346,14 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 }
 
 func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir string, queue *dirQueue, jobs chan<- string, errorsCount *int64, generation int64, checkpoint bool, adaptivePause bool) {
+	started := time.Now()
+	defer func() { queue.report(dir, time.Since(started)) }()
 	atomic.AddInt64(&c.dirsRead, 1)
 	atomic.StoreInt64(&c.lastActivity, time.Now().Unix())
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		atomic.AddInt64(errorsCount, 1)
+		c.recordProgressError(root.ID, dir, err)
 		if ctx.Err() != nil {
 			queue.setErr(ctx.Err())
 			return
@@ -1231,6 +1366,13 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 		queue.setPartialErr(fmt.Errorf("%w: could not read %s: %v", errRootTraversalPartial, dir, err))
 		return
 	}
+	folders := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			folders++
+		}
+	}
+	c.updateDirectoryProgress(root.ID, dir, len(entries)-folders, folders)
 	for _, entry := range entries {
 		if ctx.Err() != nil {
 			queue.setErr(ctx.Err())
@@ -1506,21 +1648,37 @@ func sendPath(ctx context.Context, jobs chan<- string, path string) error {
 type dirQueue struct {
 	mu         sync.Mutex
 	cond       *sync.Cond
-	dirs       []string
+	roots      []string
+	branches   map[string]*dirBranch
+	order      []string
+	nextBranch int
 	pending    int
 	errVal     error
 	partialVal error
 }
 
-func newDirQueue() *dirQueue {
-	q := &dirQueue{}
+type dirBranch struct {
+	dirs         []string
+	latency      time.Duration
+	blockedUntil time.Time
+}
+
+func newDirQueue(roots []string) *dirQueue {
+	q := &dirQueue{roots: append([]string(nil), roots...), branches: map[string]*dirBranch{}}
 	q.cond = sync.NewCond(&q.mu)
 	return q
 }
 
 func (q *dirQueue) add(path string) {
 	q.mu.Lock()
-	q.dirs = append(q.dirs, path)
+	branchKey := q.branch(path)
+	branch := q.branches[branchKey]
+	if branch == nil {
+		branch = &dirBranch{}
+		q.branches[branchKey] = branch
+		q.order = append(q.order, branchKey)
+	}
+	branch.dirs = append(branch.dirs, path)
 	q.pending++
 	q.cond.Signal()
 	q.mu.Unlock()
@@ -1529,16 +1687,83 @@ func (q *dirQueue) add(path string) {
 func (q *dirQueue) next(ctx context.Context) (string, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for len(q.dirs) == 0 && q.pending > 0 && q.errVal == nil && ctx.Err() == nil {
+	for q.pending > 0 && q.errVal == nil && ctx.Err() == nil && !q.hasPendingDirectories() {
 		q.cond.Wait()
 	}
-	if q.errVal != nil || ctx.Err() != nil || len(q.dirs) == 0 {
+	if q.errVal != nil || ctx.Err() != nil || q.pending <= 0 {
 		return "", false
 	}
-	dir := q.dirs[0]
-	copy(q.dirs, q.dirs[1:])
-	q.dirs = q.dirs[:len(q.dirs)-1]
-	return dir, true
+	var fallback *dirBranch
+	for checked := 0; checked < len(q.order); checked++ {
+		key := q.order[q.nextBranch%len(q.order)]
+		q.nextBranch++
+		branch := q.branches[key]
+		if branch == nil || len(branch.dirs) == 0 {
+			continue
+		}
+		if fallback == nil {
+			fallback = branch
+		}
+		if time.Now().Before(branch.blockedUntil) {
+			continue
+		}
+		return q.pop(branch), true
+	}
+	if fallback != nil {
+		return q.pop(fallback), true
+	}
+	return "", false
+}
+
+func (q *dirQueue) pop(branch *dirBranch) string {
+	dir := branch.dirs[0]
+	branch.dirs = branch.dirs[1:]
+	return dir
+}
+
+func (q *dirQueue) hasPendingDirectories() bool {
+	for _, branch := range q.branches {
+		if len(branch.dirs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *dirQueue) branch(path string) string {
+	for _, root := range q.roots {
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		first := strings.Split(rel, string(filepath.Separator))[0]
+		return filepath.Join(root, first)
+	}
+	return filepath.Dir(path)
+}
+
+func (q *dirQueue) report(path string, elapsed time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	branch := q.branches[q.branch(path)]
+	if branch == nil {
+		return
+	}
+	if branch.latency == 0 {
+		branch.latency = elapsed
+	} else {
+		branch.latency = (branch.latency*3 + elapsed) / 4
+	}
+	if elapsed >= 2*time.Second {
+		backoff := elapsed / 2
+		if backoff < time.Second {
+			backoff = time.Second
+		}
+		if backoff > 10*time.Second {
+			backoff = 10 * time.Second
+		}
+		branch.blockedUntil = time.Now().Add(backoff)
+	}
 }
 
 func (q *dirQueue) done() {

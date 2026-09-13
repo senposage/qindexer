@@ -189,10 +189,21 @@ watcher:
   debounce_milliseconds: 1500
   max_watched_directories: 25000
   max_dirty_paths_per_flush: 500
+  activity_half_life_days: 60
+  rebalance_minutes: 15
 ```
 
 The watcher uses OS filesystem hints when available. It is an accelerator, not
 the only source of truth. Periodic full crawls reconcile missed events.
+
+On large NAS trees, the watcher pins roots and immediate child folders, then
+uses the remaining watch budget for folders with recent change activity. Folder
+activity persists across restarts and decays with `activity_half_life_days`;
+the default 60-day half-life intentionally keeps day-to-day working folders
+hot for a long time. `rebalance_minutes` controls how often cold watches are
+replaced by hotter candidates. `max_watched_directories` is the total OS watch
+budget across all roots. It can be changed live from the admin UI; QIndexer
+restarts only the watcher and preserves crawl/index work.
 
 ## Roots
 
@@ -279,6 +290,10 @@ exclude_patterns: []
 - `include_folder_patterns`: wildcard folder includes. Empty means all.
 - `exclude_folder_patterns`: wildcard folder excludes.
 - `exclude_patterns`: legacy compatibility exclusions.
+
+A bare folder name, such as `.Trash-1000`, matches that directory at any depth
+of the root. Use `**/name/**` when you want to express the same intent as an
+explicit folder path pattern, including its descendants.
 
 Rules are evaluated before catalog insertion. Exclusions prevent future crawl
 insertion; use root repair/clear/reconciliation to clean older rows.
