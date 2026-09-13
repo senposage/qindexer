@@ -75,7 +75,8 @@ curl -fsS -X POST "$QINDEXER_URL/v1/search" \
     "filters": {
       "roots": ["finance"],
       "extensions": ["pdf", "docx", "xlsx"],
-      "match_fields": ["name", "path", "content"]
+      "match_fields": ["name", "path", "content"],
+      "match_mode": "prefix"
     },
     "limit": 50,
     "offset": 0,

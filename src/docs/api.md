@@ -73,6 +73,8 @@ Important features:
 - `path_scopes`
 - `root_filtering`
 - `exclusions`
+- `exact_match`
+- `structured_boolean`
 
 Important limits:
 
@@ -141,7 +143,13 @@ Searches indexed files and folders.
     "modified_before": "2026-12-31T23:59:59Z",
     "min_size": 1024,
     "max_size": 10485760,
-    "match_fields": ["name", "path", "extension", "content"]
+    "match_fields": ["name", "path", "extension", "content"],
+    "match_mode": "prefix",
+    "boolean": {
+      "all": ["budget"],
+      "any": ["forecast", "plan"],
+      "not": ["draft"]
+    }
   },
   "limit": 50,
   "offset": 0,
@@ -173,6 +181,17 @@ Filters:
 - `modified_after` / `modified_before`: RFC3339 time bounds.
 - `min_size` / `max_size`: byte bounds.
 - `match_fields`: any of `name`, `path`, `extension`, `content`.
+- `match_mode`: `prefix` (default) matches the beginning of indexed tokens;
+  `exact` matches an exact token or exact multi-word phrase. It applies to any
+  selected `match_fields` combination, including content-only search.
+- `boolean`: optional structured Boolean terms. `all` terms are joined with
+  AND; `any` terms are joined with OR as a group; `not` terms are excluded.
+  Terms are always escaped by QIndexer and combine with `query`, field
+  selection, scopes, sorts, and pagination. At least one `query`, `all`, or
+  `any` term is required when using `not`.
+
+The `query` string is always literal search text; it does not accept FTS or
+Boolean syntax. Use the structured `boolean` filter instead.
 
 Path scope matching is segment-aware. `C:\Legal` matches `C:\Legal\brief.docx`
 but not `C:\Legalities\brief.docx`.

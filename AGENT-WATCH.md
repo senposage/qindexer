@@ -751,3 +751,50 @@ current worktree and was verified to serialize structured `path_aliases`.
   Only a bounded dirty-event overflow or watcher coverage loss escalates to a
   root crawl. Secondary claims sort by newest `indexed_at`, so changed files
   move ahead of the historical extraction/OCR/hash backlog.
+
+## 2026-09-13 QIndexer Update: Exact Search Mode
+
+QIndexer now supports an optional field-agnostic exact FTS mode. QSurfer does
+not need to change ordinary searches: omitting this field preserves the current
+prefix behavior.
+
+For an exact-search UI control, add this alongside the existing selected
+fields:
+
+```json
+"filters": {
+  "match_fields": ["content"],
+  "match_mode": "exact"
+}
+```
+
+`match_mode` accepts `prefix` (default) or `exact`. Exact is an exact indexed
+token for a one-word query and an exact, ordered contiguous FTS phrase for a
+multi-word query. It combines with any `match_fields` selection (`name`,
+`path`, `extension`, `content`), root/path scopes, sorts, and pagination. It
+does not require a reindex. Discover support from
+`GET /v1/capabilities`: `features.exact_match: true` and
+`supported_filters` includes `match_mode`.
+
+### Structured Boolean Filter
+
+Do not put operators in `query`: QIndexer treats that field as literal text.
+Use the structured filter below, which is internally escaped before FTS runs:
+
+```json
+"filters": {
+  "match_fields": ["content"],
+  "match_mode": "exact",
+  "boolean": {
+    "all": ["contract"],
+    "any": ["review", "amendment"],
+    "not": ["draft"]
+  }
+}
+```
+
+`all` is AND, `any` is an OR group, and `not` excludes terms. It combines with
+the ordinary `query`, match modes, scopes, sorts, and pagination. QSurfer can
+discover this through `features.structured_boolean: true` and the `boolean`
+entry in `supported_filters`. An empty term or a `not`-only filter returns a
+structured `400 invalid_boolean_filter`.

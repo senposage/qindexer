@@ -138,20 +138,33 @@ type SearchRequest struct {
 }
 
 type SearchFilters struct {
-	Roots          []string     `json:"roots"`
-	Extensions     []string     `json:"extensions"`
-	PathPrefix     string       `json:"path_prefix"`
-	PathPrefixes   []string     `json:"path_prefixes"`
-	IncludePaths   []string     `json:"include_paths"`
-	ExcludePaths   []string     `json:"exclude_paths"`
-	ScopeAliases   []ScopeAlias `json:"scope_aliases"`
-	Kind           string       `json:"kind"`
-	ModifiedAfter  string       `json:"modified_after"`
-	ModifiedBefore string       `json:"modified_before"`
-	MinSize        *int64       `json:"min_size"`
-	MaxSize        *int64       `json:"max_size"`
-	MatchFields    []string     `json:"match_fields"`
+	Roots          []string      `json:"roots"`
+	Extensions     []string      `json:"extensions"`
+	PathPrefix     string        `json:"path_prefix"`
+	PathPrefixes   []string      `json:"path_prefixes"`
+	IncludePaths   []string      `json:"include_paths"`
+	ExcludePaths   []string      `json:"exclude_paths"`
+	ScopeAliases   []ScopeAlias  `json:"scope_aliases"`
+	Kind           string        `json:"kind"`
+	ModifiedAfter  string        `json:"modified_after"`
+	ModifiedBefore string        `json:"modified_before"`
+	MinSize        *int64        `json:"min_size"`
+	MaxSize        *int64        `json:"max_size"`
+	MatchFields    []string      `json:"match_fields"`
+	MatchMode      string        `json:"match_mode"`
+	Boolean        BooleanFilter `json:"boolean"`
 }
+
+// BooleanFilter is a structured expression, deliberately avoiding raw FTS
+// operators in client-supplied query text. all uses AND, any uses OR, and not
+// excludes matching terms from the positive expression.
+type BooleanFilter struct {
+	All []string `json:"all,omitempty"`
+	Any []string `json:"any,omitempty"`
+	Not []string `json:"not,omitempty"`
+}
+
+func (f BooleanFilter) TermCount() int { return len(f.All) + len(f.Any) + len(f.Not) }
 
 // ScopeAlias is an ephemeral client path relationship used only to resolve a
 // request's explicit scope fields. It is never persisted in QIndexer config.
@@ -1750,9 +1763,13 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	args := []any{}
 	where := []string{"d.status = 'active'"}
 	from := "documents d"
-	hasQuery := strings.TrimSpace(req.Query) != ""
+	if req.Filters.Boolean.TermCount() > 100 {
+		return SearchResponse{}, &RequestError{Code: "too_many_boolean_terms", Message: "at most 100 boolean terms are supported"}
+	}
+	hasQuery := strings.TrimSpace(req.Query) != "" || req.Filters.Boolean.TermCount() > 0
+	highlightQuery := strings.Join(append(append([]string{req.Query}, req.Filters.Boolean.All...), req.Filters.Boolean.Any...), " ")
 	if hasQuery {
-		matchQuery, err := scopedFTSQuery(req.Query, req.Filters.MatchFields)
+		matchQuery, err := scopedFTSQuery(req.Query, req.Filters.MatchFields, req.Filters.MatchMode, req.Filters.Boolean)
 		if err != nil {
 			return SearchResponse{}, err
 		}
@@ -1762,7 +1779,10 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 		// not make an unrelated descendant folder a result.
 		where = append(where, "documents_fts MATCH ?")
 		args = append(args, matchQuery)
-		folderClause, folderArgs := folderNameMatchClause(req.Query)
+		folderClause, folderArgs, err := folderNameMatchClause(req.Query, req.Filters.MatchMode, req.Filters.Boolean)
+		if err != nil {
+			return SearchResponse{}, err
+		}
 		where = append(where, "(d.is_folder = 0 OR ("+folderClause+"))")
 		args = append(args, folderArgs...)
 	}
@@ -1877,7 +1897,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 			doc.Kind = "file"
 		}
 		if hasQuery {
-			addMatchMetadata(&doc, req.Query, req.Filters.MatchFields)
+			addMatchMetadata(&doc, highlightQuery, req.Filters.MatchFields)
 		}
 		docs = append(docs, doc)
 	}
@@ -2151,8 +2171,18 @@ func escapeFTS(q string) string {
 	return strings.Join(parts, " ")
 }
 
-func scopedFTSQuery(query string, fields []string) (string, error) {
-	terms := escapeFTS(query)
+func scopedFTSQuery(query string, fields []string, matchMode string, boolean BooleanFilter) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(matchMode))
+	if mode == "" {
+		mode = "prefix"
+	}
+	if mode != "prefix" && mode != "exact" {
+		return "", &RequestError{Code: "invalid_match_mode", Message: "match_mode supports prefix and exact"}
+	}
+	terms, err := escapedQueryTerms(query, mode, boolean)
+	if err != nil {
+		return "", err
+	}
 	if len(fields) == 0 {
 		return terms, nil
 	}
@@ -2175,13 +2205,112 @@ func scopedFTSQuery(query string, fields []string) (string, error) {
 	return "{" + strings.Join(selected, " ") + "} : (" + terms + ")", nil
 }
 
-func folderNameMatchClause(query string) (string, []any) {
-	terms := strings.Fields(query)
-	clauses := make([]string, 0, len(terms))
-	args := make([]any, 0, len(terms))
-	for _, term := range terms {
-		clauses = append(clauses, "d.name LIKE ? ESCAPE '\\' COLLATE NOCASE")
-		args = append(args, "%"+escapeLike(term)+"%")
+func escapedQueryTerms(query, mode string, boolean BooleanFilter) (string, error) {
+	term := func(value string) (string, error) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", &RequestError{Code: "invalid_boolean_filter", Message: "boolean terms must not be empty"}
+		}
+		if mode == "prefix" {
+			return escapeFTS(value), nil
+		}
+		return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`, nil
 	}
-	return strings.Join(clauses, " AND "), args
+	positive := []string{}
+	if strings.TrimSpace(query) != "" {
+		value, err := term(query)
+		if err != nil {
+			return "", err
+		}
+		positive = append(positive, "("+value+")")
+	}
+	for _, raw := range boolean.All {
+		value, err := term(raw)
+		if err != nil {
+			return "", err
+		}
+		positive = append(positive, "("+value+")")
+	}
+	if len(boolean.Any) > 0 {
+		any := make([]string, 0, len(boolean.Any))
+		for _, raw := range boolean.Any {
+			value, err := term(raw)
+			if err != nil {
+				return "", err
+			}
+			any = append(any, "("+value+")")
+		}
+		positive = append(positive, "("+strings.Join(any, " OR ")+")")
+	}
+	if len(positive) == 0 {
+		return "", &RequestError{Code: "invalid_boolean_filter", Message: "boolean not terms require a query, all term, or any term"}
+	}
+	result := strings.Join(positive, " AND ")
+	for _, raw := range boolean.Not {
+		value, err := term(raw)
+		if err != nil {
+			return "", err
+		}
+		result = "(" + result + ") NOT (" + value + ")"
+	}
+	return result, nil
+}
+
+func folderNameMatchClause(query string, matchMode string, boolean BooleanFilter) (string, []any, error) {
+	predicate := func(value string) (string, []any, error) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", nil, &RequestError{Code: "invalid_boolean_filter", Message: "boolean terms must not be empty"}
+		}
+		if strings.EqualFold(matchMode, "exact") {
+			return "d.name = ? COLLATE NOCASE", []any{value}, nil
+		}
+		terms := strings.Fields(value)
+		clauses, args := make([]string, 0, len(terms)), make([]any, 0, len(terms))
+		for _, term := range terms {
+			clauses, args = append(clauses, "d.name LIKE ? ESCAPE '\\' COLLATE NOCASE"), append(args, "%"+escapeLike(term)+"%")
+		}
+		return "(" + strings.Join(clauses, " AND ") + ")", args, nil
+	}
+	positive, args := []string{}, []any{}
+	add := func(value string) error {
+		clause, values, err := predicate(value)
+		if err == nil {
+			positive, args = append(positive, clause), append(args, values...)
+		}
+		return err
+	}
+	if strings.TrimSpace(query) != "" {
+		if err := add(query); err != nil {
+			return "", nil, err
+		}
+	}
+	for _, value := range boolean.All {
+		if err := add(value); err != nil {
+			return "", nil, err
+		}
+	}
+	if len(boolean.Any) > 0 {
+		any, values := []string{}, []any{}
+		for _, value := range boolean.Any {
+			clause, termArgs, err := predicate(value)
+			if err != nil {
+				return "", nil, err
+			}
+			any, values = append(any, clause), append(values, termArgs...)
+		}
+		positive, args = append(positive, "("+strings.Join(any, " OR ")+")"), append(args, values...)
+	}
+	if len(positive) == 0 {
+		return "", nil, &RequestError{Code: "invalid_boolean_filter", Message: "boolean not terms require a query, all term, or any term"}
+	}
+	result := strings.Join(positive, " AND ")
+	for _, value := range boolean.Not {
+		clause, termArgs, err := predicate(value)
+		if err != nil {
+			return "", nil, err
+		}
+		result, args = "("+result+") AND NOT ("+clause+")", append(args, termArgs...)
+	}
+	return result, args, nil
 }

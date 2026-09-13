@@ -512,6 +512,64 @@ func TestSearchMatchFieldsSeparatesMetadataAndContent(t *testing.T) {
 	}
 }
 
+func TestSearchExactMatchModeSupportsAnySelectedField(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	add := func(id, name, content string) {
+		t.Helper()
+		doc := Document{ID: id, RootID: "test", Path: `D:\fixtures\` + name, NormalizedPath: NormalizePath(`D:\fixtures\` + name), Name: name, Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+		if err := cat.UpdateExtractedContent(ctx, doc.ID, doc.Signature, "extracted", content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("exact", "contract.txt", "The contract review is ready.")
+	add("prefix-only", "contractual.txt", "The contractual review is ready.")
+	add("separate-terms", "notes.txt", "The contract legal review is ready.")
+
+	content, err := cat.Search(ctx, SearchRequest{Query: "contract review", Filters: SearchFilters{MatchFields: []string{"content"}, MatchMode: "exact"}, Limit: 10}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content.Results) != 1 || content.Results[0].ID != "exact" {
+		t.Fatalf("exact content search = %#v", content.Results)
+	}
+	name, err := cat.Search(ctx, SearchRequest{Query: "contract", Filters: SearchFilters{MatchFields: []string{"name"}, MatchMode: "exact"}, Limit: 10}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(name.Results) != 1 || name.Results[0].ID != "exact" {
+		t.Fatalf("exact name search = %#v", name.Results)
+	}
+	if _, err := cat.Search(ctx, SearchRequest{Query: "contract", Filters: SearchFilters{MatchMode: "unknown"}, Limit: 10}, 20); err == nil {
+		t.Fatal("expected invalid match mode error")
+	}
+	boolean, err := cat.Search(ctx, SearchRequest{Filters: SearchFilters{MatchFields: []string{"content"}, MatchMode: "exact", Boolean: BooleanFilter{Any: []string{"contract review", "contractual"}}}, Limit: 10}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(boolean.Results) != 2 || len(boolean.Results[0].MatchedFields) != 1 || boolean.Results[0].MatchedFields[0] != "content" {
+		t.Fatalf("exact boolean search = %#v", boolean.Results)
+	}
+	andNot, err := cat.Search(ctx, SearchRequest{Filters: SearchFilters{MatchFields: []string{"content"}, MatchMode: "exact", Boolean: BooleanFilter{All: []string{"contract", "review"}, Not: []string{"legal"}}}, Limit: 10}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(andNot.Results) != 1 || andNot.Results[0].ID != "exact" {
+		t.Fatalf("exact AND/NOT search = %#v", andNot.Results)
+	}
+	if _, err := cat.Search(ctx, SearchRequest{Filters: SearchFilters{MatchFields: []string{"content"}, Boolean: BooleanFilter{Not: []string{"draft"}}}, Limit: 10}, 20); err == nil {
+		t.Fatal("expected invalid boolean filter")
+	}
+}
+
 func TestClaimPendingWorkRespectsRootSelection(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())
