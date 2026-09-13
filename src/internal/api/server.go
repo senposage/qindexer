@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -26,18 +27,39 @@ import (
 )
 
 type Server struct {
-	cfg         *config.Config
-	configPath  string
-	cat         *catalog.Catalog
-	crawler     *crawler.Crawler
-	log         *slog.Logger
-	mu          sync.RWMutex
-	searchToken string
-	adminToken  string
-	instanceID  string
-	searchSlots chan struct{}
-	shutdown    func()
+	cfg           *config.Config
+	configPath    string
+	cat           *catalog.Catalog
+	crawler       *crawler.Crawler
+	log           *slog.Logger
+	mu            sync.RWMutex
+	searchToken   string
+	adminToken    string
+	instanceID    string
+	searchSlots   chan struct{}
+	shutdown      func()
+	logPath       string
+	configChanged func(*config.Config)
+	resumeRoots   map[string]struct{}
+	repairMu      sync.RWMutex
+	repair        repairProgress
 }
+
+type repairProgress struct {
+	RootID           string    `json:"root_id,omitempty"`
+	Status           string    `json:"status"`
+	Phase            string    `json:"phase,omitempty"`
+	StartedAt        time.Time `json:"started_at,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at,omitempty"`
+	AliasesChecked   int       `json:"aliases_checked"`
+	PathsMatched     int64     `json:"paths_matched"`
+	PathsProcessed   int64     `json:"paths_processed"`
+	PathsRewritten   int64     `json:"paths_rewritten"`
+	DuplicatesMerged int64     `json:"duplicate_paths_merged"`
+	Error            string    `json:"error,omitempty"`
+}
+
+const maxRequestBodyBytes = 1 << 20
 
 type rootAliasView struct {
 	AliasID   string `json:"alias_id"`
@@ -48,13 +70,59 @@ type rootAliasView struct {
 }
 
 func New(cfg *config.Config, configPath string, cat *catalog.Catalog, cr *crawler.Crawler, log *slog.Logger, searchToken, adminToken string) *Server {
-	return &Server{cfg: cfg, configPath: configPath, cat: cat, crawler: cr, log: log, searchToken: searchToken, adminToken: adminToken, instanceID: uuid.NewString(), searchSlots: make(chan struct{}, 32)}
+	return &Server{cfg: cfg, configPath: configPath, cat: cat, crawler: cr, log: log, searchToken: searchToken, adminToken: adminToken, instanceID: uuid.NewString(), searchSlots: make(chan struct{}, 32), resumeRoots: map[string]struct{}{}}
 }
 
 func (s *Server) SetShutdown(shutdown func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.shutdown = shutdown
+}
+
+func (s *Server) SetLogPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logPath = path
+}
+
+// SetConfigChanged publishes durable configuration changes to long-running
+// components which keep their own immutable snapshots.
+func (s *Server) SetConfigChanged(callback func(*config.Config)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configChanged = callback
+}
+
+// saveConfigLocked persists first, then makes the candidate observable. The
+// caller must hold s.mu so failed writes cannot change runtime behavior.
+func (s *Server) saveConfigLocked(candidate *config.Config) error {
+	if err := config.Save(s.configPath, candidate); err != nil {
+		return err
+	}
+	// Keep the original pointer stable for embedding callers, while crawler and
+	// watcher receive separate immutable snapshots below.
+	*s.cfg = *config.Clone(candidate)
+	s.crawler.ApplyConfig(s.cfg)
+	if s.configChanged != nil {
+		s.configChanged(s.cfg)
+	}
+	return nil
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("request body must contain one JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Server) SearchHandler() http.Handler {
@@ -79,8 +147,10 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /admin/v1/config/validate", s.withAdminAuth(s.configValidate))
 	mux.HandleFunc("GET /admin/v1/metrics", s.withAdminAuth(s.metrics))
 	mux.HandleFunc("GET /admin/v1/diagnostics", s.withAdminAuth(s.diagnostics))
+	mux.HandleFunc("GET /admin/v1/logs", s.withAdminAuth(s.logs))
 	mux.HandleFunc("POST /admin/v1/crawler/pause", s.withAdminAuth(s.pauseCrawler))
 	mux.HandleFunc("POST /admin/v1/crawler/resume", s.withAdminAuth(s.resumeCrawler))
+	mux.HandleFunc("POST /admin/v1/crawler/stop", s.withAdminAuth(s.stopCrawler))
 	mux.HandleFunc("POST /admin/v1/service/stop", s.withAdminAuth(s.stopService))
 	mux.HandleFunc("PUT /admin/v1/crawler/settings", s.withAdminAuth(s.updateCrawlerSettings))
 	mux.HandleFunc("PUT /admin/v1/network", s.withAdminAuth(s.updateNetworkSettings))
@@ -90,6 +160,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/crawl", s.withAdminAuth(s.crawlRoot))
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/clear-index", s.withAdminAuth(s.clearRootIndex))
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/repair-index", s.withAdminAuth(s.repairRootIndex))
+	mux.HandleFunc("GET /admin/v1/operations/repair", s.withAdminAuth(s.repairStatus))
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/validate", s.withAdminAuth(s.validateRoot))
 	mux.HandleFunc("PUT /admin/v1/roots/{root_id}/rules", s.withAdminAuth(s.updateRootRules))
 	mux.HandleFunc("GET /admin/v1/crawls", s.withAdminAuth(s.crawls))
@@ -126,7 +197,15 @@ func (s *Server) mountAdminUI(mux *http.ServeMux) {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	states, _ := s.cat.RootStates(r.Context())
+	states, err := s.cat.RootStates(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "degraded", "protocol_version": "1.1", "service_instance": s.instanceID,
+			"version": version.Version, "commit": version.Commit,
+			"index": map[string]any{"ready": false, "document_count": 0, "error": "catalog unavailable"},
+		})
+		return
+	}
 	var count int64
 	for _, state := range states {
 		count += state.DocumentCount
@@ -146,20 +225,23 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	cfg := config.Clone(s.cfg)
+	s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"protocol_version": "1.1",
 		"service_instance": s.instanceID,
 		"service_version":  version.Version,
 		"features": map[string]bool{
 			"metadata_search": true,
-			"content_search": s.anyRootUses(func(root config.RootConfig) bool {
-				return root.ContentExtractionEnabled(s.cfg.Crawler.ContentExtraction.Enabled)
+			"content_search": anyRootUses(cfg, func(root config.RootConfig) bool {
+				return root.ContentExtractionEnabled(cfg.Crawler.ContentExtraction.Enabled)
 			}),
-			"ocr_search": s.anyRootUses(func(root config.RootConfig) bool {
-				return root.ContentExtractionEnabled(s.cfg.Crawler.ContentExtraction.Enabled) && root.OCREnabled(s.cfg.Crawler.OCR.Enabled)
+			"ocr_search": anyRootUses(cfg, func(root config.RootConfig) bool {
+				return root.ContentExtractionEnabled(cfg.Crawler.ContentExtraction.Enabled) && root.OCREnabled(cfg.Crawler.OCR.Enabled)
 			}),
 			"acl_filtering":   false,
-			"content_hashing": s.anyRootUses(func(root config.RootConfig) bool { return root.HashingEnabled(s.cfg.Crawler.Hashing.Enabled) }),
+			"content_hashing": anyRootUses(cfg, func(root config.RootConfig) bool { return root.HashingEnabled(cfg.Crawler.Hashing.Enabled) }),
 			"crawl_control":   true,
 			"folder_search":   true,
 			"folder_suggest":  true,
@@ -185,8 +267,10 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 			"match_fields",
 		},
 		"limits": map[string]any{
-			"max_page_size":           s.cfg.Index.MaxResults,
+			"max_page_size":           cfg.Index.MaxResults,
 			"max_path_scopes":         100,
+			"max_roots":               100,
+			"max_extensions":          100,
 			"max_concurrent_searches": cap(s.searchSlots),
 		},
 		"supported_sorts": []string{"name", "modified", "size", "relevance"},
@@ -202,6 +286,9 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "catalog_error", err.Error())
 		return
 	}
+	s.repairMu.RLock()
+	repair := s.repair
+	s.repairMu.RUnlock()
 	type rootView struct {
 		config.RootConfig
 		FriendlyName          string          `json:"friendly_name"`
@@ -221,6 +308,9 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		if status == "" {
 			status = "never"
 		}
+		if repair.Status == "running" && repair.RootID == root.ID {
+			status = "repairing"
+		}
 		out = append(out, rootView{
 			RootConfig:   root,
 			FriendlyName: root.FriendlyName(), CanonicalPath: root.Path, Available: status != "unreachable",
@@ -233,8 +323,8 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"roots": out})
 }
 
-func (s *Server) anyRootUses(include func(config.RootConfig) bool) bool {
-	for _, root := range s.cfg.Roots {
+func anyRootUses(cfg *config.Config, include func(config.RootConfig) bool) bool {
+	for _, root := range cfg.Roots {
 		if root.Enabled && include(root) {
 			return true
 		}
@@ -257,12 +347,8 @@ func rootAliases(root config.RootConfig) []rootAliasView {
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
-	if !s.acquireSearchSlot(w) {
-		return
-	}
-	defer s.releaseSearchSlot()
 	var req catalog.SearchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -277,6 +363,10 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	maxResults := s.cfg.Index.MaxResults
 	s.mu.RUnlock()
+	if !s.acquireSearchSlot(w) {
+		return
+	}
+	defer s.releaseSearchSlot()
 	resp, err := s.cat.Search(r.Context(), req, maxResults)
 	if err != nil {
 		if requestErr, ok := err.(*catalog.RequestError); ok {
@@ -291,18 +381,13 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) directories(w http.ResponseWriter, r *http.Request) {
-	if !s.acquireSearchSlot(w) {
-		return
-	}
-	defer s.releaseSearchSlot()
-	s.searchWithKind(w, r, "folder", s.cfg.Index.MaxResults)
+	s.mu.RLock()
+	maxResults := s.cfg.Index.MaxResults
+	s.mu.RUnlock()
+	s.searchWithKind(w, r, "folder", maxResults)
 }
 
 func (s *Server) suggest(w http.ResponseWriter, r *http.Request) {
-	if !s.acquireSearchSlot(w) {
-		return
-	}
-	defer s.releaseSearchSlot()
 	limit := 25
 	s.searchWithKind(w, r, "folder", limit)
 }
@@ -321,7 +406,7 @@ func (s *Server) releaseSearchSlot() { <-s.searchSlots }
 
 func (s *Server) searchWithKind(w http.ResponseWriter, r *http.Request, kind string, maxResults int) {
 	var req catalog.SearchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -337,6 +422,10 @@ func (s *Server) searchWithKind(w http.ResponseWriter, r *http.Request, kind str
 	if req.Limit <= 0 || req.Limit > maxResults {
 		req.Limit = maxResults
 	}
+	if !s.acquireSearchSlot(w) {
+		return
+	}
+	defer s.releaseSearchSlot()
 	resp, err := s.cat.Search(r.Context(), req, maxResults)
 	if err != nil {
 		if requestErr, ok := err.(*catalog.RequestError); ok {
@@ -359,6 +448,7 @@ type displayAlias struct {
 	rootID        string
 	canonicalPath string
 	displayPath   string
+	priority      int
 }
 
 type scopeResolution struct {
@@ -368,17 +458,19 @@ type scopeResolution struct {
 func (r scopeResolution) applyDisplayAliases(resp *catalog.SearchResponse) {
 	for i := range resp.Results {
 		bestLength := -1
+		bestPriority := -1
 		for _, alias := range r.displayAliases {
 			doc := &resp.Results[i]
 			if doc.RootID != alias.rootID {
 				continue
 			}
 			suffix, ok := scopedPathSuffix(doc.Path, alias.canonicalPath)
-			if !ok || len(alias.canonicalPath) <= bestLength {
+			if !ok || (len(alias.canonicalPath) < bestLength || (len(alias.canonicalPath) == bestLength && alias.priority <= bestPriority)) {
 				continue
 			}
 			doc.DisplayPath = joinCanonicalScope(alias.displayPath, suffix)
 			bestLength = len(alias.canonicalPath)
+			bestPriority = alias.priority
 		}
 	}
 }
@@ -405,7 +497,7 @@ func (s *Server) resolveScopeAliases(req *catalog.SearchRequest) (scopeResolutio
 			if aliasPath == "" {
 				continue
 			}
-			resolution.displayAliases = append(resolution.displayAliases, displayAlias{rootID: root.ID, canonicalPath: aliasPrimaryCanonicalTarget(root.Path, alias), displayPath: aliasPath})
+			resolution.displayAliases = append(resolution.displayAliases, displayAlias{rootID: root.ID, canonicalPath: aliasPrimaryCanonicalTarget(root.Path, alias), displayPath: aliasPath, priority: aliasDisplayPriority(alias)})
 		}
 	}
 	unique := func(scope string, matches []scopeMatch) (scopeMatch, bool, error) {
@@ -481,7 +573,7 @@ func (s *Server) resolveScopeAliases(req *catalog.SearchRequest) (scopeResolutio
 				}
 			}
 			resolvedRoots[first.match.rootID] = true
-			resolution.displayAliases = append(resolution.displayAliases, displayAlias{rootID: first.match.rootID, canonicalPath: first.match.path, displayPath: first.display})
+			resolution.displayAliases = append(resolution.displayAliases, displayAlias{rootID: first.match.rootID, canonicalPath: first.match.path, displayPath: first.display, priority: 1000})
 			return first.match.path, nil
 		}
 
@@ -518,12 +610,31 @@ func (s *Server) resolveScopeAliases(req *catalog.SearchRequest) (scopeResolutio
 	if len(resolvedRoots) > 0 {
 		req.Filters.Roots = make([]string, 0, len(resolvedRoots))
 		for _, root := range roots {
-			if resolvedRoots[root.ID] {
+			if root.Enabled && resolvedRoots[root.ID] {
 				req.Filters.Roots = append(req.Filters.Roots, root.ID)
 			}
 		}
+	} else {
+		req.Filters.Roots = configuredSearchRootIDs(roots, requestedRoots)
 	}
 	return resolution, nil
+}
+
+func configuredSearchRootIDs(roots []config.RootConfig, requested map[string]bool) []string {
+	ids := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if !root.Enabled {
+			continue
+		}
+		if len(requested) > 0 && !requested[root.ID] {
+			continue
+		}
+		ids = append(ids, root.ID)
+	}
+	if len(ids) == 0 {
+		return []string{"__qindexer_no_enabled_roots__"}
+	}
+	return ids
 }
 
 func scopedPathSuffix(path, prefix string) (string, bool) {
@@ -571,6 +682,27 @@ func scopePathEqual(a, b string, windowsStyle bool) bool {
 
 func (s *Server) crawlRoot(w http.ResponseWriter, r *http.Request) {
 	rootID := r.PathValue("root_id")
+	s.mu.RLock()
+	configured := false
+	for _, root := range s.cfg.Roots {
+		if root.ID == rootID {
+			configured = true
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if !configured {
+		writeError(w, http.StatusNotFound, "root_not_found", "root not found")
+		return
+	}
+	if s.crawler.InMaintenance() {
+		writeError(w, http.StatusConflict, "crawler_maintenance", "crawler maintenance is in progress; retry after it completes")
+		return
+	}
+	if s.crawler.IsRootRunning(rootID) {
+		writeError(w, http.StatusConflict, "crawl_already_running", "this root is already crawling")
+		return
+	}
 	s.log.Info("manual root crawl requested", "root", rootID)
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -582,13 +714,48 @@ func (s *Server) crawlRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "scheduled", "root_id": rootID})
 }
 
+func (s *Server) rememberResumeRoots(rootIDs []string) {
+	if len(rootIDs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rootID := range rootIDs {
+		if rootID != "" {
+			s.resumeRoots[rootID] = struct{}{}
+		}
+	}
+}
+
+func (s *Server) takeResumeRoots() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	roots := make([]string, 0, len(s.resumeRoots))
+	for rootID := range s.resumeRoots {
+		roots = append(roots, rootID)
+	}
+	s.resumeRoots = map[string]struct{}{}
+	return roots
+}
+
+func (s *Server) scheduleRootCrawls(rootIDs []string, reason string) {
+	for _, rootID := range rootIDs {
+		rootID := rootID
+		go func() {
+			if _, err := s.crawler.CrawlRoot(context.Background(), rootID); err != nil {
+				s.log.Warn("resumed root crawl failed", "root", rootID, "reason", reason, "error", err)
+			}
+		}()
+	}
+}
+
 func (s *Server) clearRootIndex(w http.ResponseWriter, r *http.Request) {
 	rootID := r.PathValue("root_id")
 	s.log.Info("root clear-index requested", "root", rootID)
 	var req struct {
 		ConfirmRootID string `json:"confirm_root_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -628,6 +795,7 @@ func (s *Server) clearRootIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) repairRootIndex(w http.ResponseWriter, r *http.Request) {
 	rootID := r.PathValue("root_id")
 	s.log.Info("root index repair requested", "root", rootID)
+	s.setRepairProgress(repairProgress{RootID: rootID, Status: "running", Phase: "validating root", StartedAt: time.Now().UTC()})
 	s.mu.RLock()
 	var root config.RootConfig
 	found := false
@@ -640,20 +808,36 @@ func (s *Server) repairRootIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 	if !found {
+		s.finishRepair(rootID, "failed", "root not found")
 		s.log.Warn("root index repair failed; root not found", "root", rootID)
 		writeError(w, http.StatusNotFound, "root_not_found", "root not found")
 		return
 	}
 	if strings.TrimSpace(root.Path) == "" {
+		s.finishRepair(rootID, "failed", "root path is required")
 		s.log.Warn("root index repair failed; empty root path", "root", rootID)
 		writeError(w, http.StatusBadRequest, "invalid_root_path", "root path is required")
 		return
 	}
-	if !s.stopRootCrawl(r.Context(), rootID) {
-		s.log.Warn("root index repair could not stop running crawl", "root", rootID)
-		writeError(w, http.StatusConflict, "root_still_stopping", "root crawl is still stopping; retry shortly")
+	resume, activeRoots, ok := s.stopAllCrawlsForMaintenance("root_index_repair", rootID)
+	if !ok {
+		s.finishRepair(rootID, "failed", "crawler is still stopping")
+		s.log.Warn("root index repair could not stop active crawls", "root", rootID, "active_roots", activeRoots)
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": map[string]any{
+				"code":        "crawler_still_stopping",
+				"message":     "crawler is still stopping; retry shortly",
+				"retryable":   true,
+				"unavailable": false,
+			},
+			"active_roots": activeRoots,
+		})
 		return
 	}
+	defer func() {
+		resume()
+		s.scheduleRootCrawls(activeRoots, "root_index_repair")
+	}()
 	var rewritten, merged int64
 	var embeddedRewritten, embeddedMerged int64
 	repairedAliases := []string{}
@@ -664,10 +848,14 @@ func (s *Server) repairRootIndex(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		checkedAliases++
+		s.updateRepairProgress(rootID, "rewriting configured aliases", checkedAliases, 0, 0, rewritten, merged)
 		for _, target := range aliasCanonicalTargets(root.Path, alias) {
 			s.log.Debug("root index repair checking alias", "root", rootID, "alias", aliasPath, "canonical", target)
-			nextRewritten, nextMerged, err := s.cat.RewriteRootPath(r.Context(), rootID, aliasPath, target)
+			nextRewritten, nextMerged, err := s.cat.RewriteRootPathWithProgress(r.Context(), rootID, aliasPath, target, func(matched, processed int64) {
+				s.updateRepairProgress(rootID, "rewriting configured aliases", checkedAliases, matched, processed, rewritten, merged)
+			})
 			if err != nil {
+				s.finishRepair(rootID, "failed", err.Error())
 				s.log.Error("root index repair failed", "root", rootID, "alias", aliasPath, "canonical", target, "error", err)
 				writeError(w, http.StatusInternalServerError, "root_path_repair_failed", err.Error())
 				return
@@ -679,16 +867,61 @@ func (s *Server) repairRootIndex(w http.ResponseWriter, r *http.Request) {
 			merged += nextMerged
 		}
 	}
+	s.updateRepairProgress(rootID, "repairing embedded paths", checkedAliases, 0, 0, rewritten, merged)
 	embeddedRewritten, embeddedMerged, err := s.cat.RepairEmbeddedRootPath(r.Context(), rootID, root.Path)
 	if err != nil {
+		s.finishRepair(rootID, "failed", err.Error())
 		s.log.Error("root embedded-path repair failed", "root", rootID, "canonical", root.Path, "error", err)
 		writeError(w, http.StatusInternalServerError, "root_path_repair_failed", err.Error())
 		return
 	}
 	rewritten += embeddedRewritten
 	merged += embeddedMerged
-	s.log.Info("root index repair completed", "root", rootID, "aliases_checked", checkedAliases, "paths_rewritten", rewritten, "duplicate_paths_merged", merged, "embedded_paths_rewritten", embeddedRewritten, "embedded_paths_merged", embeddedMerged)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "repaired", "root_id": rootID, "aliases_checked": checkedAliases, "paths_rewritten": rewritten, "duplicate_paths_merged": merged, "aliases_repaired": repairedAliases, "embedded_paths_rewritten": embeddedRewritten, "embedded_paths_merged": embeddedMerged})
+	removedPrevious, err := s.removePreviousPathAliases(rootID)
+	if err != nil {
+		s.finishRepair(rootID, "failed", err.Error())
+		s.log.Error("root index repair alias cleanup failed", "root", rootID, "error", err)
+		writeError(w, http.StatusInternalServerError, "root_alias_cleanup_failed", err.Error())
+		return
+	}
+	s.updateRepairProgress(rootID, "completed", checkedAliases, 0, 0, rewritten, merged)
+	s.finishRepair(rootID, "completed", "")
+	s.log.Info("root index repair completed", "root", rootID, "aliases_checked", checkedAliases, "paths_rewritten", rewritten, "duplicate_paths_merged", merged, "embedded_paths_rewritten", embeddedRewritten, "embedded_paths_merged", embeddedMerged, "previous_aliases_removed", removedPrevious)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "repaired", "root_id": rootID, "aliases_checked": checkedAliases, "paths_rewritten": rewritten, "duplicate_paths_merged": merged, "aliases_repaired": repairedAliases, "embedded_paths_rewritten": embeddedRewritten, "embedded_paths_merged": embeddedMerged, "previous_aliases_removed": removedPrevious})
+}
+
+func (s *Server) repairStatus(w http.ResponseWriter, r *http.Request) {
+	s.repairMu.RLock()
+	progress := s.repair
+	s.repairMu.RUnlock()
+	writeJSON(w, http.StatusOK, progress)
+}
+
+func (s *Server) setRepairProgress(progress repairProgress) {
+	progress.UpdatedAt = time.Now().UTC()
+	s.repairMu.Lock()
+	s.repair = progress
+	s.repairMu.Unlock()
+}
+
+func (s *Server) updateRepairProgress(rootID, phase string, aliases int, matched, processed, rewritten, merged int64) {
+	s.repairMu.Lock()
+	if s.repair.RootID == rootID && s.repair.Status == "running" {
+		s.repair.Phase, s.repair.AliasesChecked = phase, aliases
+		s.repair.PathsMatched, s.repair.PathsProcessed = matched, processed
+		s.repair.PathsRewritten, s.repair.DuplicatesMerged = rewritten, merged
+		s.repair.UpdatedAt = time.Now().UTC()
+	}
+	s.repairMu.Unlock()
+}
+
+func (s *Server) finishRepair(rootID, status, message string) {
+	s.repairMu.Lock()
+	if s.repair.RootID == rootID {
+		s.repair.Status, s.repair.Error = status, message
+		s.repair.UpdatedAt = time.Now().UTC()
+	}
+	s.repairMu.Unlock()
 }
 
 func (s *Server) deleteRoot(w http.ResponseWriter, r *http.Request) {
@@ -697,7 +930,7 @@ func (s *Server) deleteRoot(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ConfirmRootID string `json:"confirm_root_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -724,36 +957,83 @@ func (s *Server) deleteRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "root_not_found", "root not found")
 		return
 	}
-	removed, err := s.cat.DeactivateRoot(r.Context(), rootID)
-	if err != nil {
-		s.mu.Unlock()
-		s.log.Error("root delete failed", "root", rootID, "error", err)
-		writeError(w, http.StatusInternalServerError, "catalog_clear_failed", err.Error())
-		return
-	}
-	previous := s.cfg.Roots
-	s.cfg.Roots = append([]config.RootConfig(nil), s.cfg.Roots[:index]...)
-	s.cfg.Roots = append(s.cfg.Roots, previous[index+1:]...)
-	if err := config.Save(s.configPath, s.cfg); err != nil {
-		s.cfg.Roots = previous
+	candidate := config.Clone(s.cfg)
+	candidate.Roots = append([]config.RootConfig(nil), candidate.Roots[:index]...)
+	candidate.Roots = append(candidate.Roots, s.cfg.Roots[index+1:]...)
+	if err := s.saveConfigLocked(candidate); err != nil {
 		s.mu.Unlock()
 		s.log.Error("root delete config save failed", "root", rootID, "error", err)
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
 	s.mu.Unlock()
+	removed, err := s.cat.DeactivateRoot(r.Context(), rootID)
+	if err != nil {
+		s.log.Error("root delete catalog cleanup deferred", "root", rootID, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "catalog_cleanup_failed", err.Error())
+		return
+	}
 	s.log.Info("root delete completed", "root", rootID, "documents_marked_deleted", removed)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "root_id": rootID, "documents_removed": removed, "cleanup": "deferred"})
 }
 
 func (s *Server) stopRootCrawl(ctx context.Context, rootID string) bool {
-	if !s.crawler.IsRootRunning(rootID) {
-		return true
+	if s.crawler.IsRootRunning(rootID) {
+		s.crawler.CancelRoot(rootID)
+	} else {
+		s.crawler.CancelEnrichment()
 	}
-	s.crawler.CancelRoot(rootID)
 	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return s.crawler.WaitRoot(waitCtx, rootID)
+	return s.crawler.WaitRoot(waitCtx, rootID) && s.crawler.WaitEnrichment(waitCtx)
+}
+
+func (s *Server) removePreviousPathAliases(rootID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.cfg.Roots {
+		if s.cfg.Roots[i].ID != rootID {
+			continue
+		}
+		kept := make([]config.PathAlias, 0, len(s.cfg.Roots[i].PathAliases))
+		removed := 0
+		for _, alias := range s.cfg.Roots[i].PathAliases {
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(alias.ID)), "previous-") {
+				removed++
+				continue
+			}
+			kept = append(kept, alias)
+		}
+		if removed == 0 {
+			return 0, nil
+		}
+		candidate := config.Clone(s.cfg)
+		candidate.Roots[i].PathAliases = kept
+		if err := s.saveConfigLocked(candidate); err != nil {
+			return 0, err
+		}
+		return removed, nil
+	}
+	return 0, nil
+}
+
+func (s *Server) stopAllCrawlsForMaintenance(operation, rootID string) (func(), []string, bool) {
+	until, resume := s.crawler.BeginMaintenance(10 * time.Minute)
+	stats := s.crawler.Stats()
+	s.log.Info("crawler maintenance stop requested", "operation", operation, "root", rootID, "active_crawls", stats.ActiveCrawls, "paused_until", until)
+	interruptedRoots := s.crawler.CancelAll()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	stopped := s.crawler.WaitAll(waitCtx)
+	if !stopped {
+		activeRoots := s.crawler.ActiveRoots()
+		s.log.Warn("crawler maintenance stop timed out", "operation", operation, "root", rootID, "active_roots", activeRoots)
+		resume()
+		s.log.Info("crawler maintenance released after timeout", "operation", operation, "root", rootID)
+		return func() {}, activeRoots, false
+	}
+	s.log.Info("crawler maintenance stop completed", "operation", operation, "root", rootID)
+	return resume, interruptedRoots, true
 }
 
 func (s *Server) validateRoot(w http.ResponseWriter, r *http.Request) {
@@ -803,7 +1083,7 @@ type rootRulesUpdate struct {
 func (s *Server) createRoot(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("root create requested")
 	var req rootRulesUpdate
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -825,14 +1105,13 @@ func (s *Server) createRoot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	root := rootConfigFromUpdate(rootID, req)
-	candidate := *s.cfg
+	candidate := config.Clone(s.cfg)
 	candidate.Roots = append(candidate.Roots, root)
 	if err := candidate.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_root", err.Error())
 		return
 	}
-	s.cfg.Roots = candidate.Roots
-	if err := config.Save(s.configPath, s.cfg); err != nil {
+	if err := s.saveConfigLocked(candidate); err != nil {
 		s.log.Error("root create config save failed", "root", rootID, "error", err)
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
@@ -861,51 +1140,51 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 	rootID := r.PathValue("root_id")
 	s.log.Info("root rules update requested", "root", rootID)
 	var req rootRulesUpdate
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := range s.cfg.Roots {
-		if s.cfg.Roots[i].ID != rootID {
+	candidate := config.Clone(s.cfg)
+	for i := range candidate.Roots {
+		if candidate.Roots[i].ID != rootID {
 			continue
 		}
 		if strings.TrimSpace(req.Path) == "" {
 			writeError(w, http.StatusBadRequest, "invalid_root_path", "root path is required")
 			return
 		}
-		previousPath := s.cfg.Roots[i].Path
-		s.cfg.Roots[i].Path = strings.TrimSpace(req.Path)
-		s.cfg.Roots[i].Name = strings.TrimSpace(req.Name)
-		s.cfg.Roots[i].Enabled = req.Enabled
-		s.cfg.Roots[i].Labels = cleanList(req.Labels, false)
-		s.cfg.Roots[i].IncludeExtensions = cleanExtensions(req.IncludeExtensions)
-		s.cfg.Roots[i].ExcludeExtensions = cleanExtensions(req.ExcludeExtensions)
-		s.cfg.Roots[i].IncludeFilePatterns = cleanList(req.IncludeFilePatterns, false)
-		s.cfg.Roots[i].ExcludeFilePatterns = cleanList(req.ExcludeFilePatterns, false)
-		s.cfg.Roots[i].IncludeFolderPatterns = cleanList(req.IncludeFolderPatterns, false)
-		s.cfg.Roots[i].ExcludeFolderPatterns = cleanList(req.ExcludeFolderPatterns, false)
-		s.cfg.Roots[i].ExcludePatterns = cleanList(req.ExcludePatterns, false)
-		s.cfg.Roots[i].CredentialRef = strings.TrimSpace(req.CredentialRef)
-		s.cfg.Roots[i].PathAliases = preservePreviousRootPath(previousPath, s.cfg.Roots[i].Path, cleanPathAliases(req.PathAliases))
-		s.cfg.Roots[i].ContentExtraction = req.ContentExtraction
-		s.cfg.Roots[i].OCR = req.OCR
-		s.cfg.Roots[i].Hashing = req.Hashing
-		s.cfg.Roots[i].CollectOwnership = req.CollectOwnership
-		rewritten, merged, err := s.cat.RewriteRootPath(r.Context(), rootID, previousPath, s.cfg.Roots[i].Path)
-		if err != nil {
-			s.log.Error("root rules path rewrite failed", "root", rootID, "old_path", previousPath, "new_path", s.cfg.Roots[i].Path, "error", err)
-			writeError(w, http.StatusInternalServerError, "root_path_rewrite_failed", err.Error())
+		previousPath := candidate.Roots[i].Path
+		candidate.Roots[i].Path = strings.TrimSpace(req.Path)
+		candidate.Roots[i].Name = strings.TrimSpace(req.Name)
+		candidate.Roots[i].Enabled = req.Enabled
+		candidate.Roots[i].Labels = cleanList(req.Labels, false)
+		candidate.Roots[i].IncludeExtensions = cleanExtensions(req.IncludeExtensions)
+		candidate.Roots[i].ExcludeExtensions = cleanExtensions(req.ExcludeExtensions)
+		candidate.Roots[i].IncludeFilePatterns = cleanList(req.IncludeFilePatterns, false)
+		candidate.Roots[i].ExcludeFilePatterns = cleanList(req.ExcludeFilePatterns, false)
+		candidate.Roots[i].IncludeFolderPatterns = cleanList(req.IncludeFolderPatterns, false)
+		candidate.Roots[i].ExcludeFolderPatterns = cleanList(req.ExcludeFolderPatterns, false)
+		candidate.Roots[i].ExcludePatterns = cleanList(req.ExcludePatterns, false)
+		candidate.Roots[i].CredentialRef = strings.TrimSpace(req.CredentialRef)
+		candidate.Roots[i].PathAliases = preservePreviousRootPath(previousPath, candidate.Roots[i].Path, cleanPathAliases(req.PathAliases))
+		candidate.Roots[i].ContentExtraction = req.ContentExtraction
+		candidate.Roots[i].OCR = req.OCR
+		candidate.Roots[i].Hashing = req.Hashing
+		candidate.Roots[i].CollectOwnership = req.CollectOwnership
+		if err := candidate.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_root", err.Error())
 			return
 		}
-		if err := config.Save(s.configPath, s.cfg); err != nil {
+		if err := s.saveConfigLocked(candidate); err != nil {
 			s.log.Error("root rules config save failed", "root", rootID, "error", err)
 			writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 			return
 		}
-		s.log.Info("root rules update completed", "root", rootID, "old_path", previousPath, "new_path", s.cfg.Roots[i].Path, "aliases", len(s.cfg.Roots[i].PathAliases), "paths_rewritten", rewritten, "duplicate_paths_merged", merged)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "root": s.cfg.Roots[i], "paths_rewritten": rewritten, "duplicate_paths_merged": merged})
+		repairRequired := !samePathAlias(previousPath, candidate.Roots[i].Path)
+		s.log.Info("root rules update completed", "root", rootID, "old_path", previousPath, "new_path", candidate.Roots[i].Path, "aliases", len(candidate.Roots[i].PathAliases), "repair_required", repairRequired)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "root": candidate.Roots[i], "repair_required": repairRequired})
 		return
 	}
 	s.log.Warn("root rules update failed; root not found", "root", rootID)
@@ -965,7 +1244,7 @@ func (s *Server) exportConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) importConfig(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("config import requested")
 	var backup configBackup
-	if err := json.NewDecoder(r.Body).Decode(&backup); err != nil {
+	if err := decodeJSON(w, r, &backup); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -974,7 +1253,7 @@ func (s *Server) importConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	candidate := *s.cfg
+	candidate := config.Clone(s.cfg)
 	candidate.Index = backup.Index
 	candidate.Crawler = backup.Crawler
 	candidate.Watcher = backup.Watcher
@@ -984,11 +1263,7 @@ func (s *Server) importConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_config_backup", err.Error())
 		return
 	}
-	s.cfg.Index = candidate.Index
-	s.cfg.Crawler = candidate.Crawler
-	s.cfg.Watcher = candidate.Watcher
-	s.cfg.Roots = candidate.Roots
-	err := config.Save(s.configPath, s.cfg)
+	err := s.saveConfigLocked(candidate)
 	s.mu.Unlock()
 	if err != nil {
 		s.log.Error("config import save failed", "error", err)
@@ -1010,13 +1285,85 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "catalog_unavailable", err.Error())
 		return
 	}
+	logs, logErr := s.readLogTail(256, 256*1024)
+	logInfo := map[string]any{"available": logErr == nil, "path": s.currentLogPath(), "entries": logs}
+	if logErr != nil {
+		logInfo["error"] = logErr.Error()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"format_version": "1", "generated_at": time.Now().UTC(),
 		"service": map[string]any{"protocol_version": "1.1", "service_instance": s.instanceID, "version": version.Version, "generation": maxGeneration(states)},
 		"config":  s.redactedConfigBackup(), "metrics": s.crawler.Stats(),
 		"root_states": states, "recent_crawls": runs,
-		"logs": map[string]any{"available": false, "reason": "no file log sink is configured"},
+		"logs": logInfo,
 	})
+}
+
+func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
+	limit := 300
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(value, "%d", &parsed); err == nil && parsed > 0 {
+			limit = min(parsed, 2000)
+		}
+	}
+	lines, err := s.readLogTail(limit, 512*1024)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "logs_unavailable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": s.currentLogPath(), "lines": lines})
+}
+
+func (s *Server) currentLogPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.logPath
+}
+
+func (s *Server) readLogTail(limit int, maxBytes int64) ([]string, error) {
+	path := s.currentLogPath()
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("log file path is not configured")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	size := info.Size()
+	start := int64(0)
+	if size > maxBytes {
+		start = size - maxBytes
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if start > 0 && len(lines) > 0 {
+		lines = lines[1:]
+	}
+	out := make([]string, 0, min(limit, len(lines)))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
 }
 
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
@@ -1059,7 +1406,7 @@ func (s *Server) pauseCrawler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Seconds int `json:"seconds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeJSON(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -1076,30 +1423,48 @@ func (s *Server) pauseCrawler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) resumeCrawler(w http.ResponseWriter, r *http.Request) {
 	s.crawler.Resume()
-	s.log.Info("crawler resumed")
-	writeJSON(w, http.StatusOK, map[string]any{"status": "resumed"})
+	rootIDs := s.takeResumeRoots()
+	s.scheduleRootCrawls(rootIDs, "manual_resume")
+	s.log.Info("crawler resumed", "rescheduled_roots", rootIDs)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "resumed", "rescheduled_roots": rootIDs})
+}
+
+func (s *Server) stopCrawler(w http.ResponseWriter, r *http.Request) {
+	until, requestedRoots := s.crawler.CancelAllAndPause(24 * time.Hour)
+	s.rememberResumeRoots(requestedRoots)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	stopped := s.crawler.WaitAll(waitCtx)
+	cancel()
+	activeRoots := s.crawler.ActiveRoots()
+	if stopped {
+		s.log.Info("crawler stop completed", "requested_roots", requestedRoots, "paused_until", until)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "stopped", "paused_until": until, "paused_until_unix": until.Unix(), "requested_roots": requestedRoots, "active_roots": activeRoots})
+		return
+	}
+	s.log.Warn("crawler stop still draining", "requested_roots", requestedRoots, "active_roots", activeRoots, "paused_until", until)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "paused_until": until, "paused_until_unix": until.Unix(), "requested_roots": requestedRoots, "active_roots": activeRoots})
 }
 
 func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("service stop requested")
-	s.crawler.CancelAll()
-	waitCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	stopped := s.crawler.WaitAll(waitCtx)
-	cancel()
+	activeRoots := s.crawler.CancelAll()
 	s.mu.RLock()
 	shutdown := s.shutdown
 	s.mu.RUnlock()
 	if shutdown == nil {
-		s.log.Warn("service stop requested but shutdown hook is not configured", "crawls_stopped", stopped)
-		writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "crawls_stopped": stopped, "process_shutdown": false})
+		s.log.Warn("service stop requested but shutdown hook is not configured", "active_roots", activeRoots)
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "active_roots": activeRoots, "process_shutdown": false})
 		return
 	}
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		shutdown()
 	}()
-	s.log.Info("service stop accepted", "crawls_stopped", stopped)
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "crawls_stopped": stopped, "process_shutdown": true})
+	// Do not make the stop request wait for an uninterruptible network read or
+	// third-party parser. Run() performs bounded cleanup after this response;
+	// returning now lets the process leave promptly even when a share is sick.
+	s.log.Info("service stop accepted", "active_roots", activeRoots)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "active_roots": activeRoots, "process_shutdown": true})
 }
 
 func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
@@ -1110,13 +1475,13 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		OCR               config.OCRConfig               `json:"ocr"`
 		Hashing           config.HashingConfig           `json:"hashing"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	candidate := *s.cfg
+	candidate := config.Clone(s.cfg)
 	candidate.Crawler.CollectOwnership = req.CollectOwnership
 	candidate.Crawler.ContentExtraction = req.ContentExtraction
 	candidate.Crawler.OCR = req.OCR
@@ -1126,8 +1491,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_crawler_settings", err.Error())
 		return
 	}
-	s.cfg.Crawler = candidate.Crawler
-	if err := config.Save(s.configPath, s.cfg); err != nil {
+	if err := s.saveConfigLocked(candidate); err != nil {
 		s.log.Error("crawler settings config save failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
@@ -1150,13 +1514,13 @@ func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			BindAddresses []string `json:"bind_addresses"`
 		} `json:"management"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	candidate := *s.cfg
+	candidate := config.Clone(s.cfg)
 	candidate.Server.Bind = firstBindAddress(req.Server.Bind, req.Server.BindAddresses)
 	candidate.Server.BindAddresses = req.Server.BindAddresses
 	candidate.Server.PublicBaseURL = strings.TrimSpace(req.Server.PublicBaseURL)
@@ -1168,13 +1532,7 @@ func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_network_settings", err.Error())
 		return
 	}
-	s.cfg.Server.Bind = candidate.Server.Bind
-	s.cfg.Server.BindAddresses = candidate.Server.BindAddresses
-	s.cfg.Server.PublicBaseURL = candidate.Server.PublicBaseURL
-	s.cfg.Management.Enabled = candidate.Management.Enabled
-	s.cfg.Management.Bind = candidate.Management.Bind
-	s.cfg.Management.BindAddresses = candidate.Management.BindAddresses
-	if err := config.Save(s.configPath, s.cfg); err != nil {
+	if err := s.saveConfigLocked(candidate); err != nil {
 		s.log.Error("network settings config save failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
@@ -1231,7 +1589,7 @@ func (s *Server) bootstrapAdmin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
@@ -1246,13 +1604,14 @@ func (s *Server) bootstrapAdmin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "admin_already_configured", "an admin token is already configured")
 		return
 	}
-	s.cfg.Management.Auth.Token = token
-	s.cfg.Management.Auth.TokenFile = ""
+	candidate := config.Clone(s.cfg)
+	candidate.Management.Auth.Token = token
+	candidate.Management.Auth.TokenFile = ""
 	if s.searchToken == "" {
-		s.cfg.Server.Auth.Token = token
-		s.cfg.Server.Auth.TokenFile = ""
+		candidate.Server.Auth.Token = token
+		candidate.Server.Auth.TokenFile = ""
 	}
-	if err := config.Save(s.configPath, s.cfg); err != nil {
+	if err := s.saveConfigLocked(candidate); err != nil {
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
@@ -1292,6 +1651,12 @@ func isLoopbackRequest(r *http.Request) bool {
 
 func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if value := recover(); value != nil {
+				s.log.Error("http request panic recovered", "method", r.Method, "path", r.URL.Path, "panic", value, "stack", string(debug.Stack()))
+				writeError(w, http.StatusInternalServerError, "request_panic", "request failed; see service logs")
+			}
+		}()
 		start := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
@@ -1423,12 +1788,31 @@ func aliasPrimaryCanonicalTarget(rootPath string, alias config.PathAlias) string
 	if target := strings.TrimSpace(alias.Target); target != "" {
 		return target
 	}
+	if isDriveRootAlias(alias.Path) || isUNCShareRootAlias(alias.Path) {
+		return rootPath
+	}
 	aliasBase := pathLastSegment(alias.Path)
 	rootBase := pathLastSegment(rootPath)
 	if aliasBase != "" && rootBase != "" && !strings.EqualFold(aliasBase, rootBase) {
 		return joinCanonicalScope(rootPath, aliasBase)
 	}
 	return rootPath
+}
+
+func aliasDisplayPriority(alias config.PathAlias) int {
+	platform := strings.ToLower(strings.TrimSpace(alias.Platform))
+	switch {
+	case strings.Contains(platform, "drive"):
+		return 300
+	case strings.Contains(platform, "unc") || isUNCShareRootAlias(alias.Path):
+		return 200
+	case strings.Contains(platform, "windows"):
+		return 175
+	case strings.Contains(platform, "linux") || strings.Contains(platform, "mac"):
+		return 100
+	default:
+		return 0
+	}
 }
 
 func uniqueScopePaths(values []string) []string {
@@ -1461,6 +1845,20 @@ func pathLastSegment(value string) string {
 		return value[index+1:]
 	}
 	return value
+}
+
+func isDriveRootAlias(value string) bool {
+	value = strings.TrimRight(strings.TrimSpace(value), `\/`)
+	return len(value) == 2 && value[1] == ':'
+}
+
+func isUNCShareRootAlias(value string) bool {
+	value = strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"), "/")
+	if !strings.HasPrefix(value, "//") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "//"), "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
 func firstBindAddress(fallback string, values []string) string {

@@ -12,7 +12,7 @@
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
         <h1>QIndexer</h1>
-        <p>Search service administration <span class="build">UI 0.1.6</span></p>
+        <p>Search service administration <span class="build">UI 0.1.7</span></p>
       </div>
     </div>
     <div class="auth">
@@ -109,6 +109,7 @@
           </select>
         </label>
         <button id="pause-crawler" type="button" class="secondary">Pause crawler</button>
+        <button id="stop-crawler" type="button" class="secondary">Stop crawls</button>
         <button id="resume-crawler" type="button" class="secondary">Resume</button>
         <button id="stop-service" type="button" class="danger">Stop service</button>
       </div>
@@ -116,6 +117,20 @@
     </section>
 
     <section id="roots-view">
+    <section class="operations">
+      <div class="ops-main">
+        <p class="eyebrow">Operations</p>
+        <h2 id="ops-state">Waiting for status</h2>
+        <p id="ops-detail">Crawler state will appear after the first refresh.</p>
+      </div>
+      <div class="ops-metrics" aria-label="crawler queues">
+        <span><b id="next-crawl">-</b>Next full crawl</span>
+        <span><b id="content-queue">0</b>Content queue</span>
+        <span><b id="ocr-queue">0</b>OCR queue</span>
+        <span><b id="hash-queue">0</b>Hash queue</span>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-title">
         <div>
@@ -178,10 +193,24 @@
               Credential reference
               <input id="rules-credential" type="text" placeholder="os-service-account">
             </label>
-            <label class="wide-field">
-              Client path aliases
-              <textarea id="rules-aliases" spellcheck="false" placeholder="finance-x | windows-drive | X:\Finance&#10;mat-x | windows-drive | X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY | /mnt/shared/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY&#10;finance-linux | linux | /mnt/finance"></textarea>
-            </label>
+            <div class="wide-field alias-editor">
+              <div class="alias-editor-heading">
+                <div>
+                  <span class="field-label">Client path aliases</span>
+                  <p>Describe how client machines reach this indexed root. Paths may contain spaces.</p>
+                </div>
+                <button id="add-alias" type="button" class="secondary">Add alias</button>
+              </div>
+              <div class="alias-columns" aria-hidden="true">
+                <span>Label</span>
+                <span>Platform</span>
+                <span>Client path</span>
+                <span>Indexed target override</span>
+                <span></span>
+              </div>
+              <div id="rules-aliases" class="alias-rows" aria-live="polite"></div>
+              <p class="alias-help">A label and target override are optional. Leave the target blank when this alias points directly at the root.</p>
+            </div>
           </div>
         </section>
 
@@ -273,6 +302,18 @@
           </div>
         </div>
         <div id="crawls" class="list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <div>
+            <p class="eyebrow">Diagnostics</p>
+            <h2>Recent logs</h2>
+          </div>
+          <button id="refresh-logs" type="button" class="secondary">Refresh logs</button>
+        </div>
+        <div id="root-errors" class="root-errors"></div>
+        <div id="logs" class="log-list"></div>
       </div>
 
       <div id="config-view" class="panel hidden">

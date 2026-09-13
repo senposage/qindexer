@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,13 +98,50 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 	}
 	defer cat.Close()
 	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
-	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "sixteen-character-token", "sixteen-character-token")
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics", nil)
 	req.Header.Set("Authorization", "Bearer sixteen-character-token")
 	result := httptest.NewRecorder()
 	server.AdminHandler().ServeHTTP(result, req)
 	if result.Code != http.StatusOK || !bytes.Contains(result.Body.Bytes(), []byte(`"index_size_bytes"`)) {
 		t.Fatalf("expected index size metric, got %d: %s", result.Code, result.Body.String())
+	}
+}
+
+func TestSearchDoesNotServeStaleUnconfiguredRoots(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, doc := range []catalog.Document{
+		{ID: "configured-doc", RootID: "current", Path: `/mnt/current/Budget.docx`, NormalizedPath: catalog.NormalizePath(`/mnt/current/Budget.docx`), Name: "Budget.docx", Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)},
+		{ID: "stale-doc", RootID: "shared", Path: `X:\Budget.docx`, NormalizedPath: catalog.NormalizePath(`X:\Budget.docx`), Name: "Budget.docx", Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)},
+	} {
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		Index:      config.IndexConfig{MaxResults: 20},
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots:      []config.RootConfig{{ID: "current", Path: `/mnt/current`, Enabled: true}},
+	}
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "sixteen-character-token", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", bytes.NewBufferString(`{"query":"budget","limit":10}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.SearchHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected search success, got %d: %s", result.Code, result.Body.String())
+	}
+	if bytes.Contains(result.Body.Bytes(), []byte(`"root_id":"shared"`)) || bytes.Contains(result.Body.Bytes(), []byte(`X:\\Budget.docx`)) {
+		t.Fatalf("stale unconfigured root leaked into search response: %s", result.Body.String())
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"root_id":"current"`)) {
+		t.Fatalf("configured root missing from search response: %s", result.Body.String())
 	}
 }
 
@@ -187,7 +225,7 @@ func TestUpdateRootRulesPreservesPreviousRootPathAsAlias(t *testing.T) {
 	}
 }
 
-func TestUpdateRootRulesRewritesIndexedRootPath(t *testing.T) {
+func TestUpdateRootRulesSavesPathWithoutBlockingOnRepair(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
 	if err != nil {
@@ -215,15 +253,21 @@ func TestUpdateRootRulesRewritesIndexedRootPath(t *testing.T) {
 	if result.Code != http.StatusOK {
 		t.Fatalf("expected update success, got %d: %s", result.Code, result.Body.String())
 	}
-	if !bytes.Contains(result.Body.Bytes(), []byte(`"paths_rewritten":1`)) {
-		t.Fatalf("expected rewrite count in response, got %s", result.Body.String())
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"repair_required":true`)) {
+		t.Fatalf("expected repair required in response, got %s", result.Body.String())
+	}
+	if cfg.Roots[0].Path != `/mnt/shared-real` {
+		t.Fatalf("root path was not saved: %#v", cfg.Roots[0])
+	}
+	if len(cfg.Roots[0].PathAliases) != 1 || !strings.HasPrefix(cfg.Roots[0].PathAliases[0].ID, "previous-") || cfg.Roots[0].PathAliases[0].Path != `X:\` {
+		t.Fatalf("previous root path alias was not preserved: %#v", cfg.Roots[0].PathAliases)
 	}
 	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Results) != 1 || resp.Results[0].Path != `/mnt/shared-real/Cases/Budget.docx` {
-		t.Fatalf("indexed path was not rewritten: %#v", resp.Results)
+	if len(resp.Results) != 1 || resp.Results[0].Path != `X:\Cases\Budget.docx` {
+		t.Fatalf("plain save should not rewrite indexed paths: %#v", resp.Results)
 	}
 }
 
@@ -242,7 +286,8 @@ func TestRepairRootIndexRewritesAliasPaths(t *testing.T) {
 			Path:    `/mnt/shared-real`,
 			Enabled: true,
 			PathAliases: []config.PathAlias{
-				{ID: "old-x", Platform: "windows-drive", Path: `X:\`},
+				{ID: "previous-old-x", Platform: "windows-drive", Path: `X:\`},
+				{ID: "shared-x", Platform: "windows-drive", Path: `Y:\`},
 			},
 		}},
 	}
@@ -273,6 +318,12 @@ func TestRepairRootIndexRewritesAliasPaths(t *testing.T) {
 	if !bytes.Contains(result.Body.Bytes(), []byte(`"duplicate_paths_merged":1`)) {
 		t.Fatalf("expected duplicate merge in response, got %s", result.Body.String())
 	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"previous_aliases_removed":1`)) {
+		t.Fatalf("expected previous alias cleanup in response, got %s", result.Body.String())
+	}
+	if len(cfg.Roots[0].PathAliases) != 1 || cfg.Roots[0].PathAliases[0].ID != "shared-x" {
+		t.Fatalf("previous alias was not removed or stable alias was not kept: %#v", cfg.Roots[0].PathAliases)
+	}
 	resp, err := cat.Search(ctx, catalog.SearchRequest{Query: "budget", Filters: catalog.SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -293,11 +344,11 @@ func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
 	cfg := &config.Config{
 		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
 		Roots: []config.RootConfig{{
-			ID:      "AA-MAT",
-			Path:    `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4`,
+			ID:      "legal",
+			Path:    `/srv/qindexer/mounts/team-share`,
 			Enabled: true,
 			PathAliases: []config.PathAlias{
-				{ID: "old-x", Platform: "windows-drive", Path: `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY`},
+				{ID: "old-x", Platform: "windows-drive", Path: `X:\Legal`},
 			},
 		}},
 	}
@@ -305,8 +356,8 @@ func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	modified := time.Now().UTC()
-	oldPath := `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\MATRIMONIAL\BATTAGLIA, ESTHER\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
-	newPath := `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY/MATRIMONIAL/BATTAGLIA, ESTHER/ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+	oldPath := `X:\Legal\Matters\Example\brief.docx`
+	newPath := `/srv/qindexer/mounts/team-share/Legal/Matters/Example/brief.docx`
 	for _, item := range []struct {
 		id   string
 		path string
@@ -314,13 +365,13 @@ func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
 		{"old", oldPath},
 		{"new", newPath},
 	} {
-		doc := catalog.Document{ID: item.id, RootID: "AA-MAT", Path: item.path, NormalizedPath: catalog.NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+		doc := catalog.Document{ID: item.id, RootID: "legal", Path: item.path, NormalizedPath: catalog.NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
 		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
 			t.Fatal(err)
 		}
 	}
 	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
-	req := httptest.NewRequest(http.MethodPost, "/admin/v1/roots/AA-MAT/repair-index", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/roots/legal/repair-index", bytes.NewBufferString(`{}`))
 	req.Header.Set("Authorization", "Bearer sixteen-character-token")
 	result := httptest.NewRecorder()
 	server.AdminHandler().ServeHTTP(result, req)
@@ -330,7 +381,7 @@ func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
 	if !bytes.Contains(result.Body.Bytes(), []byte(`"duplicate_paths_merged":1`)) {
 		t.Fatalf("expected duplicate merge in response, got %s", result.Body.String())
 	}
-	resp, err := cat.Search(ctx, catalog.SearchRequest{Query: "attorney", Filters: catalog.SearchFilters{Roots: []string{"AA-MAT"}}, Limit: 10}, 10)
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Query: "brief", Filters: catalog.SearchFilters{Roots: []string{"legal"}}, Limit: 10}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,38 +392,88 @@ func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
 
 func TestResolveScopeAliasesInfersSubfolderAliasTarget(t *testing.T) {
 	cfg := &config.Config{Roots: []config.RootConfig{{
-		ID:   "AA-MAT",
-		Path: `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4`,
+		ID:   "legal",
+		Path: `/srv/qindexer/mounts/team-share`,
 		PathAliases: []config.PathAlias{
-			{Platform: "windows-drive", Path: `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY`},
+			{Platform: "windows-drive", Path: `X:\Legal`},
 		},
 	}}}
 	server := &Server{cfg: cfg}
-	req := catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\MATRIMONIAL`}}}
+	req := catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`X:\Legal\Matters`}}}
 	if _, err := server.resolveScopeAliases(&req); err != nil {
 		t.Fatal(err)
 	}
-	want := `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY/MATRIMONIAL`
+	want := `/srv/qindexer/mounts/team-share/Legal/Matters`
 	if req.Filters.IncludePaths[0] != want {
 		t.Fatalf("scope alias resolved to %q, want %q", req.Filters.IncludePaths[0], want)
 	}
 	resp := catalog.SearchResponse{Results: []catalog.Document{{
-		RootID: "AA-MAT",
-		Path:   `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY/MATRIMONIAL/example.docx`,
+		RootID: "legal",
+		Path:   `/srv/qindexer/mounts/team-share/Legal/Matters/example.docx`,
 	}}}
 	resolution, err := server.resolveScopeAliases(&catalog.SearchRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resolution.applyDisplayAliases(&resp)
-	wantDisplay := `X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\MATRIMONIAL\example.docx`
+	wantDisplay := `X:\Legal\Matters\example.docx`
 	if resp.Results[0].DisplayPath != wantDisplay {
 		t.Fatalf("display path = %q, want %q", resp.Results[0].DisplayPath, wantDisplay)
 	}
 }
 
+func TestResolveScopeAliasesMapsShareRootAliasesToRoot(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{
+		ID:   "shared",
+		Path: `/mnt/shared`,
+		PathAliases: []config.PathAlias{
+			{Platform: "windows-drive", Path: `Q:\`},
+			{Platform: "windows-unc", Path: `\\files01\shared`},
+		},
+	}}}
+	server := &Server{cfg: cfg}
+	req := catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`Q:\Cases\Budget.docx`}}}
+	if _, err := server.resolveScopeAliases(&req); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := req.Filters.IncludePaths[0], `/mnt/shared/Cases/Budget.docx`; got != want {
+		t.Fatalf("drive root alias resolved to %q, want %q", got, want)
+	}
+	req = catalog.SearchRequest{Filters: catalog.SearchFilters{IncludePaths: []string{`\\files01\shared\Cases\Budget.docx`}}}
+	if _, err := server.resolveScopeAliases(&req); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := req.Filters.IncludePaths[0], `/mnt/shared/Cases/Budget.docx`; got != want {
+		t.Fatalf("UNC share root alias resolved to %q, want %q", got, want)
+	}
+}
+
+func TestDisplayAliasesPreferDriveAliasOverUNCAtSameTarget(t *testing.T) {
+	cfg := &config.Config{Roots: []config.RootConfig{{
+		ID:   "shared",
+		Path: `/mnt/shared`,
+		PathAliases: []config.PathAlias{
+			{Platform: "windows-unc", Path: `\\files01\shared`},
+			{Platform: "windows-drive", Path: `Q:\`},
+		},
+	}}}
+	server := &Server{cfg: cfg}
+	resolution, err := server.resolveScopeAliases(&catalog.SearchRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := catalog.SearchResponse{Results: []catalog.Document{{
+		RootID: "shared",
+		Path:   `/mnt/shared/Cases/Budget.docx`,
+	}}}
+	resolution.applyDisplayAliases(&resp)
+	if got, want := resp.Results[0].DisplayPath, `Q:\Cases\Budget.docx`; got != want {
+		t.Fatalf("display path = %q, want %q", got, want)
+	}
+}
+
 func TestResolveScopeAliasesOnlyChangesExplicitScopes(t *testing.T) {
-	cfg := &config.Config{Roots: []config.RootConfig{{ID: "finance", Path: `\\nas\finance`, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Finance`}}}}}
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "finance", Path: `\\nas\finance`, Enabled: true, PathAliases: []config.PathAlias{{Platform: "windows-drive", Path: `X:\Finance`}}}}}
 	server := &Server{cfg: cfg}
 	req := catalog.SearchRequest{Query: `X:\Finance budget`, Filters: catalog.SearchFilters{IncludePaths: []string{`X:\Finance\Q3`}}}
 	if _, err := server.resolveScopeAliases(&req); err != nil {

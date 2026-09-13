@@ -1,5 +1,5 @@
 param(
-  [string]$Destination = "D:\qindexer",
+  [string]$Destination = (Join-Path ([System.IO.Path]::GetTempPath()) "qindexer-fixtures"),
   [switch]$Force
 )
 

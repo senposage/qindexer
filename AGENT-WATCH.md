@@ -391,7 +391,9 @@ please continue sending the legacy bare query until that change lands.
 
 ## 2026-09-10 Client Test Corpus
 
-Synthetic data for QSurfer integration testing is now present at `D:\qindexer`.
+Synthetic data for QSurfer integration testing is generated beneath the system
+temporary directory as `qindexer-fixtures`, unless the operator supplies a
+destination explicitly.
 It is deliberately separate from user content and may be indexed as a normal
 root or picked up by the existing `D:\` root. Its expected markers are:
 
@@ -409,13 +411,13 @@ root or picked up by the existing `D:\` root. Its expected markers are:
 For the first five content markers, enable **Extract Office, PDF, and text
 content** in the QIndexer admin Configuration screen, wait for the bounded
 backfill queue, then issue ordinary `POST /v1/search` requests scoped to
-`D:\qindexer`. The two Aurora files remain indexed by name/path only until
+the fixture directory. The two Aurora files remain indexed by name/path only until
 Tesseract and OCRmyPDF are installed, OCR is enabled, and their `ocr_status`
 becomes `extracted`. This is intentional; service `GET /v1/capabilities` then
 advertises `features.ocr_search: true`.
 
 The corpus generator is `src/scripts/create-test-data.ps1`. It will not replace
-an existing `D:\qindexer` directory unless explicitly called with `-Force`.
+an existing destination directory unless explicitly called with `-Force`.
 
 Live smoke on the current service build returned `health.status: "ok"` and
 capabilities `content_search: true`, `ocr_search: true`. The local host did not
@@ -447,20 +449,19 @@ all-fields behavior. Send `["name", "path", "extension"]` while QSurfer's
 when it is on. An invalid field or explicitly empty list returns
 `invalid_match_fields`.
 
-The active `qindexer-fixtures` root targets `D:\qindexer` and explicitly has
-content extraction, OCR, SHA-256, and owner metadata enabled. Tesseract 5.5.3
-and OCRmyPDF 17.11.0 are installed locally; their absolute commands are saved
-in the service OCR settings. Live verification completed:
+The `qindexer-fixtures` root explicitly has content extraction, OCR, SHA-256,
+and owner metadata enabled. Configure OCR engines by command name or an
+operator-provided executable path. Example verification requests:
 
 ```json
 // Metadata only: expected zero hits.
-{"query":"ORCHID","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\qindexer\\content"],"match_fields":["name","path","extension"]},"limit":10,"sort":"relevance"}
+{"query":"ORCHID","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\fixtures\\content"],"match_fields":["name","path","extension"]},"limit":10,"sort":"relevance"}
 
 // Content only: expected plain-notes.txt with content highlight.
-{"query":"ORCHID","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\qindexer\\content"],"match_fields":["content"]},"limit":10,"sort":"relevance"}
+{"query":"ORCHID","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\fixtures\\content"],"match_fields":["content"]},"limit":10,"sort":"relevance"}
 
 // OCR content: expected receipt-ocr.png and scanned-invoice.pdf.
-{"query":"AURORA","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\qindexer\\ocr"],"match_fields":["content"]},"limit":10,"sort":"relevance"}
+{"query":"AURORA","filters":{"roots":["qindexer-fixtures"],"include_paths":["D:\\fixtures\\ocr"],"match_fields":["content"]},"limit":10,"sort":"relevance"}
 ```
 
 The office markers are `VIOLET 317` in `office\\sample.docx`, `COBALT 428` in
@@ -525,7 +526,7 @@ with explicit scopes, never by rewriting raw query text. Proposed shape:
     "scope_aliases": [
       {
         "path": "X:\\",
-        "target": "\\\\DRK-NAS9B372E\\Shared",
+        "target": "\\\\fileserver.example.test\\Shared",
         "platform": "windows-drive"
       }
     ]
@@ -561,7 +562,7 @@ Treat these as alternate identities of one location, not as special cases:
 - Windows UNC roots using a short host, FQDN, IP address, and a configured
   host alias: `\\nas\Shared`, `\\nas.example.local\Shared`.
 - Qsirch's legacy compact share form: `\Shared` and `\Shared\Cases`.
-- Linux CIFS/NFS/local mount paths: `/mnt/shared`, `/home/user/qsurfer-mounts/shared`.
+- Linux CIFS/NFS/local mount paths: `/mnt/shared`, `/srv/qindexer/mounts/shared`.
 - QIndexer's own canonical service path and any configured root aliases.
 
 QSurfer will send every relationship it knows from manual path mappings,
@@ -626,11 +627,11 @@ process-level lifecycle.
 Moving the crawler to a different machine exposed duplicate records for the
 same NAS file. One record is stored under a Windows mapped path, for example:
 
-`X:\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\...\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+`X:\Legal\Matters\Example\brief.docx`
 
 and the other under the crawler host's mounted SMB path, for example:
 
-`\\DRK-NAS9B372E.dimlaw.local\home\legitsu\.qsurfer\mounts\shared-02800937c0a4\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY\...\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`.
+`/srv/qindexer/mounts/shared/Legal/Matters/Example/brief.docx`.
 
 These must be one index identity. This is a QIndexer ingestion and migration
 responsibility, not a QSurfer presentation/deduplication workaround.
@@ -665,3 +666,88 @@ to handle moves such as `X:\...` on Windows becoming a service-local Linux/CIFS
 mount path while representing the same physical share. Crawl checkpoints are
 rewritten at the same time. Fresh Windows and Linux binaries were copied to
 `H:\qindexer\bin` for testing.
+
+## 2026-09-12 QIndexer Hardening Update
+
+The service hardening pass changes operational behavior but does not require a
+QSurfer adapter change:
+
+- Root aliases in the admin UI are now structured rows (`label`, `platform`,
+  `client path`, optional `indexed target`) rather than a delimiter-separated
+  text field. Spaces in paths are preserved and `path_aliases` remains the
+  same JSON array in the API.
+- QIndexer now keeps Windows/UNC identities case-insensitive while preserving
+  case for Linux/POSIX paths. Clients should continue sending the configured
+  aliases and scope paths exactly as selected.
+- Search requests are limited to a 1 MiB body, 100 roots, 100 extensions, and
+  100 combined include/exclude scopes. Invalid modified-time filters now return
+  a structured `400 invalid_modified_after` or `invalid_modified_before`.
+- `sort_direction` is the canonical request field. The protocol fixture and
+  API documentation now use it; the service still accepts legacy `direction`
+  for compatibility.
+- Health returns `status: "degraded"` and `index.ready: false` if SQLite root
+  state cannot be read. A healthy process with a usable index remains
+  `status: "ok"` and `index.ready: true`.
+- Admin root/rule/config changes are persisted atomically before becoming live.
+  The crawler and filesystem watcher receive immutable configuration snapshots;
+  watcher configuration or root changes trigger a clean watcher rebuild.
+- Stop, clear-index, delete-root, and repair now cancel in-flight enrichment
+  work as well as directory crawls. An operation waits for that work to drain
+  and reports that it is still stopping instead of claiming completion early.
+- A stopped root is remembered and `POST /admin/v1/crawler/resume` requeues it
+  from its persisted checkpoints. A repair likewise requeues only the roots it
+  interrupted after maintenance is released; it no longer leaves a cancelled
+  root idle until the next scheduled reconciliation.
+- Cancelling work also drains queued content/OCR/hash jobs. This prevents a
+  root-path repair from later attempting extraction through an old service
+  mount path; refill work is generated from the repaired catalog path instead.
+- Admin metrics now include `active_roots`. The management UI presents those
+  names with live file, directory, and I/O throughput rather than an invented
+  percentage for an unbounded traversal.
+
+Validation from this workspace: `go test ./...`, `go vet ./...`, and Windows
+and Linux cross-builds pass. The UI alias change was already present in the
+current worktree and was verified to serialize structured `path_aliases`.
+
+## 2026-09-12 QIndexer Update: Repair and Shutdown Responsiveness
+
+- `GET /admin/v1/operations/repair` exposes the current root, phase, alias
+  count, rewrite count, duplicate merge count, and timestamps. The web admin
+  UI polls it while a repair is active and presents the live phase in the
+  Operations strip.
+- Repair no longer scans an entire root to test a configured alias. It uses
+  the indexed, path-segment-aware prefix to select only records under that
+  alias. The embedded-path repair likewise selects only paths containing a
+  nested canonical-root signature, leaving normal canonical rows untouched.
+  A successful no-op repair should now complete quickly instead of appearing
+  to hang at one alias checked.
+- Service Stop immediately cancels crawl and enrichment work, returns an
+  accepted response, then performs bounded HTTP/watcher cleanup. A blocked
+  network file read or third-party parser is no longer allowed to keep the
+  process alive past that shutdown window. Client code should treat
+  `202 {"status":"stopping"}` as the normal acknowledgement and wait for
+  health to become unavailable rather than expecting a synchronous stop.
+
+## 2026-09-12 QIndexer Update: Crawl Priority and SQLite Resilience
+
+- A full crawl is now explicitly two-phase. Phase one indexes the searchable
+  namespace (folders, names, paths, sizes, and timestamps). Content extraction,
+  OCR, and hashing do not start while any structural crawl is active. They run
+  as a secondary pass after the root is queryable.
+- Full-crawl metadata writes honor `crawler.index_batch_size`. Worker-local
+  documents are committed in bounded SQLite transactions rather than one
+  transaction per file. This is important for high-latency SMB/NAS paths.
+- Records marked `missing` are rechecked before ordinary traversal on the next
+  reachable crawl. A still-absent priority record is not logged as a new error;
+  a returned record is restored to `active` immediately.
+- A temporarily unreadable child directory produces a `partial` run, preserves
+  existing records, clears only traversal checkpoints, and retries rather than
+  marking an otherwise reachable root missing.
+- Repair uses bounded, committed path-rewrite batches. Interrupting repair can
+  leave it incomplete, but cannot leave one giant open SQLite transaction or
+  require index reconstruction. The next repair continues idempotently.
+- Watcher events remain path-scoped through `CrawlHint`. A changed file is
+  reindexed by its file path; a changed directory is limited to its subtree.
+  Only a bounded dirty-event overflow or watcher coverage loss escalates to a
+  root crawl. Secondary claims sort by newest `indexed_at`, so changed files
+  move ahead of the historical extraction/OCR/hash backlog.

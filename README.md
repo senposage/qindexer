@@ -58,6 +58,16 @@ cd src
 ./dist/qindexer_linux_amd64 run --config ./configs/example.yaml
 ```
 
+Portable install scripts:
+
+```bash
+./scripts/install-qindexer-linux.sh --install-dir /opt/qindexer --config ./src/configs/linux-nas.example.yaml --install-sidecars --install-service --start-service
+```
+
+```powershell
+.\scripts\install-qindexer.ps1 -InstallDir "C:\Program Files\QIndexer" -ConfigPath .\src\configs\windows-nas.example.yaml -InstallSidecars -InstallService -StartService
+```
+
 Open the admin UI:
 
 ```text
@@ -124,15 +134,15 @@ for the same storage:
 ```yaml
 roots:
   - id: "shared"
-    path: "/home/legitsu/.qsurfer/mounts/shared-02800937c0a4"
+    path: "/srv/qindexer/mounts/team-share"
     path_aliases:
       - id: "shared-x"
         platform: "windows-drive"
         path: "X:\\"
-      - id: "mat-x"
+      - id: "legal-x"
         platform: "windows-drive"
-        path: "X:\\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY"
-        target: "/home/legitsu/.qsurfer/mounts/shared-02800937c0a4/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY"
+        path: "X:\\Legal"
+        target: "/srv/qindexer/mounts/team-share/Legal"
 ```
 
 Search responses keep `path` stable and canonical. `display_path` is filled
@@ -151,7 +161,9 @@ The web UI supports:
 - Network binding configuration.
 - Live metrics including operations/sec, I/O rate, active crawler state, and
   index size.
-- Recent crawl activity and diagnostics.
+- Recent crawl activity, root errors, log tail, and diagnostics.
+- File logging at `<data_dir>/logs/qindexer.log` with debug entries and panic
+  stack traces.
 
 ## Development
 

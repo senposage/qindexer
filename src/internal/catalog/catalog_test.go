@@ -88,6 +88,55 @@ func TestDescendantPathLikePreservesDriveRootSeparator(t *testing.T) {
 	}
 }
 
+func TestCheckDatabaseUsesReadOnlySQLiteURI(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cat, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDatabase(ctx, filepath.Join(dir, "qsurfer-search.db")); err != nil {
+		t.Fatalf("read-only database check failed: %v", err)
+	}
+}
+
+func TestUpsertDocumentsRestoresMissingRecordsInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	makeDoc := func(id, path string, generation int64) Document {
+		return Document{ID: id, RootID: "test", Path: path, NormalizedPath: NormalizePath(path), Name: filepath.Base(path), Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: generation, Signature: Signature(1, modified)}
+	}
+	if _, err := cat.UpsertDocuments(ctx, []Document{makeDoc("one", `D:\fixtures\one.txt`, 1), makeDoc("two", `D:\fixtures\two.txt`, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.MarkMissing(ctx, "test", 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := cat.MissingDocumentPaths(ctx, "test", 10)
+	if err != nil || len(paths) != 2 {
+		t.Fatalf("missing paths = %#v, %v", paths, err)
+	}
+	results, err := cat.UpsertDocuments(ctx, []Document{makeDoc("replacement-one", `D:\fixtures\one.txt`, 3), makeDoc("replacement-two", `D:\fixtures\two.txt`, 3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || !results[0].Unchanged || !results[1].Unchanged {
+		t.Fatalf("unexpected batch restore results: %#v", results)
+	}
+	paths, err = cat.MissingDocumentPaths(ctx, "test", 10)
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("restored records still missing: %#v, %v", paths, err)
+	}
+}
+
 func TestContentMatchMetadataUsesBoundedExcerpt(t *testing.T) {
 	doc := Document{Name: "report.docx", Path: `C:\Finance\report.docx`, ContentText: "The quarterly revenue plan is ready for the finance review."}
 	addMatchMetadata(&doc, "revenue", nil)
@@ -202,9 +251,9 @@ func TestRewriteRootPathMergesDuplicateActiveRows(t *testing.T) {
 	defer cat.Close()
 
 	modified := time.Now().UTC()
-	oldPath := `X:\AA-MATRIMONIAL\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
-	newRoot := `\\DRK-NAS9B372E.dimlaw.local\home\legitsu\.qsurfer\mounts\shared-02800937c0a4`
-	newPath := newRoot + `\AA-MATRIMONIAL\ATTORNEY AFFIRMATION IN OPPOSITION 9-4-26.docx`
+	oldPath := `X:\Legal\brief.docx`
+	newRoot := `\\fileserver.example.test\mounts\team-share`
+	newPath := newRoot + `\Legal\brief.docx`
 	for _, item := range []struct {
 		id   string
 		path string
@@ -224,7 +273,7 @@ func TestRewriteRootPathMergesDuplicateActiveRows(t *testing.T) {
 	if rewritten != 0 || merged != 1 {
 		t.Fatalf("expected one duplicate merge, got rewritten=%d merged=%d", rewritten, merged)
 	}
-	resp, err := cat.Search(ctx, SearchRequest{Query: "attorney", Filters: SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	resp, err := cat.Search(ctx, SearchRequest{Query: "brief", Filters: SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,9 +322,9 @@ func TestRepairEmbeddedRootPathMergesUNCWrappedCanonicalPath(t *testing.T) {
 	defer cat.Close()
 
 	modified := time.Now().UTC()
-	root := `/home/legitsu/.qsurfer/mounts/shared-02800937c0a4`
-	wrapped := `\\DRK-NAS9B372E.dimlaw\.local\home\legitsu\\.qsurfer\mounts\shared-02800937c0a4\AA STAFF DIRECTORIES\KAT McEVOY DIRECTORY\KAT\Affidavits\Survey Affidavit of No Change.docx`
-	canonical := root + `/AA STAFF DIRECTORIES/KAT McEVOY DIRECTORY/KAT/Affidavits/Survey Affidavit of No Change.docx`
+	root := `/srv/qindexer/mounts/team-share`
+	wrapped := `\\fileserver.example.test\archives\srv\qindexer\mounts\team-share\Legal\Example\affidavit.docx`
+	canonical := root + `/Legal/Example/affidavit.docx`
 	for _, item := range []struct {
 		id   string
 		path string
@@ -295,12 +344,48 @@ func TestRepairEmbeddedRootPathMergesUNCWrappedCanonicalPath(t *testing.T) {
 	if rewritten != 0 || merged != 1 {
 		t.Fatalf("expected one embedded duplicate merge, got rewritten=%d merged=%d", rewritten, merged)
 	}
-	resp, err := cat.Search(ctx, SearchRequest{Query: "survey affidavit", Filters: SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	resp, err := cat.Search(ctx, SearchRequest{Query: "affidavit", Filters: SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(resp.Results) != 1 || resp.Results[0].Path != canonical {
 		t.Fatalf("embedded path repair left duplicate or wrong path: %#v", resp.Results)
+	}
+}
+
+func TestMarkOpenCrawlsInterrupted(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	if _, err := cat.NextGeneration(ctx, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.StartCrawl(ctx, CrawlRun{ID: "run-1", RootID: "shared", Generation: 1, StartedAt: time.Now().UTC(), Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := cat.MarkOpenCrawlsInterrupted(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 1 {
+		t.Fatalf("changed = %d, want 1", changed)
+	}
+	runs, err := cat.RecentCrawls(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != "interrupted" || runs[0].FinishedAt == nil {
+		t.Fatalf("open crawl was not marked interrupted: %#v", runs)
+	}
+	states, err := cat.RootStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states["shared"].LastCrawlStatus != "interrupted" || states["shared"].LastError == "" {
+		t.Fatalf("root state was not marked interrupted: %#v", states["shared"])
 	}
 }
 
@@ -369,7 +454,7 @@ func TestSearchMatchFieldsSeparatesMetadataAndContent(t *testing.T) {
 	}
 	defer cat.Close()
 	modified := time.Now().UTC()
-	doc := Document{ID: "content-only", RootID: "test", Path: `D:\qindexer\content\plain-notes.txt`, NormalizedPath: NormalizePath(`D:\qindexer\content\plain-notes.txt`), Name: "plain-notes.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	doc := Document{ID: "content-only", RootID: "test", Path: `D:\fixtures\content\plain-notes.txt`, NormalizedPath: NormalizePath(`D:\fixtures\content\plain-notes.txt`), Name: "plain-notes.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
 	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +472,7 @@ func TestSearchMatchFieldsSeparatesMetadataAndContent(t *testing.T) {
 	if err != nil || len(content.Results) != 1 || len(content.Results[0].MatchedFields) != 1 || content.Results[0].MatchedFields[0] != "content" {
 		t.Fatalf("content-only search = %#v, %v", content.Results, err)
 	}
-	matchDoc := Document{Path: `D:\qindexer\orchid\notes.txt`, Name: "notes.txt", ContentText: "ORCHID"}
+	matchDoc := Document{Path: `D:\fixtures\orchid\notes.txt`, Name: "notes.txt", ContentText: "ORCHID"}
 	addMatchMetadata(&matchDoc, "orchid", []string{"content"})
 	if len(matchDoc.MatchedFields) != 1 || matchDoc.MatchedFields[0] != "content" {
 		t.Fatalf("content-only match metadata leaked other fields: %#v", matchDoc.MatchedFields)

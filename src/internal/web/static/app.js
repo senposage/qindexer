@@ -28,8 +28,10 @@ document.querySelector("#clear-token").addEventListener("click", () => {
 });
 
 document.querySelector("#refresh").addEventListener("click", refresh);
+document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
 document.querySelector("#validate-config").addEventListener("click", validateConfig);
 document.querySelector("#pause-crawler").addEventListener("click", pauseCrawler);
+document.querySelector("#stop-crawler").addEventListener("click", stopCrawler);
 document.querySelector("#resume-crawler").addEventListener("click", resumeCrawler);
 document.querySelector("#stop-service").addEventListener("click", stopService);
 document.querySelector("#view-roots").addEventListener("click", () => showView("roots"));
@@ -38,6 +40,10 @@ document.querySelector("#close-rules").addEventListener("click", closeRules);
 document.querySelector("#cancel-rules").addEventListener("click", closeRules);
 document.querySelector("#close-validation").addEventListener("click", closeValidation);
 document.querySelector("#rules-form").addEventListener("submit", saveRules);
+document.querySelector("#add-alias").addEventListener("click", () => {
+  const row = appendAliasRow();
+  row.querySelector(".alias-path").focus();
+});
 document.querySelector("#add-root").addEventListener("click", openNewRoot);
 document.querySelector("#bootstrap-form").addEventListener("submit", bootstrapAdmin);
 document.querySelector("#network-settings-form").addEventListener("submit", saveNetworkSettings);
@@ -88,17 +94,20 @@ async function api(path, options = {}) {
 async function refresh(options = {}) {
   try {
     if (!options.quiet) setMessage("Refreshing...");
-    const [service, roots, crawls, config, metrics] = await Promise.all([
+    const [service, roots, crawls, config, metrics, logs] = await Promise.all([
       api("/admin/v1/service"),
       api("/admin/v1/roots"),
       api("/admin/v1/crawls"),
       api("/admin/v1/config"),
       api("/admin/v1/metrics"),
+      api("/admin/v1/logs?limit=160").catch((err) => ({ error: err.message, lines: [] })),
     ]);
     renderService(service);
     renderMetrics(metrics);
     renderRoots(roots.roots || []);
     renderCrawls(crawls.crawls || []);
+    renderRootErrors(roots.roots || []);
+    renderLogs(logs);
     state.crawler = config.crawler || {};
     state.network = { server: config.server || {}, management: config.management || {} };
     renderNetworkSettings(state.network);
@@ -147,13 +156,27 @@ function renderMetrics(metrics) {
   document.querySelector("#io-rate").textContent = `${formatBytes(metrics.bytes_per_second || 0)}/s`;
   document.querySelector("#index-size").textContent = formatBytes(metrics.index_size_bytes || 0);
   const active = metrics.active_crawls || 0;
+  document.querySelector("#content-queue").textContent = Number(metrics.content_queue_depth || 0).toLocaleString();
+  document.querySelector("#ocr-queue").textContent = Number(metrics.ocr_queue_depth || 0).toLocaleString();
+  document.querySelector("#hash-queue").textContent = Number(metrics.hash_queue_depth || 0).toLocaleString();
+  document.querySelector("#next-crawl").textContent = formatFuture(metrics.next_full_crawl_unix);
   if (metrics.adaptive_paused) {
     document.querySelector("#crawler-state").textContent = `Throttled: ${String(metrics.pause_reason || "system").replace("adaptive_", "")}`;
+    renderOps("Crawler throttled", `Paused by ${String(metrics.pause_reason || "system").replace("adaptive_", "")}. CPU ${formatRate(metrics.cpu_percent || 0)}%, disk busy ${formatRate(metrics.disk_busy_percent || 0)}%.`);
   } else if (metrics.paused) {
     document.querySelector("#crawler-state").textContent = `Paused ${formatPause(metrics.paused_until_unix)}`;
+    renderOps("Crawler paused", `Manual or maintenance pause ends in ${formatPause(metrics.paused_until_unix) || "less than a second"}.`);
   } else {
     document.querySelector("#crawler-state").textContent = active ? `${active} active` : "Idle";
+    const roots = Array.isArray(metrics.active_roots) && metrics.active_roots.length ? ` ${metrics.active_roots.join(", ")}.` : "";
+    const throughput = `${formatRate(metrics.files_per_second || 0)} files/s, ${formatRate(metrics.directories_per_second || 0)} dirs/s, ${formatBytes(metrics.bytes_per_second || 0)}/s.`;
+    renderOps(active ? "Crawler active" : "Crawler idle", active ? `${active} root crawl${active === 1 ? "" : "s"} running:${roots} ${throughput}` : `No active crawl. Next full reconciliation ${formatFuture(metrics.next_full_crawl_unix)}.`);
   }
+}
+
+function renderOps(title, detail) {
+  document.querySelector("#ops-state").textContent = title;
+  document.querySelector("#ops-detail").textContent = detail;
 }
 
 function renderService(service) {
@@ -211,7 +234,7 @@ function openRules(rootId) {
   document.querySelector("#rules-enabled").checked = Boolean(root.enabled);
   document.querySelector("#rules-labels").value = (root.labels || []).join(", ");
   document.querySelector("#rules-credential").value = root.credential_ref || "";
-  document.querySelector("#rules-aliases").value = aliasLines(root.path_aliases);
+  setAliasRows(root.path_aliases);
   document.querySelector("#rules-include-ext").value = lines(root.include_extensions);
   document.querySelector("#rules-exclude-ext").value = lines(root.exclude_extensions);
   document.querySelector("#rules-include-file").value = lines(root.include_file_patterns);
@@ -239,7 +262,7 @@ function openNewRoot() {
   document.querySelector("#rules-enabled").checked = true;
   document.querySelector("#rules-labels").value = "";
   document.querySelector("#rules-credential").value = "";
-  document.querySelector("#rules-aliases").value = "";
+  setAliasRows([]);
   document.querySelector("#rules-include-ext").value = "";
   document.querySelector("#rules-exclude-ext").value = "";
   document.querySelector("#rules-include-file").value = "";
@@ -266,6 +289,13 @@ async function saveRules(event) {
   if (!state.editingRoot && !state.creatingRoot) return;
   const repairAfterSave = event.submitter?.id === "save-repair-rules" && !state.creatingRoot;
   const rootId = state.creatingRoot ? document.querySelector("#rules-id").value.trim() : state.editingRoot.id;
+  let aliases;
+  try {
+    aliases = readAliasRows();
+  } catch (err) {
+    setMessage(err.message);
+    return;
+  }
   const body = {
     id: rootId,
     name: document.querySelector("#rules-name").value.trim(),
@@ -273,7 +303,7 @@ async function saveRules(event) {
     enabled: document.querySelector("#rules-enabled").checked,
     labels: splitList(document.querySelector("#rules-labels").value),
     credential_ref: document.querySelector("#rules-credential").value.trim(),
-    path_aliases: parseAliases(document.querySelector("#rules-aliases").value),
+    path_aliases: aliases,
     include_extensions: splitList(document.querySelector("#rules-include-ext").value),
     exclude_extensions: splitList(document.querySelector("#rules-exclude-ext").value),
     include_file_patterns: splitList(document.querySelector("#rules-include-file").value),
@@ -295,7 +325,7 @@ async function saveRules(event) {
       const repair = await repairRootIndex(rootId, { confirm: false, refreshAfter: false });
       await refresh({ quiet: true, message: `${rootId}: saved, repaired ${repair.paths_rewritten || 0}, merged ${repair.duplicate_paths_merged || 0}` });
     } else {
-      await refresh({ quiet: true, message: `${rootId}: ${data.status}` });
+      await refresh({ quiet: true, message: data.repair_required ? `${rootId}: saved; repair index when ready` : `${rootId}: ${data.status}` });
     }
     closeRules();
   } catch (err) {
@@ -394,6 +424,53 @@ function renderCrawls(crawls) {
   }
 }
 
+function renderRootErrors(roots) {
+  const box = document.querySelector("#root-errors");
+  const errors = roots
+    .filter((root) => root.last_error || ["failed", "unreachable", "interrupted"].includes(root.last_status))
+    .slice(0, 8);
+  if (!errors.length) {
+    box.innerHTML = `<div class="diagnostic-ok">No root-level errors reported.</div>`;
+    return;
+  }
+  box.innerHTML = errors.map((root) => `
+    <div class="root-error">
+      <strong>${escapeHtml(root.id)}</strong>
+      <span class="tag ${statusTone(root.last_status)}">${escapeHtml(root.last_status || "unknown")}</span>
+      <p>${escapeHtml(root.last_error || "No error message recorded.")}</p>
+    </div>
+  `).join("");
+}
+
+async function refreshLogs() {
+  try {
+    const logs = await api("/admin/v1/logs?limit=240");
+    renderLogs(logs);
+    setMessage("Logs refreshed");
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
+function renderLogs(data) {
+  const list = document.querySelector("#logs");
+  if (data?.error) {
+    list.innerHTML = `<div class="log-empty">Logs unavailable: ${escapeHtml(data.error)}</div>`;
+    return;
+  }
+  const lines = array(data?.lines).slice(-160);
+  if (!lines.length) {
+    list.innerHTML = `<div class="log-empty">No log lines yet.</div>`;
+    return;
+  }
+  list.innerHTML = lines.map((line) => {
+    const lower = line.toLowerCase();
+    const tone = lower.includes("level=error") || lower.includes(" panic ") || lower.includes("panic=") ? "error" : lower.includes("level=warn") ? "warn" : "info";
+    return `<div class="log-line ${tone}">${escapeHtml(line)}</div>`;
+  }).join("");
+  list.scrollTop = list.scrollHeight;
+}
+
 function crawlStat(label, value) {
   return `<span><b>${Number(value || 0).toLocaleString()}</b>${label}</span>`;
 }
@@ -421,6 +498,17 @@ async function resumeCrawler() {
   try {
     const data = await api("/admin/v1/crawler/resume", { method: "POST", body: "{}" });
     await refresh({ quiet: true, message: `Crawler ${data.status}` });
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
+async function stopCrawler() {
+  try {
+    const data = await api("/admin/v1/crawler/stop", { method: "POST", body: "{}" });
+    const active = Array.isArray(data.active_roots) ? data.active_roots : [];
+    const detail = active.length ? `; draining ${active.join(", ")}` : "";
+    await refresh({ quiet: true, message: data.status === "stopped" ? "Crawls stopped" : `Crawls stopping${detail}` });
   } catch (err) {
     setMessage(err.message);
   }
@@ -478,6 +566,24 @@ async function repairRootIndex(root, options = {}) {
     button.textContent = "Repairing...";
   }
   setMessage(`${root}: repairing index paths...`);
+	const startedAt = Date.now();
+	const showRepairProgress = async () => {
+		try {
+			const progress = await api("/admin/v1/operations/repair");
+			if (progress.status !== "running" || progress.root_id !== root) return;
+			const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+			const matched = progress.paths_matched || 0;
+			const processed = progress.paths_processed || 0;
+			const pathProgress = matched ? `; ${processed.toLocaleString()} / ${matched.toLocaleString()} matching paths processed` : "";
+			const detail = `${progress.phase || "working"}; ${progress.aliases_checked || 0} aliases checked${pathProgress}, ${progress.paths_rewritten || 0} paths rewritten, ${progress.duplicate_paths_merged || 0} duplicates merged. ${seconds}s elapsed.`;
+			renderOps(`Repairing ${root}`, detail);
+			setMessage(`${root}: ${detail}`);
+		} catch (_) {
+			// The repair request itself reports failures; polling is supplementary.
+		}
+	};
+	await showRepairProgress();
+	const progressTimer = setInterval(showRepairProgress, 1000);
   try {
     const data = await api(`/admin/v1/roots/${encodeURIComponent(root)}/repair-index`, { method: "POST", body: "{}" });
     const rewritten = data.paths_rewritten || 0;
@@ -503,6 +609,7 @@ async function repairRootIndex(root, options = {}) {
     showOperation("Index Repair Failed", { root_id: root, error: err.message, code: err.code });
     throw err;
   } finally {
+		clearInterval(progressTimer);
     if (button) {
       button.disabled = false;
       button.textContent = originalText;
@@ -558,12 +665,98 @@ function lines(values = []) {
   return array(values).join("\n");
 }
 
-function aliasLines(values = []) {
-  return array(values).map((alias) => [alias.id || "", alias.platform || "", alias.path || "", alias.target || ""].filter((part, index) => index < 3 || part).join(" | ")).join("\n");
+function setAliasRows(values = []) {
+  const container = document.querySelector("#rules-aliases");
+  container.replaceChildren();
+  array(values).forEach((alias) => appendAliasRow(alias));
+  renderAliasEmptyState();
 }
 
-function parseAliases(value) {
-  return value.split("\n").map((line) => line.split("|").map((part) => part.trim())).filter((parts) => parts.length >= 3 && parts[1] && parts[2]).map(([id, platform, path, target]) => ({ id, platform, path, target: target || "" }));
+function appendAliasRow(alias = {}) {
+  const container = document.querySelector("#rules-aliases");
+  const row = document.createElement("div");
+  row.className = "alias-row";
+
+  const label = document.createElement("input");
+  label.className = "alias-label";
+  label.type = "text";
+  label.placeholder = "Optional label";
+  label.value = alias.id || "";
+  label.setAttribute("aria-label", "Alias label");
+
+  const platform = document.createElement("select");
+  platform.className = "alias-platform";
+  platform.setAttribute("aria-label", "Client platform");
+  const platforms = [
+    ["windows-drive", "Windows drive"],
+    ["windows-unc", "Windows UNC"],
+    ["linux", "Linux / macOS"],
+    ["service", "Service path"],
+  ];
+  const selectedPlatform = alias.platform || "windows-drive";
+  if (!platforms.some(([value]) => value === selectedPlatform)) platforms.push([selectedPlatform, selectedPlatform]);
+  platforms.forEach(([value, text]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    option.selected = value === selectedPlatform;
+    platform.appendChild(option);
+  });
+
+  const path = document.createElement("input");
+  path.className = "alias-path";
+  path.type = "text";
+  path.placeholder = "X:\\Shared or /mnt/shared";
+  path.value = alias.path || "";
+  path.setAttribute("aria-label", "Client path");
+
+  const target = document.createElement("input");
+  target.className = "alias-target";
+  target.type = "text";
+  target.placeholder = "Optional indexed target";
+  target.value = alias.target || "";
+  target.setAttribute("aria-label", "Indexed target override");
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "secondary";
+  remove.textContent = "\u00d7";
+  remove.title = "Remove alias";
+  remove.setAttribute("aria-label", "Remove alias");
+  remove.addEventListener("click", () => {
+    row.remove();
+    renderAliasEmptyState();
+  });
+
+  row.append(label, platform, path, target, remove);
+  container.appendChild(row);
+  renderAliasEmptyState();
+  return row;
+}
+
+function renderAliasEmptyState() {
+  const container = document.querySelector("#rules-aliases");
+  container.querySelector(".alias-empty")?.remove();
+  if (container.querySelector(".alias-row")) return;
+  const empty = document.createElement("div");
+  empty.className = "alias-empty";
+  empty.textContent = "No client aliases. Add one only when clients reach this root through a different path.";
+  container.appendChild(empty);
+}
+
+function readAliasRows() {
+  const rows = Array.from(document.querySelectorAll("#rules-aliases .alias-row"));
+  const aliases = [];
+  for (const row of rows) {
+    const id = row.querySelector(".alias-label").value.trim();
+    const platform = row.querySelector(".alias-platform").value.trim();
+    const path = row.querySelector(".alias-path").value.trim();
+    const target = row.querySelector(".alias-target").value.trim();
+    if (!id && !path && !target) continue;
+    if (!path) throw new Error("Every client path alias needs a client path or should be removed.");
+    aliases.push({ id, platform, path, target });
+  }
+  return aliases;
 }
 
 function array(values) {
@@ -661,6 +854,16 @@ function formatBytes(value) {
 function formatPause(unix) {
   if (!unix) return "";
   const seconds = Math.max(0, Math.round(unix - Date.now() / 1000));
+  if (seconds >= 3600) return `${Math.ceil(seconds / 3600)}h`;
+  if (seconds >= 60) return `${Math.ceil(seconds / 60)}m`;
+  return `${seconds}s`;
+}
+
+function formatFuture(unix) {
+  if (!unix) return "-";
+  const seconds = Math.round(unix - Date.now() / 1000);
+  if (seconds <= 0) return "now";
+  if (seconds >= 86400) return `${Math.ceil(seconds / 86400)}d`;
   if (seconds >= 3600) return `${Math.ceil(seconds / 3600)}h`;
   if (seconds >= 60) return `${Math.ceil(seconds / 60)}m`;
   return `${seconds}s`;

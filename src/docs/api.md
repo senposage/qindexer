@@ -91,11 +91,8 @@ Fields include:
 - `document_count`
 - `missing_count`
 - `last_status`
-- `last_started_at`
-- `last_finished_at`
 - `last_error`
-- `last_generation`
-- `last_successful_generation`
+- `last_successful_crawl_at`
 
 Aliases include:
 
@@ -182,13 +179,10 @@ Response:
 ```json
 {
   "search_id": "client-correlation-id",
-  "query": "budget q3",
-  "limit": 50,
   "offset": 0,
   "has_more": true,
   "next_offset": 50,
-  "sort": "modified",
-  "sort_direction": "desc",
+  "took_ms": 8,
   "results": [
     {
       "id": "uuid",
@@ -223,15 +217,15 @@ Response:
     "ready": true,
     "generation": 42,
     "freshness_seconds": 120,
-    "roots": {
-      "finance": {
+    "roots": [
+      {
+        "root_id": "finance",
         "status": "ok",
         "generation": 42,
-        "last_successful_generation": 42,
-        "document_count": 12345,
+        "last_successful_crawl_at": "2026-09-11T12:01:00Z",
         "freshness_seconds": 120
       }
-    }
+    ]
   }
 }
 ```

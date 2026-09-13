@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -39,37 +40,49 @@ func IndexableExtensions() []string {
 	return values
 }
 
+func withRecover(fn func() (string, error)) (text string, err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			text = ""
+			err = fmt.Errorf("content extraction panic: %v", value)
+		}
+	}()
+	return fn()
+}
+
 // Text returns best-effort text for common office, PDF, and plain-text files.
 func Text(path string) (string, error) {
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-	if !Indexable(path) {
-		return "", ErrUnsupported
-	}
-	switch ext {
-	case "pdf":
-		f, r, err := pdf.Open(path)
-		if err != nil {
-			return "", err
+	return withRecover(func() (string, error) {
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		if !Indexable(path) {
+			return "", ErrUnsupported
 		}
-		defer f.Close()
-		plain, err := r.GetPlainText()
-		if err != nil {
-			return "", err
+		switch ext {
+		case "pdf":
+			f, r, err := pdf.Open(path)
+			if err != nil {
+				return "", err
+			}
+			defer f.Close()
+			plain, err := r.GetPlainText()
+			if err != nil {
+				return "", err
+			}
+			return readText(plain)
+		case "docx", "xlsx", "pptx":
+			return officeText(path)
+		case "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp":
+			// Images have no embedded text. Returning an empty value hands them to OCR.
+			return "", nil
+		default:
+			f, err := os.Open(path)
+			if err != nil {
+				return "", err
+			}
+			defer f.Close()
+			return readText(f)
 		}
-		return readText(plain)
-	case "docx", "xlsx", "pptx":
-		return officeText(path)
-	case "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp":
-		// Images have no embedded text. Returning an empty value hands them to OCR.
-		return "", nil
-	default:
-		f, err := os.Open(path)
-		if err != nil {
-			return "", err
-		}
-		defer f.Close()
-		return readText(f)
-	}
+	})
 }
 
 func officeText(path string) (string, error) {

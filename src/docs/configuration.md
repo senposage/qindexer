@@ -55,7 +55,8 @@ index:
 ```
 
 - `data_dir`: SQLite database directory.
-- `commit_interval_seconds`: reserved for batching cadence.
+- `commit_interval_seconds`: reserved for future catalog batching; it does not
+  alter current write behavior.
 - `max_results`: server-side maximum page size.
 
 QIndexer stores `qsurfer-search.db`, `qsurfer-search.db-wal`, and
@@ -82,7 +83,8 @@ crawler:
 - `directory_worker_count`: directory traversal concurrency per crawl.
 - `metadata_worker_count`: file stat/enrichment scheduling concurrency.
 - `metadata_queue_size`: bounded file queue.
-- `index_batch_size`: batch size for catalog writes.
+- `index_batch_size`: reserved for future catalog batching; it does not alter
+  current write behavior.
 - `ignore_hidden`: skips hidden files where supported.
 - `follow_symlinks`: follows symlinked directories when true.
 - `collect_ownership`: default owner metadata collection.
@@ -101,8 +103,8 @@ adaptive_throttle:
 ```
 
 When enabled, QIndexer pauses crawl scheduling while host CPU or disk pressure
-is above threshold. Its own resource usage is treated as part of the observed
-system load, so thresholds should leave room for normal workstation or NAS use.
+is above threshold. QIndexer subtracts its own CPU share when evaluating host
+pressure, so the thresholds reflect other workload on the workstation or NAS.
 
 ## Pause Windows
 
@@ -221,10 +223,10 @@ path_aliases:
   - id: "finance-linux"
     platform: "linux"
     path: "/mnt/finance"
-  - id: "mat-x"
+  - id: "legal-x"
     platform: "windows-drive"
-    path: "X:\\AA-MATRIMONIAL AND FAMILY COURT DIRECTORY"
-    target: "/mnt/shared/AA-MATRIMONIAL AND FAMILY COURT DIRECTORY"
+    path: "X:\\Legal"
+    target: "/mnt/team-share/Legal"
 ```
 
 - `id`: optional stable alias ID. QIndexer derives one if omitted.

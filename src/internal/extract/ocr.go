@@ -80,7 +80,7 @@ func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, 
 	}
 	dir, err := os.MkdirTemp("", "qindexer-ocr-*")
 	if err != nil {
-		return "failed", "", err
+		return "failed", "", errors.New("could not create OCR temporary workspace")
 	}
 	defer os.RemoveAll(dir)
 	sidecar := filepath.Join(dir, "content.txt")
@@ -90,19 +90,28 @@ func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, 
 	}
 	// OCRmyPDF requires '-' as the output argument when output-type is none.
 	args = append(args, path, "-")
-	if out, err := exec.CommandContext(ctx, command, args...).CombinedOutput(); err != nil {
-		return "failed", "", fmt.Errorf("%s failed: %w: %s", command, err, strings.TrimSpace(string(out)))
+	if err := exec.CommandContext(ctx, command, args...).Run(); err != nil {
+		return "failed", "", commandError(command, err)
 	}
 	text, err := os.ReadFile(sidecar)
 	if err != nil {
-		return "failed", "", fmt.Errorf("%s did not produce a text sidecar: %w", command, err)
+		return "failed", "", fmt.Errorf("OCR command %q did not produce a text sidecar", commandName(command))
 	}
 	return "extracted", strings.Join(strings.Fields(string(text)), " "), nil
 }
 
 func commandError(command string, err error) error {
+	name := commandName(command)
 	if errors.Is(err, exec.ErrNotFound) {
-		return fmt.Errorf("OCR command %q was not found", command)
+		return fmt.Errorf("OCR command %q was not found", name)
 	}
-	return fmt.Errorf("%s failed: %w", command, err)
+	return fmt.Errorf("OCR command %q failed", name)
+}
+
+func commandName(command string) string {
+	command = strings.TrimSpace(strings.ReplaceAll(command, "\\", "/"))
+	if command == "" {
+		return "OCR engine"
+	}
+	return filepath.Base(command)
 }

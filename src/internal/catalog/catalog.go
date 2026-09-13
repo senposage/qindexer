@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -163,11 +164,18 @@ type RequestError struct {
 func (e *RequestError) Error() string { return e.Message }
 
 func Open(ctx context.Context, dataDir string) (*Catalog, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dataDir, 0700); err != nil {
 		return nil, err
 	}
 	dbPath := filepath.Join(dataDir, "qsurfer-search.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// Apply these settings to every pooled connection. Setting them only during
+	// migration leaves later reader/writer connections with SQLite's zero busy
+	// timeout, which turns ordinary writer contention into SQLITE_BUSY errors.
+	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -186,8 +194,48 @@ func (c *Catalog) Close() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	_, _ = c.db.Exec(`PRAGMA optimize;`)
-	_, _ = c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE);`)
+	// A passive checkpoint never blocks shutdown behind an active reader. WAL
+	// recovery is automatic on the next open, so do not force a truncate while
+	// a stop or repair is still unwinding.
+	_, _ = c.db.Exec(`PRAGMA wal_checkpoint(PASSIVE);`)
 	return c.db.Close()
+}
+
+// CheckDatabase performs a read-only SQLite quick check. It is deliberately
+// separate from Open so an operator can inspect a backup without creating WAL
+// sidecars or mutating the source database.
+func CheckDatabase(ctx context.Context, path string) error {
+	// modernc SQLite accepts the Windows-friendly file:C:/... URI form. Using
+	// net/url produces file:///C:/..., which this driver misparses on Windows.
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var schemaObjects int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master`).Scan(&schemaObjects); err != nil {
+		return fmt.Errorf("SQLite schema read failed: %w", err)
+	}
+	var documents int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents`).Scan(&documents); err != nil {
+		return fmt.Errorf("SQLite documents read failed: %w", err)
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA quick_check`)
+	if err != nil {
+		return fmt.Errorf("SQLite quick check failed after reading %d schema objects and %d documents: %w", schemaObjects, documents, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var result string
+		if err := rows.Scan(&result); err != nil {
+			return err
+		}
+		if result != "ok" {
+			return fmt.Errorf("SQLite integrity check failed: %s", result)
+		}
+	}
+	return rows.Err()
 }
 
 // ClearRoot removes only catalog state belonging to one configured root.
@@ -242,6 +290,128 @@ func (c *Catalog) DeactivateRoot(ctx context.Context, rootID string) (int64, err
 }
 
 func (c *Catalog) RewriteRootPath(ctx context.Context, rootID, oldRootPath, newRootPath string) (int64, int64, error) {
+	return c.rewriteRootPath(ctx, rootID, oldRootPath, newRootPath, nil)
+}
+
+// RewriteRootPathWithProgress reports candidate discovery and completed path
+// operations while a large root migration is in progress.
+func (c *Catalog) RewriteRootPathWithProgress(ctx context.Context, rootID, oldRootPath, newRootPath string, progress func(matched, processed int64)) (int64, int64, error) {
+	return c.rewriteRootPath(ctx, rootID, oldRootPath, newRootPath, progress)
+}
+
+func (c *Catalog) rewriteRootPath(ctx context.Context, rootID, oldRootPath, newRootPath string, progress func(matched, processed int64)) (int64, int64, error) {
+	return c.rewriteRootPathBatched(ctx, rootID, oldRootPath, newRootPath, progress)
+}
+
+// rewriteRootPathBatched keeps each migration commit small. A repair can touch
+// hundreds of thousands of rows, so one transaction would block every crawler
+// writer and is needlessly vulnerable to interruption.
+func (c *Catalog) rewriteRootPathBatched(ctx context.Context, rootID, oldRootPath, newRootPath string, progress func(matched, processed int64)) (int64, int64, error) {
+	oldRootPath = strings.TrimSpace(oldRootPath)
+	newRootPath = strings.TrimSpace(newRootPath)
+	if rootPathSame(oldRootPath, newRootPath) {
+		return 0, 0, nil
+	}
+	var matched int64
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents
+		WHERE root_id = ? AND (normalized_path = ? OR normalized_path LIKE ? ESCAPE '\')`,
+		rootID, NormalizePath(oldRootPath), escapeLike(pathChildPrefix(oldRootPath))+"%").Scan(&matched); err != nil {
+		return 0, 0, err
+	}
+	if progress != nil {
+		progress(matched, 0)
+	}
+	var processed, rewritten, merged int64
+	for {
+		batchProcessed, batchRewritten, batchMerged, err := c.rewriteRootPathBatch(ctx, rootID, oldRootPath, newRootPath, 128)
+		if err != nil {
+			return rewritten, merged, err
+		}
+		if batchProcessed == 0 {
+			break
+		}
+		processed += batchProcessed
+		rewritten += batchRewritten
+		merged += batchMerged
+		if progress != nil {
+			progress(matched, processed)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := c.ClearRootCheckpoints(ctx, rootID); err != nil {
+		return rewritten, merged, err
+	}
+	return rewritten, merged, nil
+}
+
+func (c *Catalog) rewriteRootPathBatch(ctx context.Context, rootID, oldRootPath, newRootPath string, limit int) (int64, int64, int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback()
+	type candidate struct{ id, path, extension, content string }
+	rows, err := tx.QueryContext(ctx, `SELECT id, path, extension, content_text FROM documents
+		WHERE root_id = ? AND (normalized_path = ? OR normalized_path LIKE ? ESCAPE '\') LIMIT ?`,
+		rootID, NormalizePath(oldRootPath), escapeLike(pathChildPrefix(oldRootPath))+"%", limit)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.id, &item.path, &item.extension, &item.content); err != nil {
+			rows.Close()
+			return 0, 0, 0, err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, 0, err
+	}
+	var rewritten, merged int64
+	for _, item := range candidates {
+		suffix, ok := rootPathSuffix(item.path, oldRootPath)
+		if !ok {
+			return 0, 0, 0, fmt.Errorf("repair candidate is not below its source alias")
+		}
+		newPath := joinRootPath(newRootPath, suffix)
+		newNormalized := NormalizePath(newPath)
+		var existingID string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE root_id = ? AND normalized_path = ?`, rootID, newNormalized).Scan(&existingID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, 0, err
+		}
+		if existingID != "" && existingID != item.id {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, item.id); err != nil {
+				return 0, 0, 0, err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, item.id); err != nil {
+				return 0, 0, 0, err
+			}
+			merged++
+			continue
+		}
+		name := filepath.Base(newPath)
+		if _, err := tx.ExecContext(ctx, `UPDATE documents SET path = ?, normalized_path = ?, name = ? WHERE id = ?`, newPath, newNormalized, name, item.id); err != nil {
+			return 0, 0, 0, err
+		}
+		if err := upsertFTS(ctx, tx, item.id, rootID, name, newPath, item.extension, item.content); err != nil {
+			return 0, 0, 0, err
+		}
+		rewritten++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, err
+	}
+	return int64(len(candidates)), rewritten, merged, nil
+}
+
+// rewriteRootPathLegacy preserves the previous single-transaction
+// implementation as a reference while repairs use the resumable batched path.
+func (c *Catalog) rewriteRootPathLegacy(ctx context.Context, rootID, oldRootPath, newRootPath string, progress func(matched, processed int64)) (int64, int64, error) {
 	oldRootPath = strings.TrimSpace(oldRootPath)
 	newRootPath = strings.TrimSpace(newRootPath)
 	if rootPathSame(oldRootPath, newRootPath) {
@@ -254,7 +424,13 @@ func (c *Catalog) RewriteRootPath(ctx context.Context, rootID, oldRootPath, newR
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, path, normalized_path, extension FROM documents WHERE root_id = ?`, rootID)
+	// Only inspect rows under the source alias. A repair commonly runs after a
+	// successful migration, so scanning every document in a large root just to
+	// discover there are no X:\\ paths left is needlessly expensive.
+	rows, err := tx.QueryContext(ctx, `SELECT id, path, normalized_path, extension
+		FROM documents
+		WHERE root_id = ? AND (normalized_path = ? OR normalized_path LIKE ? ESCAPE '\')`,
+		rootID, NormalizePath(oldRootPath), escapeLike(pathChildPrefix(oldRootPath))+"%")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -263,14 +439,12 @@ func (c *Catalog) RewriteRootPath(ctx context.Context, rootID, oldRootPath, newR
 		suffix                              string
 	}
 	candidates := []rewriteCandidate{}
-	existing := map[string]string{}
 	for rows.Next() {
 		var candidate rewriteCandidate
 		if err := rows.Scan(&candidate.id, &candidate.path, &candidate.normalizedPath, &candidate.extension); err != nil {
 			rows.Close()
 			return 0, 0, err
 		}
-		existing[candidate.normalizedPath] = candidate.id
 		suffix, ok := rootPathSuffix(candidate.path, oldRootPath)
 		if !ok {
 			continue
@@ -281,11 +455,19 @@ func (c *Catalog) RewriteRootPath(ctx context.Context, rootID, oldRootPath, newR
 	if err := rows.Close(); err != nil {
 		return 0, 0, err
 	}
+	if progress != nil {
+		progress(int64(len(candidates)), 0)
+	}
 	var rewritten, merged int64
-	for _, candidate := range candidates {
+	for i, candidate := range candidates {
 		newPath := joinRootPath(newRootPath, candidate.suffix)
 		newNormalized := NormalizePath(newPath)
-		if existingID := existing[newNormalized]; existingID != "" && existingID != candidate.id {
+		var existingID string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE root_id = ? AND normalized_path = ?`, rootID, newNormalized).Scan(&existingID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, err
+		}
+		if existingID != "" && existingID != candidate.id {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, candidate.id); err != nil {
 				return 0, 0, err
 			}
@@ -293,24 +475,27 @@ func (c *Catalog) RewriteRootPath(ctx context.Context, rootID, oldRootPath, newR
 				return 0, 0, err
 			}
 			merged++
-			continue
+		} else {
+			name := filepath.Base(newPath)
+			var content string
+			if err := tx.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, candidate.id).Scan(&content); err != nil {
+				return 0, 0, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE documents SET path = ?, normalized_path = ?, name = ? WHERE id = ?`, newPath, newNormalized, name, candidate.id); err != nil {
+				return 0, 0, err
+			}
+			if err := upsertFTS(ctx, tx, candidate.id, rootID, name, newPath, candidate.extension, content); err != nil {
+				return 0, 0, err
+			}
+			rewritten++
 		}
-		name := filepath.Base(newPath)
-		var content string
-		if err := tx.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, candidate.id).Scan(&content); err != nil {
-			return 0, 0, err
+		if progress != nil && ((i+1)%100 == 0 || i+1 == len(candidates)) {
+			progress(int64(len(candidates)), int64(i+1))
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE documents SET path = ?, normalized_path = ?, name = ? WHERE id = ?`, newPath, newNormalized, name, candidate.id); err != nil {
-			return 0, 0, err
-		}
-		if err := upsertFTS(ctx, tx, candidate.id, rootID, name, newPath, candidate.extension, content); err != nil {
-			return 0, 0, err
-		}
-		delete(existing, candidate.normalizedPath)
-		existing[newNormalized] = candidate.id
-		rewritten++
 	}
-	checkpoints, err := tx.QueryContext(ctx, `SELECT path FROM crawl_checkpoints WHERE root_id = ?`, rootID)
+	checkpoints, err := tx.QueryContext(ctx, `SELECT path FROM crawl_checkpoints
+		WHERE root_id = ? AND (normalized_path = ? OR normalized_path LIKE ? ESCAPE '\')`,
+		rootID, NormalizePath(oldRootPath), escapeLike(pathChildPrefix(oldRootPath))+"%")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -355,23 +540,28 @@ func (c *Catalog) RepairEmbeddedRootPath(ctx context.Context, rootID, canonicalR
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, path, normalized_path, extension FROM documents WHERE root_id = ?`, rootID)
+	patterns := embeddedRootPathLikePatterns(canonicalRootPath)
+	if len(patterns) == 0 {
+		return 0, 0, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, path, normalized_path, extension, content_text
+		FROM documents
+		WHERE root_id = ? AND (normalized_path LIKE ? ESCAPE '\' OR normalized_path LIKE ? ESCAPE '\')`,
+		rootID, patterns[0], patterns[1])
 	if err != nil {
 		return 0, 0, err
 	}
 	type repairCandidate struct {
-		id, path, normalizedPath, extension string
-		suffix                              string
+		id, path, normalizedPath, extension, content string
+		suffix                                       string
 	}
 	candidates := []repairCandidate{}
-	existing := map[string]string{}
 	for rows.Next() {
 		var candidate repairCandidate
-		if err := rows.Scan(&candidate.id, &candidate.path, &candidate.normalizedPath, &candidate.extension); err != nil {
+		if err := rows.Scan(&candidate.id, &candidate.path, &candidate.normalizedPath, &candidate.extension, &candidate.content); err != nil {
 			rows.Close()
 			return 0, 0, err
 		}
-		existing[candidate.normalizedPath] = candidate.id
 		suffix, ok := embeddedRootPathSuffix(candidate.path, canonicalRootPath)
 		if !ok {
 			continue
@@ -386,7 +576,12 @@ func (c *Catalog) RepairEmbeddedRootPath(ctx context.Context, rootID, canonicalR
 	for _, candidate := range candidates {
 		newPath := joinRootPath(canonicalRootPath, candidate.suffix)
 		newNormalized := NormalizePath(newPath)
-		if existingID := existing[newNormalized]; existingID != "" && existingID != candidate.id {
+		var existingID string
+		err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE root_id = ? AND normalized_path = ?`, rootID, newNormalized).Scan(&existingID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, err
+		}
+		if existingID != "" && existingID != candidate.id {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, candidate.id); err != nil {
 				return 0, 0, err
 			}
@@ -397,21 +592,17 @@ func (c *Catalog) RepairEmbeddedRootPath(ctx context.Context, rootID, canonicalR
 			continue
 		}
 		name := filepath.Base(newPath)
-		var content string
-		if err := tx.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, candidate.id).Scan(&content); err != nil {
-			return 0, 0, err
-		}
 		if _, err := tx.ExecContext(ctx, `UPDATE documents SET path = ?, normalized_path = ?, name = ? WHERE id = ?`, newPath, newNormalized, name, candidate.id); err != nil {
 			return 0, 0, err
 		}
-		if err := upsertFTS(ctx, tx, candidate.id, rootID, name, newPath, candidate.extension, content); err != nil {
+		if err := upsertFTS(ctx, tx, candidate.id, rootID, name, newPath, candidate.extension, candidate.content); err != nil {
 			return 0, 0, err
 		}
-		delete(existing, candidate.normalizedPath)
-		existing[newNormalized] = candidate.id
 		rewritten++
 	}
-	checkpoints, err := tx.QueryContext(ctx, `SELECT path FROM crawl_checkpoints WHERE root_id = ?`, rootID)
+	checkpoints, err := tx.QueryContext(ctx, `SELECT path FROM crawl_checkpoints
+		WHERE root_id = ? AND (normalized_path LIKE ? ESCAPE '\' OR normalized_path LIKE ? ESCAPE '\')`,
+		rootID, patterns[0], patterns[1])
 	if err != nil {
 		return 0, 0, err
 	}
@@ -474,7 +665,7 @@ func (c *Catalog) PruneRecoveryPaths(ctx context.Context, rootID string) (int64,
 func (c *Catalog) migrate(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode=WAL;`,
-		`PRAGMA synchronous=NORMAL;`,
+		`PRAGMA synchronous=FULL;`,
 		`PRAGMA busy_timeout=30000;`,
 		`CREATE TABLE IF NOT EXISTS documents (
 			id TEXT PRIMARY KEY,
@@ -633,7 +824,11 @@ func (c *Catalog) ensureContentFTS(ctx context.Context) error {
 }
 
 func NormalizePath(path string) string {
-	return strings.ToLower(filepath.Clean(path))
+	cleaned := filepath.Clean(path)
+	if runtime.GOOS == "windows" || isWindowsRootPath(cleaned) {
+		return strings.ToLower(cleaned)
+	}
+	return cleaned
 }
 
 func rootPathSuffix(path, root string) (string, bool) {
@@ -667,6 +862,21 @@ func embeddedRootPathSuffix(path, root string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// embeddedRootPathLikePatterns finds only paths where the canonical root is
+// nested below another path. The leading '_' keeps ordinary canonical paths
+// out of the candidate set; embeddedRootPathSuffix then verifies the exact
+// segment boundary before any rewrite occurs.
+func embeddedRootPathLikePatterns(root string) []string {
+	parts := normalizedPathParts(root)
+	if len(parts) == 0 {
+		return nil
+	}
+	return []string{
+		"_%" + escapeLike("/"+strings.Join(parts, "/")) + "%",
+		"_%" + escapeLike("\\"+strings.Join(parts, "\\")) + "%",
+	}
 }
 
 func normalizedPathParts(value string) []string {
@@ -787,6 +997,30 @@ func (c *Catalog) FinishCrawl(ctx context.Context, run CrawlRun) error {
 	return tx.Commit()
 }
 
+func (c *Catalog) MarkOpenCrawlsInterrupted(ctx context.Context) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	finished := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE crawl_runs
+		SET finished_at = ?, status = 'interrupted', error_message = 'service stopped before this crawl finished'
+		WHERE finished_at IS NULL AND status IN ('running', 'hint_running')`, finished)
+	if err != nil {
+		return 0, err
+	}
+	changed, _ := res.RowsAffected()
+	if _, err := tx.ExecContext(ctx, `UPDATE root_states
+		SET last_crawl_status = 'interrupted', last_error = 'service stopped before the previous crawl finished'
+		WHERE last_crawl_status IN ('running', 'hint_running')`); err != nil {
+		return 0, err
+	}
+	return changed, tx.Commit()
+}
+
 func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResult, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -861,6 +1095,93 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 		return UpsertResult{}, err
 	}
 	return UpsertResult{Updated: true}, tx.Commit()
+}
+
+// UpsertDocuments commits a metadata batch in one SQLite transaction. Full
+// crawls use this path to avoid serializing one durable commit per file.
+func (c *Catalog) UpsertDocuments(ctx context.Context, docs []Document) ([]UpsertResult, error) {
+	if len(docs) == 0 {
+		return nil, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	results := make([]UpsertResult, 0, len(docs))
+	for _, doc := range docs {
+		result, err := upsertDocumentTx(ctx, tx, doc)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc Document) (UpsertResult, error) {
+	var deleted int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM deleted_roots WHERE root_id = ?)`, doc.RootID).Scan(&deleted); err != nil {
+		return UpsertResult{}, err
+	}
+	if deleted != 0 {
+		return UpsertResult{Unchanged: true}, nil
+	}
+	if doc.AccessStatus == "" {
+		doc.AccessStatus = "metadata_readable"
+	}
+	var existingID, existingSignature string
+	err := tx.QueryRowContext(ctx, `SELECT id, signature FROM documents WHERE root_id = ? AND normalized_path = ?`, doc.RootID, doc.NormalizedPath).Scan(&existingID, &existingSignature)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return UpsertResult{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	modified := doc.ModifiedAt.UTC().Format(time.RFC3339Nano)
+	created := ""
+	if !doc.CreatedAt.IsZero() {
+		created = doc.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		movedFromPath := ""
+		var movedID string
+		if moveErr := tx.QueryRowContext(ctx, `SELECT id, path FROM documents WHERE root_id = ? AND signature = ? AND status = 'missing' ORDER BY last_indexed_at DESC LIMIT 1`, doc.RootID, doc.Signature).Scan(&movedID, &movedFromPath); moveErr == nil {
+			doc.MovedFromPath = movedFromPath
+		}
+		if movedID != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'moved' WHERE id = ?`, movedID); err != nil {
+				return UpsertResult{}, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, ocr_status, content_text, content_hash, hash_status, owner, access_status, moved_from_path, is_folder, signature, missing_count)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', 'not_requested', '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
+			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature); err != nil {
+			return UpsertResult{}, err
+		}
+		if err := upsertFTS(ctx, tx, doc.ID, doc.RootID, doc.Name, doc.Path, doc.Extension, ""); err != nil {
+			return UpsertResult{}, err
+		}
+		return UpsertResult{Added: true}, nil
+	}
+	if existingSignature == doc.Signature {
+		_, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'active', access_status = ?, last_seen_generation = ?, missing_count = 0 WHERE id = ?`, doc.AccessStatus, doc.LastSeenGeneration, existingID)
+		return UpsertResult{Unchanged: true}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE documents
+		SET path = ?, name = ?, extension = ?, size = ?, modified_at = ?, created_at = ?, status = 'active',
+		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
+		WHERE id = ?`,
+		doc.Path, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID); err != nil {
+		return UpsertResult{}, err
+	}
+	if err := upsertFTS(ctx, tx, existingID, doc.RootID, doc.Name, doc.Path, doc.Extension, ""); err != nil {
+		return UpsertResult{}, err
+	}
+	return UpsertResult{Updated: true}, nil
 }
 
 func upsertFTS(ctx context.Context, tx *sql.Tx, id, rootID, name, path, extension, content string) error {
@@ -940,6 +1261,48 @@ func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, st
 	return err
 }
 
+func (c *Catalog) ReleaseContentClaim(ctx context.Context, id, signature string) error {
+	return c.releaseBackgroundClaim(ctx, "content_status", "not_indexed", id, signature)
+}
+
+func (c *Catalog) ReleaseOCRClaim(ctx context.Context, id, signature string) error {
+	return c.releaseBackgroundClaim(ctx, "ocr_status", "pending", id, signature)
+}
+
+func (c *Catalog) ReleaseHashClaim(ctx context.Context, id, signature string) error {
+	return c.releaseBackgroundClaim(ctx, "hash_status", "not_hashed", id, signature)
+}
+
+func (c *Catalog) releaseBackgroundClaim(ctx context.Context, column, pending, id, signature string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.db.ExecContext(ctx, `UPDATE documents SET `+column+` = ? WHERE id = ? AND signature = ? AND `+column+` = 'queued'`, pending, id, signature)
+	return err
+}
+
+// ResetQueuedBackground releases work that was claimed before a controlled
+// stop. No source or document metadata is changed; a subsequent refill simply
+// claims it again using the current path and signature.
+func (c *Catalog) ResetQueuedBackground(ctx context.Context) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, update := range []string{
+		`UPDATE documents SET content_status = 'not_indexed' WHERE content_status = 'queued'`,
+		`UPDATE documents SET ocr_status = 'pending' WHERE ocr_status = 'queued'`,
+		`UPDATE documents SET hash_status = 'not_hashed' WHERE hash_status = 'queued'`,
+	} {
+		if _, err := tx.ExecContext(ctx, update); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (c *Catalog) ClaimPendingContent(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
 	return c.claimPending(ctx, "content_status", "not_indexed", "queued", rootIDs, extract.IndexableExtensions(), limit, maxSize)
 }
@@ -976,7 +1339,10 @@ func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed str
 		}
 	}
 	args = append(args, limit)
-	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ? AND root_id IN (` + rootPlaceholders + `)` + extensionClause + ` LIMIT ?`
+	// New or changed documents receive a fresh last_indexed_at value. Prefer
+	// them over the historical backlog so watcher hints reach the secondary
+	// content/OCR/hash pass promptly after structural indexing is idle.
+	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ? AND root_id IN (` + rootPlaceholders + `)` + extensionClause + ` ORDER BY last_indexed_at DESC, path ASC LIMIT ?`
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -1028,6 +1394,31 @@ func (c *Catalog) MarkMissing(ctx context.Context, rootID string, generation int
 	return missing, tx.Commit()
 }
 
+// MissingDocumentPaths returns records from the previous pass that need a
+// first-class recheck before ordinary traversal resumes. The limit keeps a
+// temporarily unavailable share from turning recovery into an unbounded queue.
+func (c *Catalog) MissingDocumentPaths(ctx context.Context, rootID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := c.db.QueryContext(ctx, `SELECT path FROM documents
+		WHERE root_id = ? AND status = 'missing'
+		ORDER BY missing_count DESC, last_indexed_at ASC, path ASC LIMIT ?`, rootID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	paths := make([]string, 0, limit)
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	return paths, rows.Err()
+}
+
 func (c *Catalog) MarkPathMissing(ctx context.Context, rootID string, path string) (int64, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -1036,21 +1427,6 @@ func (c *Catalog) MarkPathMissing(ctx context.Context, rootID string, path strin
 		SET status = 'missing', access_status = 'missing', missing_count = missing_count + 1
 		WHERE root_id = ? AND status = 'active' AND (normalized_path = ? OR normalized_path LIKE ?)`,
 		rootID, normalized, descendantPathLike(normalized))
-	if err != nil {
-		return 0, err
-	}
-	count, _ := res.RowsAffected()
-	return count, nil
-}
-
-func (c *Catalog) MarkPathInaccessible(ctx context.Context, rootID, path string, generation int64) (int64, error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	normalized := NormalizePath(path)
-	res, err := c.db.ExecContext(ctx, `UPDATE documents
-		SET access_status = 'inaccessible', last_seen_generation = ?
-		WHERE root_id = ? AND status = 'active' AND (normalized_path = ? OR normalized_path LIKE ?)`,
-		generation, rootID, normalized, descendantPathLike(normalized))
 	if err != nil {
 		return 0, err
 	}
@@ -1119,6 +1495,16 @@ func (c *Catalog) MarkDirectoryCheckpoint(ctx context.Context, rootID string, pa
 	return err
 }
 
+// ClearRootCheckpoints forces a complete re-enumeration without changing any
+// document state. It is used after an incomplete traversal or path migration,
+// where resuming a completed parent could otherwise hide unfinished children.
+func (c *Catalog) ClearRootCheckpoints(ctx context.Context, rootID string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.db.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ?`, rootID)
+	return err
+}
+
 func (c *Catalog) DirectoryCheckpointed(ctx context.Context, rootID string, path string) (bool, error) {
 	var existing string
 	err := c.db.QueryRowContext(ctx, `SELECT normalized_path FROM crawl_checkpoints WHERE root_id = ? AND normalized_path = ?`,
@@ -1159,6 +1545,26 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	}
 	if limit <= 0 {
 		limit = 50
+	}
+	if len(req.Filters.Roots) > 100 {
+		return SearchResponse{}, &RequestError{Code: "too_many_roots", Message: "at most 100 roots are supported"}
+	}
+	if len(req.Filters.Extensions) > 100 {
+		return SearchResponse{}, &RequestError{Code: "too_many_extensions", Message: "at most 100 extensions are supported"}
+	}
+	if req.Filters.ModifiedAfter != "" {
+		value, err := time.Parse(time.RFC3339, req.Filters.ModifiedAfter)
+		if err != nil {
+			return SearchResponse{}, &RequestError{Code: "invalid_modified_after", Message: "modified_after must be RFC3339"}
+		}
+		req.Filters.ModifiedAfter = value.UTC().Format(time.RFC3339Nano)
+	}
+	if req.Filters.ModifiedBefore != "" {
+		value, err := time.Parse(time.RFC3339, req.Filters.ModifiedBefore)
+		if err != nil {
+			return SearchResponse{}, &RequestError{Code: "invalid_modified_before", Message: "modified_before must be RFC3339"}
+		}
+		req.Filters.ModifiedBefore = value.UTC().Format(time.RFC3339Nano)
 	}
 	args := []any{}
 	where := []string{"d.status = 'active'"}
@@ -1396,6 +1802,9 @@ func searchOrder(sort, direction string, hasQuery bool) (string, error) {
 func pathChildPrefix(path string) string {
 	normalized := NormalizePath(path)
 	separator := string(filepath.Separator)
+	if isWindowsRootPath(normalized) {
+		separator = "\\"
+	}
 	if strings.HasSuffix(normalized, separator) {
 		return normalized
 	}

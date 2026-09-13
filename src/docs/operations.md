@@ -191,10 +191,24 @@ Use `GET /admin/v1/diagnostics` or the UI diagnostics view. It includes:
 - Root states.
 - Recent crawls.
 - Crawler metrics.
-- Log availability.
+- Recent service log lines.
 
 HTTP request logs include method, path, status, duration, bytes, and remote.
 Admin mutations log root IDs, counts, paths, and failure reasons.
+
+QIndexer writes an append-only log file at:
+
+```text
+<data_dir>/logs/qindexer.log
+```
+
+The file log uses debug level and includes source locations. Recovered panics
+from HTTP handlers, crawler routines, and extraction failures include stack
+traces so a crash-class failure leaves evidence in the UI and on disk.
+
+On startup, any crawl records left in `running` or `hint_running` state are
+marked `interrupted`, and the root state records that the prior service stopped
+before the crawl finished.
 
 ## Troubleshooting
 
@@ -240,8 +254,13 @@ Wrong display path:
 
 ## Windows Service
 
-Install with your preferred service wrapper or deployment tooling. The binary
-supports:
+Use the installer script from the repository root:
+
+```powershell
+.\scripts\install-qindexer.ps1 -InstallDir "C:\Program Files\QIndexer" -ConfigPath .\src\configs\windows-nas.example.yaml -InstallSidecars -InstallService -StartService
+```
+
+The binary also supports direct service wrappers:
 
 ```powershell
 qindexer_windows_amd64.exe run --config C:\ProgramData\QIndexer\config.yaml
@@ -250,6 +269,17 @@ qindexer_windows_amd64.exe run --config C:\ProgramData\QIndexer\config.yaml
 Run as an account with read access to every root.
 
 ## systemd
+
+Use the Linux installer script from the repository root:
+
+```bash
+./scripts/install-qindexer-linux.sh --install-dir /opt/qindexer --config ./src/configs/linux-nas.example.yaml --install-sidecars --install-service --start-service
+```
+
+`--install-sidecars` attempts the available package manager, then verifies
+`tesseract`, `ocrmypdf`, `gs`, and `pdftotext`. If your distro uses different
+package names, install those commands manually or set explicit command paths in
+`qindexer.yaml`.
 
 Example unit:
 

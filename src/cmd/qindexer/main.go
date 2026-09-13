@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 
+	"qindexer/internal/catalog"
 	"qindexer/internal/service"
 	"qindexer/internal/version"
 )
@@ -28,18 +29,30 @@ func run(log *slog.Logger) error {
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
 		configPath := fs.String("config", "configs/example.yaml", "path to config file")
 		_ = fs.Parse(os.Args[2:])
-		return service.App{ConfigPath: *configPath, Logger: log}.Run(service.SignalContext())
+		return service.App{ConfigPath: *configPath}.Run(service.SignalContext())
 	case "crawl":
 		fs := flag.NewFlagSet("crawl", flag.ExitOnError)
 		configPath := fs.String("config", "configs/example.yaml", "path to config file")
 		rootID := fs.String("root", "", "root id to crawl; empty crawls all enabled roots")
 		_ = fs.Parse(os.Args[2:])
-		return service.App{ConfigPath: *configPath, Logger: log}.CrawlOnce(service.SignalContext(), *rootID)
+		return service.App{ConfigPath: *configPath}.CrawlOnce(service.SignalContext(), *rootID)
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		configPath := fs.String("config", "configs/example.yaml", "path to config file")
 		_ = fs.Parse(os.Args[2:])
 		return service.App{ConfigPath: *configPath, Logger: log}.Status(service.SignalContext())
+	case "db-check":
+		fs := flag.NewFlagSet("db-check", flag.ExitOnError)
+		databasePath := fs.String("database", "", "SQLite database file to validate read-only")
+		_ = fs.Parse(os.Args[2:])
+		if *databasePath == "" {
+			return fmt.Errorf("--database is required")
+		}
+		if err := catalog.CheckDatabase(service.SignalContext(), *databasePath); err != nil {
+			return err
+		}
+		fmt.Printf("database integrity check passed: %s\n", *databasePath)
+		return nil
 	case "version":
 		fmt.Printf("qindexer %s (%s)\n", version.Version, version.Commit)
 		return nil
@@ -54,7 +67,8 @@ func usage() {
 
 Usage:
   qindexer run --config configs/example.yaml
-  qindexer crawl --config configs/example.yaml [--root root-id]
-  qindexer status --config configs/example.yaml
-  qindexer version`)
+	  qindexer crawl --config configs/example.yaml [--root root-id]
+	  qindexer status --config configs/example.yaml
+	  qindexer db-check --database path/to/qsurfer-search.db
+	  qindexer version`)
 }

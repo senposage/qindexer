@@ -1,6 +1,10 @@
 package extract
 
-import "testing"
+import (
+	"os/exec"
+	"strings"
+	"testing"
+)
 
 func TestOCREligible(t *testing.T) {
 	for _, path := range []string{"scan.pdf", "photo.PNG", "receipt.tiff", "diagram.webp"} {
@@ -21,5 +25,16 @@ func TestOCRRejectsUnsupportedEngineAndInputs(t *testing.T) {
 	}
 	if status, _, err := OCR(t.Context(), "scan.pdf", OCROptions{Engine: "tesseract"}); err == nil || status != "unsupported" {
 		t.Fatalf("PDF tesseract result = %q, %v", status, err)
+	}
+}
+
+func TestCommandErrorDoesNotExposeConfiguredPath(t *testing.T) {
+	configured := `Z:\private\tools\ocrmypdf.exe`
+	err := commandError(configured, exec.ErrNotFound)
+	if strings.Contains(err.Error(), configured) || strings.Contains(strings.ToLower(err.Error()), "private") {
+		t.Fatalf("command error exposed configured path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ocrmypdf.exe") {
+		t.Fatalf("command error = %v", err)
 	}
 }

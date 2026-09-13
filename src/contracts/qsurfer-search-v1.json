@@ -13,7 +13,7 @@
     "limit": 2,
     "offset": 0,
     "sort": "modified",
-    "direction": "desc"
+    "sort_direction": "desc"
   },
   "required_response_fields": [
     "search_id",

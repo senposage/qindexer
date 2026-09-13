@@ -388,7 +388,59 @@ func Save(path string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0600)
+	file, err := os.CreateTemp(filepath.Dir(path), ".qindexer-config-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := file.Name()
+	defer os.Remove(temporaryPath)
+	if err := file.Chmod(0600); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := file.Write(b); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
+}
+
+// Clone returns an independent configuration snapshot for long-running work.
+func Clone(source *Config) *Config {
+	if source == nil {
+		return &Config{}
+	}
+	copyConfig := *source
+	copyConfig.Server.BindAddresses = append([]string(nil), source.Server.BindAddresses...)
+	copyConfig.Management.BindAddresses = append([]string(nil), source.Management.BindAddresses...)
+	copyConfig.Crawler.PauseWindows = make([]PauseWindow, len(source.Crawler.PauseWindows))
+	for i, window := range source.Crawler.PauseWindows {
+		copyConfig.Crawler.PauseWindows[i] = PauseWindow{Start: window.Start, End: window.End, Days: append([]string(nil), window.Days...)}
+	}
+	copyConfig.Roots = make([]RootConfig, len(source.Roots))
+	for i, root := range source.Roots {
+		copyConfig.Roots[i] = root
+		copyConfig.Roots[i].Labels = append([]string(nil), root.Labels...)
+		copyConfig.Roots[i].IncludeExtensions = append([]string(nil), root.IncludeExtensions...)
+		copyConfig.Roots[i].ExcludeExtensions = append([]string(nil), root.ExcludeExtensions...)
+		copyConfig.Roots[i].IncludeFilePatterns = append([]string(nil), root.IncludeFilePatterns...)
+		copyConfig.Roots[i].ExcludeFilePatterns = append([]string(nil), root.ExcludeFilePatterns...)
+		copyConfig.Roots[i].IncludeFolderPatterns = append([]string(nil), root.IncludeFolderPatterns...)
+		copyConfig.Roots[i].ExcludeFolderPatterns = append([]string(nil), root.ExcludeFolderPatterns...)
+		copyConfig.Roots[i].ExcludePatterns = append([]string(nil), root.ExcludePatterns...)
+		copyConfig.Roots[i].PathAliases = append([]PathAlias(nil), root.PathAliases...)
+	}
+	return &copyConfig
 }
 
 func (a AuthConfig) ResolveToken(baseDir string) (string, error) {

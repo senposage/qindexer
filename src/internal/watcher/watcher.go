@@ -18,9 +18,11 @@ import (
 
 type Watcher struct {
 	cfg     *config.Config
+	cfgMu   sync.RWMutex
 	crawler *crawler.Crawler
 	log     *slog.Logger
 	ignore  string
+	reload  chan struct{}
 }
 
 type dirtyPath struct {
@@ -29,24 +31,56 @@ type dirtyPath struct {
 }
 
 func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
-	return &Watcher{cfg: cfg, crawler: cr, log: log, ignore: filepath.Clean(ignorePath)}
+	return &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1)}
+}
+
+func (w *Watcher) ApplyConfig(cfg *config.Config) {
+	w.cfgMu.Lock()
+	w.cfg = config.Clone(cfg)
+	w.cfgMu.Unlock()
+	select {
+	case w.reload <- struct{}{}:
+	default:
+	}
+}
+
+func (w *Watcher) snapshot() *config.Config {
+	w.cfgMu.RLock()
+	defer w.cfgMu.RUnlock()
+	return w.cfg
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
-	if !w.cfg.Watcher.Enabled {
+	for {
+		reload, err := w.run(ctx)
+		if err != nil || ctx.Err() != nil || !reload {
+			return err
+		}
+		w.log.Info("filesystem watcher reloading configuration")
+	}
+}
+
+func (w *Watcher) run(ctx context.Context) (bool, error) {
+	cfg := w.snapshot()
+	if !cfg.Watcher.Enabled {
 		w.log.Info("filesystem watcher disabled")
-		return nil
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-w.reload:
+			return true, nil
+		}
 	}
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		w.log.Warn("filesystem watcher unavailable", "error", err)
-		return nil
+		return false, nil
 	}
 	defer fsw.Close()
 
 	rootsByPath := map[string]string{}
 	watched := 0
-	for _, root := range w.cfg.Roots {
+	for _, root := range cfg.Roots {
 		if !root.Enabled {
 			continue
 		}
@@ -56,13 +90,13 @@ func (w *Watcher) Run(ctx context.Context) error {
 			continue
 		}
 		for _, path := range paths {
-			n, err := w.watchTree(fsw, root, path, rootsByPath, w.cfg.Watcher.MaxWatchedDirectories-watched)
+			n, err := w.watchTree(ctx, fsw, root, path, rootsByPath, cfg.Watcher.MaxWatchedDirectories-watched)
 			watched += n
 			if err != nil {
 				w.log.Warn("watch tree incomplete", "root", root.ID, "path", path, "watched", watched, "error", err)
 			}
-			if watched >= w.cfg.Watcher.MaxWatchedDirectories {
-				w.log.Warn("watch directory limit reached", "limit", w.cfg.Watcher.MaxWatchedDirectories)
+			if watched >= cfg.Watcher.MaxWatchedDirectories {
+				w.log.Warn("watch directory limit reached", "limit", cfg.Watcher.MaxWatchedDirectories)
 				break
 			}
 		}
@@ -76,7 +110,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		if timer != nil {
 			timer.Stop()
 		}
-		timer = time.NewTimer(w.cfg.Watcher.Debounce())
+		timer = time.NewTimer(cfg.Watcher.Debounce())
 	}
 
 	for {
@@ -86,12 +120,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
-			return nil
-		case err := <-fsw.Errors:
+			return false, nil
+		case <-w.reload:
+			return true, nil
+		case err, ok := <-fsw.Errors:
+			if !ok {
+				return false, nil
+			}
 			if err != nil {
 				w.log.Warn("filesystem watcher error", "error", err)
 			}
-		case event := <-fsw.Events:
+		case event, ok := <-fsw.Events:
+			if !ok {
+				return false, nil
+			}
 			if w.shouldIgnore(event.Name) {
 				continue
 			}
@@ -116,18 +158,21 @@ func (w *Watcher) Run(ctx context.Context) error {
 			dirty = map[string]map[string]dirtyPath{}
 			timer = nil
 			mu.Unlock()
-			w.flush(ctx, batch)
+			w.flush(ctx, batch, cfg)
 		}
 	}
 }
 
-func (w *Watcher) watchTree(fsw *fsnotify.Watcher, root config.RootConfig, path string, rootsByPath map[string]string, remaining int) (int, error) {
+func (w *Watcher) watchTree(ctx context.Context, fsw *fsnotify.Watcher, root config.RootConfig, path string, rootsByPath map[string]string, remaining int) (int, error) {
 	info, err := os.Stat(path)
 	if err != nil || !info.IsDir() {
 		return 0, err
 	}
 	count := 0
 	err = filepath.WalkDir(path, func(p string, entry fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			return nil
 		}
@@ -170,8 +215,8 @@ func (w *Watcher) tryWatchCreatedDirectory(fsw *fsnotify.Watcher, path string, r
 	return nil
 }
 
-func (w *Watcher) flush(ctx context.Context, batch map[string]map[string]dirtyPath) {
-	limit := w.cfg.Watcher.MaxDirtyPathsPerFlush
+func (w *Watcher) flush(ctx context.Context, batch map[string]map[string]dirtyPath, cfg *config.Config) {
+	limit := cfg.Watcher.MaxDirtyPathsPerFlush
 	for rootID, paths := range batch {
 		count := 0
 		for _, dirty := range paths {

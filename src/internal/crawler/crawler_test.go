@@ -1,11 +1,13 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,5 +134,145 @@ func TestNormalCrawlWaitsForAdaptivePause(t *testing.T) {
 	defer cancel()
 	if err := c.waitIfPaused(ctx, true); err != context.DeadlineExceeded {
 		t.Fatalf("normal crawl should wait until context ends, got %v", err)
+	}
+}
+
+func TestRootWorkIsVisibleToStopAndWait(t *testing.T) {
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	workCtx, finish, started := c.beginRootWork(context.Background(), "share")
+	if !started {
+		t.Fatal("root work did not start")
+	}
+	if !c.IsRootRunning("share") {
+		t.Fatal("root work was not registered")
+	}
+	if roots := c.CancelAll(); len(roots) != 1 || roots[0] != "share" {
+		t.Fatalf("cancel roots = %#v, want share", roots)
+	}
+	select {
+	case <-workCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("root work context was not cancelled")
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if c.WaitAll(waitCtx) {
+		t.Fatal("work reported stopped before it finalized")
+	}
+	finish()
+	waitCtx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if !c.WaitAll(waitCtx) {
+		t.Fatal("work did not finalize after finish")
+	}
+}
+
+func TestRepeatedUnreachableLogsAreSuppressed(t *testing.T) {
+	var buf bytes.Buffer
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(&buf, nil)))
+	for range 3 {
+		c.logSuppressed("root-stat:share:/missing", "root path stat failed", "no such file or directory", time.Hour, "root", "share")
+	}
+	text := buf.String()
+	if got := strings.Count(text, "root path stat failed"); got != 1 {
+		t.Fatalf("logged %d repeated failures, want 1: %s", got, text)
+	}
+	c.logSuppressed("root-stat:share:/missing", "root path stat failed", "permission denied", time.Hour, "root", "share")
+	if got := strings.Count(buf.String(), "root path stat failed"); got != 2 {
+		t.Fatalf("changed error was not logged: %s", buf.String())
+	}
+}
+
+func TestUnreachableRootLeavesExistingDocumentStateUntouched(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	missingRoot := filepath.Join(t.TempDir(), "missing-share")
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "share", Path: missingRoot, Enabled: true}}}
+	doc := catalog.Document{
+		ID:                 "existing",
+		RootID:             "share",
+		Path:               filepath.Join(missingRoot, "case.docx"),
+		NormalizedPath:     catalog.NormalizePath(filepath.Join(missingRoot, "case.docx")),
+		Name:               "case.docx",
+		Extension:          "docx",
+		Size:               1,
+		ModifiedAt:         time.Now().UTC(),
+		LastSeenGeneration: 1,
+		Signature:          catalog.Signature(1, time.Now().UTC()),
+		AccessStatus:       "metadata_readable",
+	}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	c := New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := c.CrawlRoot(ctx, "share")
+	if err == nil || run.Status != "unreachable" {
+		t.Fatalf("crawl = %#v, err=%v; want unreachable error", run, err)
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"share"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Status != "active" || resp.Results[0].AccessStatus != "metadata_readable" {
+		t.Fatalf("unreachable root changed existing document state: %#v", resp.Results)
+	}
+	states, err := cat.RootStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states["share"].MissingCount != 0 {
+		t.Fatalf("missing count = %d, want 0", states["share"].MissingCount)
+	}
+}
+
+func TestHintStatFailureLeavesExistingDocumentStateUntouched(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	rootDir := t.TempDir()
+	path := filepath.Join(rootDir, "case.docx")
+	modified := time.Now().UTC()
+	doc := catalog.Document{
+		ID:                 "existing",
+		RootID:             "share",
+		Path:               path,
+		NormalizedPath:     catalog.NormalizePath(path),
+		Name:               "case.docx",
+		Extension:          "docx",
+		Size:               1,
+		ModifiedAt:         modified,
+		LastSeenGeneration: 1,
+		Signature:          catalog.Signature(1, modified),
+		AccessStatus:       "metadata_readable",
+	}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "share", Path: rootDir, Enabled: true}}}
+	c := New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := c.CrawlHint(ctx, "share", path, false)
+	if err != nil || run.Status != "hint_unreachable" {
+		t.Fatalf("hint = %#v, err=%v; want hint_unreachable without catalog error", run, err)
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"share"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Status != "active" || resp.Results[0].AccessStatus != "metadata_readable" {
+		t.Fatalf("hint stat failure changed existing document state: %#v", resp.Results)
+	}
+	states, err := cat.RootStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states["share"].MissingCount != 0 {
+		t.Fatalf("missing count = %d, want 0", states["share"].MissingCount)
 	}
 }
