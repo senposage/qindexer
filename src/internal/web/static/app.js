@@ -349,8 +349,10 @@ function renderBackgroundActivity(selector, activity, label, deferred) {
   const current = activity || {};
   const path = current.current_path || current.last_path || "";
   const filename = path ? path.replace(/\\/g, "/").split("/").pop() : "";
-  const state = Number(current.active_count || 0) > 0 ? `Processing${Number(current.active_count) > 1 ? ` (${current.active_count})` : ""}` : (deferred ? "Deferred" : "Idle");
-  target.textContent = filename ? `${state}: ${filename}` : state;
+  const active = Number(current.active_count || 0) > 0;
+  const state = active ? `Processing${Number(current.active_count) > 1 ? ` (${current.active_count})` : ""}` : (deferred ? "Deferred" : "Idle");
+  const labelText = active ? state : (current.last_error ? "Failed" : (filename ? "Last" : state));
+  target.textContent = filename ? `${labelText}: ${filename}` : state;
   target.title = current.last_error || path || `${label} ${state.toLowerCase()}`;
 }
 

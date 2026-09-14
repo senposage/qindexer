@@ -9,11 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 )
 
-const maxTextBytes = 4 << 20
+const (
+	maxTextBytes          = 4 << 20
+	maxExtractionErrorLen = 320
+)
 
 var ErrUnsupported = errors.New("content extraction is unsupported for this file type")
 
@@ -46,8 +50,41 @@ func withRecover(fn func() (string, error)) (text string, err error) {
 			text = ""
 			err = fmt.Errorf("content extraction panic: %v", value)
 		}
+		if err != nil {
+			err = summarizeError(err)
+		}
 	}()
 	return fn()
+}
+
+// summarizeError keeps malformed input from injecting raw document data into
+// service logs, API status, or the administration UI.
+func summarizeError(err error) error {
+	message := err.Error()
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "malformed hex string"), strings.Contains(lower, "unexpected delimiter"), strings.Contains(lower, "malformed name"):
+		return errors.New("malformed PDF content")
+	case strings.Contains(lower, "missing %%eof"), strings.Contains(lower, "not a pdf file"):
+		return errors.New("invalid or incomplete PDF")
+	case strings.Contains(lower, "encrypted pdf"):
+		return errors.New("encrypted PDF cannot be read")
+	}
+
+	var builder strings.Builder
+	for _, r := range message {
+		if unicode.IsPrint(r) {
+			builder.WriteRune(r)
+		} else if unicode.IsSpace(r) {
+			builder.WriteByte(' ')
+		} else {
+			builder.WriteByte('?')
+		}
+		if builder.Len() >= maxExtractionErrorLen {
+			return errors.New(strings.TrimSpace(builder.String()) + " [truncated]")
+		}
+	}
+	return errors.New(strings.TrimSpace(builder.String()))
 }
 
 // Text returns best-effort text for common office, PDF, and plain-text files.
