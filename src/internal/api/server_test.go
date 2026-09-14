@@ -128,6 +128,30 @@ func TestRequestAccessLogIsSeparateFromOperationalLog(t *testing.T) {
 	}
 }
 
+func TestNewRootUsesEditableJunkRuleDefaults(t *testing.T) {
+	root := rootConfigFromUpdate("new-root", rootRulesUpdate{Path: `X:\Shared`, Enabled: true})
+	if !hasString(root.ExcludeFilePatterns, "~$*") || !hasString(root.ExcludeFilePatterns, "Thumbs.db") {
+		t.Fatalf("missing default file exclusions: %v", root.ExcludeFilePatterns)
+	}
+	if !hasString(root.ExcludeFolderPatterns, "**/@eaDir/**") || !hasString(root.ExcludeFolderPatterns, "**/$RECYCLE.BIN/**") {
+		t.Fatalf("missing default folder exclusions: %v", root.ExcludeFolderPatterns)
+	}
+
+	root = rootConfigFromUpdate("empty-rules", rootRulesUpdate{Path: `X:\Shared`, ExcludeFilePatterns: []string{}, ExcludeFolderPatterns: []string{}})
+	if len(root.ExcludeFilePatterns) != 0 || len(root.ExcludeFolderPatterns) != 0 {
+		t.Fatalf("explicitly empty exclusions must be preserved: %#v", root)
+	}
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPublicAdminStatusDoesNotExposeRootDetails(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))

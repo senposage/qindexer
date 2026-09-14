@@ -2,6 +2,16 @@ const tokenInput = document.querySelector("#token");
 const message = document.querySelector("#message");
 const endpoint = document.querySelector("#endpoint");
 
+const defaultRootExcludeFilePatterns = [
+  "~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*",
+  "*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo",
+];
+const defaultRootExcludeFolderPatterns = [
+  "**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**",
+  "**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
+  "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
+];
+
 const state = {
   token: sessionStorage.getItem("qindexer.admin.token") || "",
   roots: [],
@@ -435,9 +445,9 @@ function openNewRoot() {
   document.querySelector("#rules-include-ext").value = "";
   document.querySelector("#rules-exclude-ext").value = "";
   document.querySelector("#rules-include-file").value = "";
-  document.querySelector("#rules-exclude-file").value = "";
+  document.querySelector("#rules-exclude-file").value = lines(defaultRootExcludeFilePatterns);
   document.querySelector("#rules-include-folder").value = "";
-  document.querySelector("#rules-exclude-folder").value = "";
+  document.querySelector("#rules-exclude-folder").value = lines(defaultRootExcludeFolderPatterns);
   document.querySelector("#rules-exclude-legacy").value = "";
   document.querySelector("#rules-extraction").checked = Boolean(state.crawler.content_extraction?.enabled);
   document.querySelector("#rules-ocr").checked = Boolean(state.crawler.ocr?.enabled);

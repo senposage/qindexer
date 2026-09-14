@@ -64,6 +64,17 @@ type repairProgress struct {
 
 const maxRequestBodyBytes = 1 << 20
 
+var defaultRootExcludeFilePatterns = []string{
+	"~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*",
+	"*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo",
+}
+
+var defaultRootExcludeFolderPatterns = []string{
+	"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**",
+	"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
+	"**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
+}
+
 type rootAliasView struct {
 	AliasID   string `json:"alias_id"`
 	Platform  string `json:"platform"`
@@ -1176,12 +1187,20 @@ func (s *Server) createRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func rootConfigFromUpdate(rootID string, req rootRulesUpdate) config.RootConfig {
+	excludeFiles := cleanList(req.ExcludeFilePatterns, false)
+	if req.ExcludeFilePatterns == nil {
+		excludeFiles = append([]string(nil), defaultRootExcludeFilePatterns...)
+	}
+	excludeFolders := cleanList(req.ExcludeFolderPatterns, false)
+	if req.ExcludeFolderPatterns == nil {
+		excludeFolders = append([]string(nil), defaultRootExcludeFolderPatterns...)
+	}
 	return config.RootConfig{
 		ID: rootID, Name: strings.TrimSpace(req.Name), Path: strings.TrimSpace(req.Path), Enabled: req.Enabled,
 		Labels: cleanList(req.Labels, false), CredentialRef: strings.TrimSpace(req.CredentialRef),
 		IncludeExtensions: cleanExtensions(req.IncludeExtensions), ExcludeExtensions: cleanExtensions(req.ExcludeExtensions),
-		IncludeFilePatterns: cleanList(req.IncludeFilePatterns, false), ExcludeFilePatterns: cleanList(req.ExcludeFilePatterns, false),
-		IncludeFolderPatterns: cleanList(req.IncludeFolderPatterns, false), ExcludeFolderPatterns: cleanList(req.ExcludeFolderPatterns, false),
+		IncludeFilePatterns: cleanList(req.IncludeFilePatterns, false), ExcludeFilePatterns: excludeFiles,
+		IncludeFolderPatterns: cleanList(req.IncludeFolderPatterns, false), ExcludeFolderPatterns: excludeFolders,
 		ExcludePatterns:   cleanList(req.ExcludePatterns, false),
 		PathAliases:       cleanPathAliases(req.PathAliases),
 		ContentExtraction: req.ContentExtraction,
