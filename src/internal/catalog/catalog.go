@@ -20,16 +20,33 @@ import (
 )
 
 type Catalog struct {
-	db      *sql.DB
-	writeMu sync.Mutex
-	statsMu sync.Mutex
-	stats   indexStatsCache
+	db        *sql.DB
+	writeMu   sync.Mutex
+	statsMu   sync.Mutex
+	stats     indexStatsCache
+	backlogMu sync.Mutex
+	backlog   backgroundBacklogCache
 }
 
 type indexStatsCache struct {
 	at    time.Time
 	value IndexStats
 }
+
+const indexStatsCacheTTL = 30 * time.Second
+
+type BackgroundBacklog struct {
+	Content int64
+	OCR     int64
+	Hash    int64
+}
+
+type backgroundBacklogCache struct {
+	at    time.Time
+	value BackgroundBacklog
+}
+
+const backgroundBacklogCacheTTL = 15 * time.Second
 
 // FolderActivity is a compact, persisted signal used to allocate a bounded
 // filesystem-watch budget. It is deliberately separate from documents.
@@ -800,36 +817,67 @@ func (c *Catalog) HotFolders(ctx context.Context, rootIDs []string, halfLife tim
 func (c *Catalog) IndexStats(ctx context.Context) (IndexStats, error) {
 	c.statsMu.Lock()
 	defer c.statsMu.Unlock()
-	if time.Since(c.stats.at) < 5*time.Second {
+	if time.Since(c.stats.at) < indexStatsCacheTTL {
 		return c.stats.value, nil
 	}
 	var stats IndexStats
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE status = 'active' AND is_folder = 0`).Scan(&stats.Files); err != nil {
-		return IndexStats{}, err
-	}
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE status = 'active' AND is_folder = 1`).Scan(&stats.Folders); err != nil {
-		return IndexStats{}, err
-	}
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT extension) FROM documents WHERE status = 'active' AND is_folder = 0`).Scan(&stats.Types); err != nil {
-		return IndexStats{}, err
-	}
-	rows, err := c.db.QueryContext(ctx, `SELECT extension, COUNT(*) FROM documents WHERE status = 'active' AND is_folder = 0 GROUP BY extension ORDER BY COUNT(*) DESC, extension ASC LIMIT 8`)
+	rows, err := c.db.QueryContext(ctx, `SELECT is_folder, extension, COUNT(*) FROM documents WHERE status = 'active' GROUP BY is_folder, extension`)
 	if err != nil {
 		return IndexStats{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
+		var isFolder bool
 		var item ExtensionCount
-		if err := rows.Scan(&item.Extension, &item.Count); err != nil {
+		if err := rows.Scan(&isFolder, &item.Extension, &item.Count); err != nil {
 			return IndexStats{}, err
 		}
+		if isFolder {
+			stats.Folders += item.Count
+			continue
+		}
+		stats.Files += item.Count
+		stats.Types++
 		stats.Extensions = append(stats.Extensions, item)
 	}
 	if err := rows.Err(); err != nil {
 		return IndexStats{}, err
 	}
+	sort.Slice(stats.Extensions, func(i, j int) bool {
+		if stats.Extensions[i].Count == stats.Extensions[j].Count {
+			return stats.Extensions[i].Extension < stats.Extensions[j].Extension
+		}
+		return stats.Extensions[i].Count > stats.Extensions[j].Count
+	})
+	if len(stats.Extensions) > 8 {
+		stats.Extensions = stats.Extensions[:8]
+	}
 	c.stats = indexStatsCache{at: time.Now(), value: stats}
 	return stats, nil
+}
+
+// BackgroundBacklog reports every eligible document still waiting for content,
+// OCR, or hashing. Unlike worker-channel depth it is not capped by queue size.
+func (c *Catalog) BackgroundBacklog(ctx context.Context) (BackgroundBacklog, error) {
+	c.backlogMu.Lock()
+	defer c.backlogMu.Unlock()
+	if time.Since(c.backlog.at) < backgroundBacklogCacheTTL {
+		return c.backlog.value, nil
+	}
+	extensions := extract.IndexableExtensions()
+	placeholders := placeholders(len(extensions))
+	args := stringsToAny(extensions)
+	query := `SELECT
+		SUM(CASE WHEN content_status IN ('not_indexed', 'queued') AND extension IN (` + placeholders + `) THEN 1 ELSE 0 END),
+		SUM(CASE WHEN ocr_status IN ('pending', 'queued') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN hash_status IN ('not_hashed', 'queued') THEN 1 ELSE 0 END)
+		FROM documents WHERE status = 'active' AND is_folder = 0`
+	var backlog BackgroundBacklog
+	if err := c.db.QueryRowContext(ctx, query, args...).Scan(&backlog.Content, &backlog.OCR, &backlog.Hash); err != nil {
+		return BackgroundBacklog{}, err
+	}
+	c.backlog = backgroundBacklogCache{at: time.Now(), value: backlog}
+	return backlog, nil
 }
 
 func decayActivity(score float64, elapsed, halfLife time.Duration) float64 {

@@ -1751,15 +1751,6 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 			"duration_ms", duration.Milliseconds(),
 			"remote", r.RemoteAddr,
 		)
-		if recorder.status >= http.StatusBadRequest || duration >= 2*time.Second {
-			s.log.Log(r.Context(), level, "http request needs attention",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", recorder.status,
-				"duration_ms", duration.Milliseconds(),
-				"remote", r.RemoteAddr,
-			)
-		}
 	})
 }
 

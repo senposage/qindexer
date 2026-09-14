@@ -74,11 +74,29 @@ type Crawler struct {
 	backgroundEnd       context.CancelFunc
 	backgroundN         int64
 	backgroundZero      chan struct{}
+	contentActivity     backgroundActivity
+	ocrActivity         backgroundActivity
+	hashActivity        backgroundActivity
 }
 
 type backgroundJob struct {
 	id, rootID, path, signature string
 	size                        int64
+}
+
+// BackgroundActivity exposes the current and most recently completed
+// enrichment target without retaining file content or opening another query.
+type BackgroundActivity struct {
+	ActiveCount         int    `json:"active_count"`
+	CurrentPath         string `json:"current_path,omitempty"`
+	LastPath            string `json:"last_path,omitempty"`
+	LastError           string `json:"last_error,omitempty"`
+	LastCompletedAtUnix int64  `json:"last_completed_at_unix,omitempty"`
+}
+
+type backgroundActivity struct {
+	mu sync.RWMutex
+	BackgroundActivity
 }
 
 // throughputSample is a one-second counter snapshot. Totals remain available
@@ -159,31 +177,34 @@ func (c *Crawler) HotFolders(ctx context.Context, rootIDs []string, halfLife tim
 }
 
 type Stats struct {
-	StartedAt         time.Time       `json:"started_at"`
-	UptimeSeconds     float64         `json:"uptime_seconds"`
-	ActiveCrawls      int64           `json:"active_crawls"`
-	ActiveRoots       []string        `json:"active_roots"`
-	InitialCrawls     int64           `json:"initial_crawls"`
-	FilesStatted      int64           `json:"files_statted"`
-	DirectoriesRead   int64           `json:"directories_read"`
-	BytesStatted      int64           `json:"bytes_statted"`
-	FilesPerSecond    float64         `json:"files_per_second"`
-	DirsPerSecond     float64         `json:"directories_per_second"`
-	BytesPerSecond    float64         `json:"bytes_per_second"`
-	HintCrawls        int64           `json:"hint_crawls"`
-	FullCrawls        int64           `json:"full_crawls"`
-	LastActivityUnix  int64           `json:"last_activity_unix"`
-	Paused            bool            `json:"paused"`
-	PausedUntilUnix   int64           `json:"paused_until_unix"`
-	PauseReason       string          `json:"pause_reason,omitempty"`
-	AdaptivePaused    bool            `json:"adaptive_paused"`
-	CPUPercent        float64         `json:"cpu_percent"`
-	DiskBusyPercent   float64         `json:"disk_busy_percent"`
-	NextFullCrawlUnix int64           `json:"next_full_crawl_unix"`
-	ContentQueueDepth int             `json:"content_queue_depth"`
-	OCRQueueDepth     int             `json:"ocr_queue_depth"`
-	HashQueueDepth    int             `json:"hash_queue_depth"`
-	ActiveProgress    []CrawlProgress `json:"active_progress"`
+	StartedAt         time.Time          `json:"started_at"`
+	UptimeSeconds     float64            `json:"uptime_seconds"`
+	ActiveCrawls      int64              `json:"active_crawls"`
+	ActiveRoots       []string           `json:"active_roots"`
+	InitialCrawls     int64              `json:"initial_crawls"`
+	FilesStatted      int64              `json:"files_statted"`
+	DirectoriesRead   int64              `json:"directories_read"`
+	BytesStatted      int64              `json:"bytes_statted"`
+	FilesPerSecond    float64            `json:"files_per_second"`
+	DirsPerSecond     float64            `json:"directories_per_second"`
+	BytesPerSecond    float64            `json:"bytes_per_second"`
+	HintCrawls        int64              `json:"hint_crawls"`
+	FullCrawls        int64              `json:"full_crawls"`
+	LastActivityUnix  int64              `json:"last_activity_unix"`
+	Paused            bool               `json:"paused"`
+	PausedUntilUnix   int64              `json:"paused_until_unix"`
+	PauseReason       string             `json:"pause_reason,omitempty"`
+	AdaptivePaused    bool               `json:"adaptive_paused"`
+	CPUPercent        float64            `json:"cpu_percent"`
+	DiskBusyPercent   float64            `json:"disk_busy_percent"`
+	NextFullCrawlUnix int64              `json:"next_full_crawl_unix"`
+	ContentQueueDepth int64              `json:"content_queue_depth"`
+	OCRQueueDepth     int64              `json:"ocr_queue_depth"`
+	HashQueueDepth    int64              `json:"hash_queue_depth"`
+	ContentActivity   BackgroundActivity `json:"content_activity"`
+	OCRActivity       BackgroundActivity `json:"ocr_activity"`
+	HashActivity      BackgroundActivity `json:"hash_activity"`
+	ActiveProgress    []CrawlProgress    `json:"active_progress"`
 }
 
 func (c *Crawler) Stats() Stats {
@@ -199,6 +220,10 @@ func (c *Crawler) Stats() Stats {
 	initialCrawls := atomic.LoadInt64(&c.initialCrawls)
 	pausedReason := ""
 	pressure := c.adaptiveStatus()
+	backlog, err := c.cat.BackgroundBacklog(context.Background())
+	if err != nil {
+		c.log.Debug("background backlog query failed", "error", err)
+	}
 	if scheduledUntil, active := c.scheduledPauseUntil(time.Now()); active && scheduledUntil.Unix() > pausedUntil {
 		pausedUntil = scheduledUntil.Unix()
 		pausedReason = "schedule"
@@ -224,10 +249,43 @@ func (c *Crawler) Stats() Stats {
 		CPUPercent:        pressure.CPUPercent,
 		DiskBusyPercent:   pressure.DiskBusyPercent,
 		NextFullCrawlUnix: atomic.LoadInt64(&c.nextFullCrawl),
-		ContentQueueDepth: len(c.contentJobs),
-		OCRQueueDepth:     len(c.ocrJobs),
-		HashQueueDepth:    len(c.hashJobs),
+		ContentQueueDepth: backlog.Content,
+		OCRQueueDepth:     backlog.OCR,
+		HashQueueDepth:    backlog.Hash,
+		ContentActivity:   c.contentActivity.snapshot(),
+		OCRActivity:       c.ocrActivity.snapshot(),
+		HashActivity:      c.hashActivity.snapshot(),
 		ActiveProgress:    c.ActiveProgress(),
+	}
+}
+
+func (a *backgroundActivity) snapshot() BackgroundActivity {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.BackgroundActivity
+}
+
+func (a *backgroundActivity) begin(path string) func(error) {
+	a.mu.Lock()
+	a.ActiveCount++
+	a.CurrentPath = path
+	a.LastPath = path
+	a.mu.Unlock()
+	return func(err error) {
+		a.mu.Lock()
+		if a.ActiveCount > 0 {
+			a.ActiveCount--
+		}
+		if a.ActiveCount == 0 {
+			a.CurrentPath = ""
+		}
+		if err != nil {
+			a.LastError = err.Error()
+		} else {
+			a.LastError = ""
+		}
+		a.LastCompletedAtUnix = time.Now().Unix()
+		a.mu.Unlock()
 	}
 }
 
@@ -1408,8 +1466,14 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 	}
 	if checkpoint {
 		checkpointCtx, cancel := checkpointWriteContext(ctx)
-		defer cancel()
-		if err := c.cat.MarkDirectoryCheckpoint(checkpointCtx, root.ID, dir); err != nil {
+		err := c.cat.MarkDirectoryCheckpoint(checkpointCtx, root.ID, dir)
+		cancel()
+		if err != nil && ctx.Err() != nil && isCrawlerCancellation(ctx, err) {
+			fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = c.cat.MarkDirectoryCheckpoint(fallbackCtx, root.ID, dir)
+			fallbackCancel()
+		}
+		if err != nil {
 			atomic.AddInt64(errorsCount, 1)
 			c.log.Warn("checkpoint write failed", "root", root.ID, "path", dir, "error", err)
 		} else if ctx.Err() != nil {
@@ -1965,7 +2029,9 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				finish()
 				continue
 			}
+			completeActivity := c.contentActivity.begin(job.path)
 			text, err := extract.Text(job.path)
+			completeActivity(err)
 			if jobCtx.Err() != nil {
 				finish()
 				continue
@@ -2017,11 +2083,13 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				continue
 			}
 			timedCtx, cancel := context.WithTimeout(jobCtx, time.Duration(settings.TimeoutSeconds)*time.Second)
+			completeActivity := c.ocrActivity.begin(job.path)
 			status, text, err := extract.OCR(timedCtx, job.path, extract.OCROptions{
 				Engine: settings.Engine, TesseractCommand: settings.TesseractCommand,
 				OCRmyPDFCommand: settings.OCRmyPDFCommand, Languages: settings.Languages,
 			})
 			cancel()
+			completeActivity(err)
 			if jobCtx.Err() != nil {
 				finish()
 				continue
@@ -2061,6 +2129,7 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 				finish()
 				continue
 			}
+			completeActivity := c.hashActivity.begin(job.path)
 			f, err := os.Open(job.path)
 			status, value := "hashed", ""
 			if err == nil {
@@ -2074,6 +2143,7 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 			if err != nil {
 				status = "failed"
 			}
+			completeActivity(err)
 			if jobCtx.Err() != nil {
 				finish()
 				continue
@@ -2112,6 +2182,9 @@ func (c *Crawler) rootIDsFor(include func(config.RootConfig) bool) []string {
 func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHidden bool) bool {
 	name := entry.Name()
 	if ignoreHidden && strings.HasPrefix(name, ".") {
+		return true
+	}
+	if !entry.IsDir() && strings.HasPrefix(name, "~$") {
 		return true
 	}
 	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || matchesAny(path, []string{"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**"})) {

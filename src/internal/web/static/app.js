@@ -329,7 +329,19 @@ function renderOpsSummary(metrics, progress) {
   document.querySelector("#ops-directory-counts").textContent = first ? `${Number(first.directory_files || 0).toLocaleString()} files, ${Number(first.directory_folders || 0).toLocaleString()} folders` : "-";
   document.querySelector("#ops-activity").textContent = metrics.last_activity_unix ? `${formatActivityAge(metrics.last_activity_unix)} | ${formatRate(metrics.files_per_second || 0)} files/s | ${formatRate(metrics.directories_per_second || 0)} dirs/s` : "-";
   document.querySelector("#ops-watcher").textContent = watch.enabled ? `${Number(watch.watched_directories || 0).toLocaleString()} / ${Number(watch.max_watched_directories || 0).toLocaleString()} folders` : "Disabled";
-  document.querySelector("#ops-background").textContent = metrics.active_crawls ? "Deferred until crawl completes" : "Eligible to run";
+  renderBackgroundActivity("#ops-content", metrics.content_activity, "Content", Boolean(metrics.active_crawls));
+  renderBackgroundActivity("#ops-ocr", metrics.ocr_activity, "OCR", Boolean(metrics.active_crawls));
+  renderBackgroundActivity("#ops-hash", metrics.hash_activity, "Hashing", Boolean(metrics.active_crawls));
+}
+
+function renderBackgroundActivity(selector, activity, label, deferred) {
+  const target = document.querySelector(selector);
+  const current = activity || {};
+  const path = current.current_path || current.last_path || "";
+  const filename = path ? path.replace(/\\/g, "/").split("/").pop() : "";
+  const state = Number(current.active_count || 0) > 0 ? `Processing${Number(current.active_count) > 1 ? ` (${current.active_count})` : ""}` : (deferred ? "Deferred" : "Idle");
+  target.textContent = filename ? `${state}: ${filename}` : state;
+  target.title = current.last_error || path || `${label} ${state.toLowerCase()}`;
 }
 
 function renderOps(title) {

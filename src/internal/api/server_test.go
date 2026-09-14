@@ -115,7 +115,7 @@ func TestRequestAccessLogIsSeparateFromOperationalLog(t *testing.T) {
 		accessLog: slog.New(slog.NewTextHandler(&access, nil)),
 	}
 	handler := server.requestLog(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	request := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics", nil)
 	result := httptest.NewRecorder()
@@ -124,7 +124,7 @@ func TestRequestAccessLogIsSeparateFromOperationalLog(t *testing.T) {
 		t.Fatalf("expected access log entry, got %q", access.String())
 	}
 	if operational.Len() != 0 {
-		t.Fatalf("routine request should not occupy operational log: %q", operational.String())
+		t.Fatalf("request logging should not occupy operational log: %q", operational.String())
 	}
 }
 

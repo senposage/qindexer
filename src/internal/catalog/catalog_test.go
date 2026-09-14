@@ -88,6 +88,40 @@ func TestDescendantPathLikePreservesDriveRootSeparator(t *testing.T) {
 	}
 }
 
+func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	add := func(id, extension string) {
+		t.Helper()
+		doc := Document{
+			ID: id, RootID: "root", Path: `X:\` + id + "." + extension,
+			NormalizedPath: NormalizePath(`X:\` + id + "." + extension), Name: id + "." + extension,
+			Extension: extension, Size: 10, ModifiedAt: modified, LastSeenGeneration: 1,
+			Signature: Signature(10, modified),
+		}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("extractable", "pdf")
+	add("binary", "bin")
+	if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET ocr_status = 'pending' WHERE id = 'extractable'`); err != nil {
+		t.Fatal(err)
+	}
+	backlog, err := cat.BackgroundBacklog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backlog.Content != 1 || backlog.OCR != 1 || backlog.Hash != 2 {
+		t.Fatalf("unexpected backlog: %#v", backlog)
+	}
+}
+
 func TestCheckDatabaseUsesReadOnlySQLiteURI(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
