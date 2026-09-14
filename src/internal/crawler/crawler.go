@@ -2184,7 +2184,9 @@ func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHi
 	if ignoreHidden && strings.HasPrefix(name, ".") {
 		return true
 	}
-	if !entry.IsDir() && strings.HasPrefix(name, "~$") {
+	// Some SMB/CIFS translations retain a Windows separator as part of the
+	// filename. Strip separators before recognizing Office's transient lock file.
+	if !entry.IsDir() && strings.HasPrefix(strings.TrimLeft(name, `\\/`), "~$") {
 		return true
 	}
 	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || matchesAny(path, []string{"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**"})) {

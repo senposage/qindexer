@@ -101,17 +101,20 @@ func TestMatchesAnyRecognizesRecoveryDirectoryItself(t *testing.T) {
 
 func TestShouldSkipOfficeTemporaryLockFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "~$Draft.docx")
-	if err := os.WriteFile(path, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := entries[0]
-	if !shouldSkip(config.RootConfig{}, `X:\Legal\~$Draft.docx`, entry, false) {
-		t.Fatal("expected Office temporary lock file to be skipped")
+	for _, name := range []string{"~$Draft.docx", `\~$Draft.docx`} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry.Name() == name && !shouldSkip(config.RootConfig{}, `X:\Legal\`+name, entry, false) {
+				t.Fatalf("expected Office temporary lock file %q to be skipped", name)
+			}
+		}
 	}
 }
 
