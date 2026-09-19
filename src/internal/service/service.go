@@ -115,6 +115,11 @@ func (a App) Run(ctx context.Context) error {
 			errs <- err
 		}
 	}()
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		checkpointCatalog(runCtx, cat, log)
+	}()
 
 	var runErr error
 	select {
@@ -146,6 +151,24 @@ func (a App) Run(ctx context.Context) error {
 		log.Warn("service shutdown continuing with blocked background work")
 	}
 	return runErr
+}
+
+func checkpointCatalog(ctx context.Context, cat *catalog.Catalog, log *slog.Logger) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkpointCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := cat.Checkpoint(checkpointCtx)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				log.Warn("periodic SQLite checkpoint failed", "error", err)
+			}
+		}
+	}
 }
 
 func openLogFile(dataDir string) (*os.File, string, error) {

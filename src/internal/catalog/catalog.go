@@ -69,6 +69,24 @@ type IndexStats struct {
 	Extensions []ExtensionCount `json:"extensions"`
 }
 
+// StorageStats makes index growth observable without exposing document text.
+// DatabaseBytes includes allocated SQLite pages; FreeBytes is reclaimable by a
+// deliberate compact operation.
+type StorageStats struct {
+	DatabaseBytes      int64 `json:"database_bytes"`
+	FreeBytes          int64 `json:"free_bytes"`
+	DocumentTextBytes  int64 `json:"document_text_bytes"`
+	OversizedDocuments int64 `json:"oversized_documents"`
+	MaxTextBytes       int64 `json:"max_text_bytes"`
+}
+
+type CompactResult struct {
+	Before           StorageStats `json:"before"`
+	After            StorageStats `json:"after"`
+	TrimmedDocuments int64        `json:"trimmed_documents"`
+	TrimmedTextBytes int64        `json:"trimmed_text_bytes"`
+}
+
 type Document struct {
 	ID                 string              `json:"id"`
 	ResultID           string              `json:"result_id"`
@@ -234,7 +252,7 @@ func Open(ctx context.Context, dataDir string) (*Catalog, error) {
 	// Apply these settings to every pooled connection. Setting them only during
 	// migration leaves later reader/writer connections with SQLite's zero busy
 	// timeout, which turns ordinary writer contention into SQLITE_BUSY errors.
-	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)"
+	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -259,6 +277,121 @@ func (c *Catalog) Close() error {
 	// a stop or repair is still unwinding.
 	_, _ = c.db.Exec(`PRAGMA wal_checkpoint(PASSIVE);`)
 	return c.db.Close()
+}
+
+// Checkpoint copies committed WAL frames back into the main database without
+// interrupting readers. When no reader is holding an older snapshot it also
+// truncates the WAL file, preventing long enrichment runs from leaving a large
+// stale sidecar behind.
+func (c *Catalog) Checkpoint(ctx context.Context) error {
+	var busy, frames, checkpointed int64
+	if err := c.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 || frames == 0 || frames != checkpointed {
+		return nil
+	}
+	_, err := c.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
+
+func (c *Catalog) StorageStats(ctx context.Context, maxTextBytes int64) (StorageStats, error) {
+	if maxTextBytes <= 0 {
+		maxTextBytes = 1 << 20
+	}
+	var stats StorageStats
+	var pageCount, freePages, pageSize int64
+	if err := c.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return stats, err
+	}
+	if err := c.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freePages); err != nil {
+		return stats, err
+	}
+	if err := c.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return stats, err
+	}
+	if err := c.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(content_text)), 0), COALESCE(SUM(CASE WHEN length(content_text) > ? THEN 1 ELSE 0 END), 0) FROM documents`, maxTextBytes).Scan(&stats.DocumentTextBytes, &stats.OversizedDocuments); err != nil {
+		return stats, err
+	}
+	stats.DatabaseBytes = pageCount * pageSize
+	stats.FreeBytes = freePages * pageSize
+	stats.MaxTextBytes = maxTextBytes
+	return stats, nil
+}
+
+// Compact trims legacy over-limit content and rewrites SQLite to return unused
+// pages to the filesystem. Callers must quiesce crawlers first.
+func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResult, error) {
+	if maxTextBytes <= 0 {
+		maxTextBytes = 1 << 20
+	}
+	before, err := c.StorageStats(ctx, maxTextBytes)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	result := CompactResult{Before: before}
+	for {
+		rows, err := c.db.QueryContext(ctx, `SELECT id, content_text FROM documents WHERE length(content_text) > ? LIMIT 64`, maxTextBytes)
+		if err != nil {
+			return result, err
+		}
+		type item struct{ id, content string }
+		items := []item{}
+		for rows.Next() {
+			var next item
+			if err := rows.Scan(&next.id, &next.content); err != nil {
+				rows.Close()
+				return result, err
+			}
+			items = append(items, next)
+		}
+		if err := rows.Close(); err != nil {
+			return result, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		tx, err := c.db.BeginTx(ctx, nil)
+		if err != nil {
+			return result, err
+		}
+		for _, item := range items {
+			trimmed := truncateUTF8(item.content, maxTextBytes)
+			if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_text = ? WHERE id = ?`, trimmed, item.id); err != nil {
+				_ = tx.Rollback()
+				return result, err
+			}
+			result.TrimmedDocuments++
+			result.TrimmedTextBytes += int64(len(item.content) - len(trimmed))
+		}
+		if err := tx.Commit(); err != nil {
+			return result, err
+		}
+	}
+	if _, err := c.db.ExecContext(ctx, `PRAGMA optimize`); err != nil {
+		return result, err
+	}
+	if _, err := c.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return result, err
+	}
+	if _, err := c.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return result, err
+	}
+	result.After, err = c.StorageStats(ctx, maxTextBytes)
+	return result, err
+}
+
+func truncateUTF8(value string, maxBytes int64) string {
+	if int64(len(value)) <= maxBytes {
+		return value
+	}
+	limit := int(maxBytes)
+	for limit > 0 && (value[limit]&0xc0) == 0x80 {
+		limit--
+	}
+	return value[:limit]
 }
 
 // CheckDatabase performs a read-only SQLite quick check. It is deliberately
@@ -309,9 +442,6 @@ func (c *Catalog) ClearRoot(ctx context.Context, rootID string) (int64, error) {
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE root_id = ?`, rootID)
 	if err != nil {
-		return 0, err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE root_id = ?`, rootID); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ?`, rootID); err != nil {
@@ -451,9 +581,6 @@ func (c *Catalog) rewriteRootPathBatch(ctx context.Context, rootID, oldRootPath,
 			return 0, 0, 0, err
 		}
 		if existingID != "" && existingID != item.id {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, item.id); err != nil {
-				return 0, 0, 0, err
-			}
 			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, item.id); err != nil {
 				return 0, 0, 0, err
 			}
@@ -534,9 +661,6 @@ func (c *Catalog) rewriteRootPathLegacy(ctx context.Context, rootID, oldRootPath
 			return 0, 0, err
 		}
 		if existingID != "" && existingID != candidate.id {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, candidate.id); err != nil {
-				return 0, 0, err
-			}
 			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, candidate.id); err != nil {
 				return 0, 0, err
 			}
@@ -648,9 +772,6 @@ func (c *Catalog) RepairEmbeddedRootPath(ctx context.Context, rootID, canonicalR
 			return 0, 0, err
 		}
 		if existingID != "" && existingID != candidate.id {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, candidate.id); err != nil {
-				return 0, 0, err
-			}
 			if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, candidate.id); err != nil {
 				return 0, 0, err
 			}
@@ -717,9 +838,6 @@ func (c *Catalog) PruneRecoveryPaths(ctx context.Context, rootID string) (int64,
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id IN (SELECT id FROM documents WHERE `+where+`)`, args...); err != nil {
-		return 0, err
-	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE `+where, args...)
 	if err != nil {
 		return 0, err
@@ -929,13 +1047,6 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_documents_root_status ON documents(root_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_extension ON documents(extension);`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_modified ON documents(modified_at);`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-			id UNINDEXED,
-			root_id UNINDEXED,
-			name,
-			path,
-			extension
-		);`,
 		`CREATE TABLE IF NOT EXISTS root_states (
 			root_id TEXT PRIMARY KEY,
 			last_generation INTEGER NOT NULL DEFAULT 0,
@@ -1049,20 +1160,82 @@ func (c *Catalog) ensureColumn(ctx context.Context, table, column, definition st
 func (c *Catalog) ensureContentFTS(ctx context.Context) error {
 	var sqlText string
 	err := c.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents_fts'`).Scan(&sqlText)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	lowerSQL := strings.ToLower(sqlText)
+	if err == nil && strings.Contains(lowerSQL, "content='documents'") && strings.Contains(lowerSQL, "content_text") {
+		return c.ensureFTSTriggers(ctx)
+	}
+	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if strings.Contains(strings.ToLower(sqlText), "content") {
-		return nil
+	defer tx.Rollback()
+	for _, name := range []string{"documents_fts_ai", "documents_fts_ad", "documents_fts_au"} {
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+name); err != nil {
+			return err
+		}
 	}
-	if _, err := c.db.ExecContext(ctx, `DROP TABLE documents_fts`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS documents_fts`); err != nil {
 		return err
 	}
-	if _, err := c.db.ExecContext(ctx, `CREATE VIRTUAL TABLE documents_fts USING fts5(id UNINDEXED, root_id UNINDEXED, name, path, extension, content)`); err != nil {
+	if _, err := tx.ExecContext(ctx, `CREATE VIRTUAL TABLE documents_fts USING fts5(
+		id UNINDEXED,
+		root_id UNINDEXED,
+		name,
+		path,
+		extension,
+		content_text,
+		content='documents',
+		content_rowid='rowid'
+	)`); err != nil {
 		return err
 	}
-	_, err = c.db.ExecContext(ctx, `INSERT INTO documents_fts(id, root_id, name, path, extension, content) SELECT id, root_id, name, path, extension, content_text FROM documents`)
-	return err
+	if err := createFTSTriggers(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO documents_fts(documents_fts) VALUES ('rebuild')`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (c *Catalog) ensureFTSTriggers(ctx context.Context) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := createFTSTriggers(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func createFTSTriggers(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TRIGGER IF NOT EXISTS documents_fts_ai AFTER INSERT ON documents BEGIN
+			INSERT INTO documents_fts(rowid, id, root_id, name, path, extension, content_text)
+			VALUES (new.rowid, new.id, new.root_id, new.name, new.path, new.extension, new.content_text);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS documents_fts_ad AFTER DELETE ON documents BEGIN
+			INSERT INTO documents_fts(documents_fts, rowid, id, root_id, name, path, extension, content_text)
+			VALUES ('delete', old.rowid, old.id, old.root_id, old.name, old.path, old.extension, old.content_text);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS documents_fts_au AFTER UPDATE OF root_id, name, path, extension, content_text ON documents BEGIN
+			INSERT INTO documents_fts(documents_fts, rowid, id, root_id, name, path, extension, content_text)
+			VALUES ('delete', old.rowid, old.id, old.root_id, old.name, old.path, old.extension, old.content_text);
+			INSERT INTO documents_fts(rowid, id, root_id, name, path, extension, content_text)
+			VALUES (new.rowid, new.id, new.root_id, new.name, new.path, new.extension, new.content_text);
+		END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func NormalizePath(path string) string {
@@ -1427,11 +1600,10 @@ func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc Document) (UpsertResu
 }
 
 func upsertFTS(ctx context.Context, tx *sql.Tx, id, rootID, name, path, extension, content string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM documents_fts WHERE id = ?`, id); err != nil {
-		return err
-	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO documents_fts(id, root_id, name, path, extension, content) VALUES (?, ?, ?, ?, ?, ?)`, id, rootID, name, path, extension, content)
-	return err
+	// documents_fts is an external-content FTS table maintained by SQLite
+	// triggers. Keeping this compatibility helper avoids scattering storage
+	// details through callers while ensuring document text is stored only once.
+	return nil
 }
 
 func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, status, content string) error {
@@ -1442,17 +1614,14 @@ func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, sta
 		return err
 	}
 	defer tx.Rollback()
-	var rootID, name, path, extension string
-	if err := tx.QueryRowContext(ctx, `SELECT root_id, name, path, extension FROM documents WHERE id = ? AND signature = ?`, id, signature).Scan(&rootID, &name, &path, &extension); err != nil {
+	var existingID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE id = ? AND signature = ?`, id, signature).Scan(&existingID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = ?, content_text = ? WHERE id = ?`, status, content, id); err != nil {
-		return err
-	}
-	if err := upsertFTS(ctx, tx, id, rootID, name, path, extension, content); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1480,17 +1649,14 @@ func (c *Catalog) UpdateOCRContent(ctx context.Context, id, signature, status, c
 		return err
 	}
 	defer tx.Rollback()
-	var rootID, name, path, extension string
-	if err := tx.QueryRowContext(ctx, `SELECT root_id, name, path, extension FROM documents WHERE id = ? AND signature = ?`, id, signature).Scan(&rootID, &name, &path, &extension); err != nil {
+	var existingID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM documents WHERE id = ? AND signature = ?`, id, signature).Scan(&existingID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = 'extracted', content_text = ?, ocr_status = ? WHERE id = ?`, content, status, id); err != nil {
-		return err
-	}
-	if err := upsertFTS(ctx, tx, id, rootID, name, path, extension, content); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -2234,16 +2400,17 @@ func scopedFTSQuery(query string, fields []string, matchMode string, boolean Boo
 	if len(fields) == 0 {
 		return terms, nil
 	}
-	valid := map[string]bool{"name": true, "path": true, "extension": true, "content": true}
+	valid := map[string]string{"name": "name", "path": "path", "extension": "extension", "content": "content_text"}
 	selected := make([]string, 0, len(fields))
 	seen := map[string]bool{}
 	for _, field := range fields {
 		field = strings.ToLower(strings.TrimSpace(field))
-		if !valid[field] {
+		ftsField, ok := valid[field]
+		if !ok {
 			return "", &RequestError{Code: "invalid_match_fields", Message: "match_fields supports name, path, extension, and content"}
 		}
 		if !seen[field] {
-			selected = append(selected, field)
+			selected = append(selected, ftsField)
 			seen[field] = true
 		}
 	}

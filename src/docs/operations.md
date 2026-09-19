@@ -119,6 +119,18 @@ Use `Stop service` in the UI or send an OS signal. QIndexer cancels active
 crawls, waits for completed directory sets/checkpoints, flushes SQLite, and
 closes the DB.
 
+## SQLite Checkpoints And Storage
+
+QIndexer uses WAL mode for concurrent reads and writes. Automatic checkpoints
+run at 1,000 WAL pages, and the service performs an additional non-blocking
+checkpoint every 30 seconds. When no client is holding an older read snapshot,
+the service truncates the WAL sidecar.
+
+Use **Optimize index storage** in the administration UI, or
+`qindexer db-compact --database /path/to/qsurfer-search.db`, to reclaim
+already-unused pages. Compaction pauses crawls and can require temporary free
+space while SQLite rewrites the database.
+
 ## Crawler Scheduling
 
 QIndexer crawls when:

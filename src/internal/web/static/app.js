@@ -62,6 +62,7 @@ document.querySelector("#add-root").addEventListener("click", openNewRoot);
 document.querySelector("#bootstrap-form").addEventListener("submit", bootstrapAdmin);
 document.querySelector("#network-settings-form").addEventListener("submit", saveNetworkSettings);
 document.querySelector("#indexing-settings-form").addEventListener("submit", saveIndexingSettings);
+document.querySelector("#compact-index").addEventListener("click", compactIndex);
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -282,6 +283,13 @@ function renderMetrics(metrics) {
   document.querySelector("#dirs-rate").textContent = formatRate(metrics.directories_per_second || 0);
   document.querySelector("#io-rate").textContent = `${formatBytes(metrics.bytes_per_second || 0)}/s`;
   document.querySelector("#index-size").textContent = formatBytes(metrics.index_size_bytes || 0);
+	const storage = metrics.storage || {};
+	document.querySelector("#index-size").closest(".metric").title = [
+	  `SQLite pages: ${formatBytes(storage.database_bytes || 0)}`,
+	  `Reclaimable after compact: ${formatBytes(storage.free_bytes || 0)}`,
+	  `Stored document text: ${formatBytes(storage.document_text_bytes || 0)}`,
+	  `Over stored-text limit: ${Number(storage.oversized_documents || 0).toLocaleString()} documents`,
+	].join("\n");
   const active = metrics.active_crawls || 0;
   const progress = array(metrics.active_progress);
   document.querySelector("#content-queue").textContent = Number(metrics.content_queue_depth || 0).toLocaleString();
@@ -521,6 +529,7 @@ function renderIndexingSettings(crawler, watcher = {}) {
   const throttle = crawler.adaptive_throttle || {};
   document.querySelector("#settings-extraction").checked = Boolean(extraction.enabled);
   document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
+	document.querySelector("#settings-stored-text").value = extraction.max_stored_text_kb || 1024;
   document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
   document.querySelector("#settings-ocr-engine").value = ocr.engine || "auto";
   document.querySelector("#settings-ocr-languages").value = ocr.languages || "eng";
@@ -577,7 +586,7 @@ async function saveIndexingSettings(event) {
   event.preventDefault();
   const crawler = state.crawler || {};
   const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf" };
-  const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64 };
+	const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64, max_stored_text_kb: Number(document.querySelector("#settings-stored-text").value) || 1024 };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
   const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
@@ -585,6 +594,24 @@ async function saveIndexingSettings(event) {
     await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
     await refresh({ quiet: true, message: "Indexing settings saved" });
   } catch (err) { setMessage(err.message); }
+}
+
+async function compactIndex() {
+  if (!window.confirm("Optimize index storage now? Crawls will checkpoint and pause while SQLite compacts. This can take time and temporarily needs free disk space.")) return;
+  const button = document.querySelector("#compact-index");
+  button.disabled = true;
+  button.textContent = "Optimizing...";
+  setMessage("Optimizing index storage; crawls are paused...");
+  try {
+    const data = await api("/admin/v1/index/compact", { method: "POST", body: "{}" });
+    const result = data.result || {};
+    await refresh({ quiet: true, message: `Index optimized: ${formatBytes(result.before?.database_bytes || 0)} to ${formatBytes(result.after?.database_bytes || 0)}` });
+  } catch (err) {
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Optimize index storage";
+  }
 }
 
 function renderCrawls(crawls) {

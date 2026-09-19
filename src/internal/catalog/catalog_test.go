@@ -212,6 +212,40 @@ func TestContentMatchMetadataUsesBoundedExcerpt(t *testing.T) {
 	}
 }
 
+func TestCompactKeepsContentSearchAndTrimsStoredText(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	doc := Document{ID: "large-content", RootID: "test", Path: `D:\fixtures\large.txt`, NormalizedPath: NormalizePath(`D:\fixtures\large.txt`), Name: "large.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("orchid ", 50000)
+	if err := cat.UpdateExtractedContent(ctx, doc.ID, doc.Signature, "extracted", content); err != nil {
+		t.Fatal(err)
+	}
+	result, err := cat.Compact(ctx, 64<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TrimmedDocuments != 1 || result.TrimmedTextBytes <= 0 {
+		t.Fatalf("unexpected compact result: %#v", result)
+	}
+	stats, err := cat.StorageStats(ctx, 64<<10)
+	if err != nil || stats.OversizedDocuments != 0 || stats.DocumentTextBytes > 64<<10 {
+		t.Fatalf("unexpected storage stats: %#v, %v", stats, err)
+	}
+	resp, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"content"}}, Limit: 10}, 10)
+	if err != nil || len(resp.Results) != 1 || resp.Results[0].ID != doc.ID {
+		t.Fatalf("content search after compact = %#v, %v", resp.Results, err)
+	}
+}
+
 func TestSearchMatchesFilenamePrefix(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

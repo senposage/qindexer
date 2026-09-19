@@ -66,10 +66,11 @@ type CrawlerConfig struct {
 }
 
 type ContentExtractionConfig struct {
-	Enabled       bool  `yaml:"enabled" json:"enabled"`
-	WorkerCount   int   `yaml:"worker_count" json:"worker_count"`
-	QueueSize     int   `yaml:"queue_size" json:"queue_size"`
-	MaxFileSizeMB int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+	Enabled         bool  `yaml:"enabled" json:"enabled"`
+	WorkerCount     int   `yaml:"worker_count" json:"worker_count"`
+	QueueSize       int   `yaml:"queue_size" json:"queue_size"`
+	MaxFileSizeMB   int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+	MaxStoredTextKB int64 `yaml:"max_stored_text_kb" json:"max_stored_text_kb"`
 }
 
 // OCRConfig describes an optional local OCR sidecar. Commands stay configurable
@@ -245,6 +246,9 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.ContentExtraction.MaxFileSizeMB <= 0 {
 		c.Crawler.ContentExtraction.MaxFileSizeMB = 64
 	}
+	if c.Crawler.ContentExtraction.MaxStoredTextKB <= 0 {
+		c.Crawler.ContentExtraction.MaxStoredTextKB = 1024
+	}
 	if c.Crawler.OCR.Engine == "" {
 		c.Crawler.OCR.Engine = "auto"
 	}
@@ -333,6 +337,9 @@ func (c *Config) Validate() error {
 	}
 	if throttle.RecoverySamples < 1 || throttle.RecoverySamples > 3600 {
 		return fmt.Errorf("adaptive throttle recovery samples must be between 1 and 3600")
+	}
+	if c.Crawler.ContentExtraction.MaxStoredTextKB < 64 || c.Crawler.ContentExtraction.MaxStoredTextKB > 1024 {
+		return fmt.Errorf("stored text limit must be between 64 and 1024 KB")
 	}
 	if c.Watcher.ActivityHalfLifeDays < 1 || c.Watcher.ActivityHalfLifeDays > 3650 {
 		return fmt.Errorf("watcher activity half-life must be between 1 and 3650 days")

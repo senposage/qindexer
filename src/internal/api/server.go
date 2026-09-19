@@ -177,6 +177,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /admin/v1/config/import", s.withAdminAuth(s.importConfig))
 	mux.HandleFunc("POST /admin/v1/config/validate", s.withAdminAuth(s.configValidate))
 	mux.HandleFunc("GET /admin/v1/metrics", s.withAdminAuth(s.metrics))
+	mux.HandleFunc("POST /admin/v1/index/compact", s.withAdminAuth(s.compactIndex))
 	mux.HandleFunc("GET /admin/v1/diagnostics", s.withAdminAuth(s.diagnostics))
 	mux.HandleFunc("GET /admin/v1/logs", s.withAdminAuth(s.logs))
 	mux.HandleFunc("POST /admin/v1/crawler/pause", s.withAdminAuth(s.pauseCrawler))
@@ -1443,6 +1444,7 @@ func (s *Server) readLogTail(limit int, maxBytes int64) ([]string, error) {
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	dataDir := config.ResolveDataDir(s.configPath, s.cfg.Index.DataDir)
+	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
 	watch := s.watcher
 	s.mu.RUnlock()
 	size, err := indexSizeBytes(dataDir)
@@ -1453,16 +1455,48 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if statsErr != nil {
 		s.log.Debug("could not read index type stats", "error", statsErr)
 	}
+	storage, storageErr := s.cat.StorageStats(r.Context(), maxStoredTextBytes)
+	if storageErr != nil {
+		s.log.Debug("could not read index storage stats", "error", storageErr)
+	}
 	watcherStats := watcher.Stats{}
 	if watch != nil {
 		watcherStats = watch.Stats()
 	}
 	writeJSON(w, http.StatusOK, struct {
 		crawler.Stats
-		IndexSizeBytes int64              `json:"index_size_bytes"`
-		IndexStats     catalog.IndexStats `json:"index_stats"`
-		Watcher        watcher.Stats      `json:"watcher"`
-	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, Watcher: watcherStats})
+		IndexSizeBytes int64                `json:"index_size_bytes"`
+		IndexStats     catalog.IndexStats   `json:"index_stats"`
+		Storage        catalog.StorageStats `json:"storage"`
+		Watcher        watcher.Stats        `json:"watcher"`
+	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, Storage: storage, Watcher: watcherStats})
+}
+
+// compactIndex is intentionally a global maintenance operation. VACUUM needs
+// exclusive write access and may require temporary free disk space, so crawls
+// are checkpointed before it begins and resumed only after it completes.
+func (s *Server) compactIndex(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
+	s.mu.RUnlock()
+	s.log.Info("index compact requested", "max_stored_text_bytes", maxStoredTextBytes)
+	resume, activeRoots, ok := s.stopAllCrawlsForMaintenance("index_compact", "")
+	if !ok {
+		writeError(w, http.StatusConflict, "crawler_still_stopping", "crawler is still stopping; retry shortly")
+		return
+	}
+	defer func() {
+		resume()
+		s.scheduleRootCrawls(activeRoots, "index_compact")
+	}()
+	result, err := s.cat.Compact(r.Context(), maxStoredTextBytes)
+	if err != nil {
+		s.log.Error("index compact failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "index_compact_failed", err.Error())
+		return
+	}
+	s.log.Info("index compact completed", "trimmed_documents", result.TrimmedDocuments, "trimmed_text_bytes", result.TrimmedTextBytes, "before_bytes", result.Before.DatabaseBytes, "after_bytes", result.After.DatabaseBytes)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "compacted", "result": result})
 }
 
 func indexSizeBytes(dataDir string) (int64, error) {

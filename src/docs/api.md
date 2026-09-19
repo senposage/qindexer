@@ -364,7 +364,8 @@ Updates global crawler resource and enrichment settings:
     "enabled": true,
     "worker_count": 1,
     "queue_size": 1000,
-    "max_file_size_mb": 64
+    "max_file_size_mb": 64,
+    "max_stored_text_kb": 1024
   },
   "ocr": {
     "enabled": true,
@@ -382,6 +383,30 @@ Updates global crawler resource and enrichment settings:
     "worker_count": 1,
     "queue_size": 1000,
     "max_file_size_mb": 2048
+  }
+}
+```
+
+### POST /admin/v1/index/compact
+
+Runs a storage-maintenance pass. QIndexer checkpoints and pauses active crawls,
+trims legacy document text above `max_stored_text_kb`, optimizes FTS, and runs
+SQLite `VACUUM` to return unused pages to the filesystem. Crawls that were
+active before maintenance are scheduled again afterward.
+
+The operation can take time and SQLite may need temporary free disk space while
+rewriting the database. It does not read, change, or delete source files.
+
+Response:
+
+```json
+{
+  "status": "compacted",
+  "result": {
+    "trimmed_documents": 14,
+    "trimmed_text_bytes": 7340032,
+    "before": {"database_bytes": 9000000000, "free_bytes": 2000000000},
+    "after": {"database_bytes": 5100000000, "free_bytes": 0}
   }
 }
 ```

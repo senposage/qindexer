@@ -2021,8 +2021,9 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				return
 			}
 			jobCtx, finish := c.beginBackgroundWork(ctx)
+			settings := c.snapshot().Crawler.ContentExtraction
 			root, exists := c.rootByID(job.rootID)
-			if !exists || !root.ContentExtractionEnabled(c.snapshot().Crawler.ContentExtraction.Enabled) {
+			if !exists || !root.ContentExtractionEnabled(settings.Enabled) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
 				}
@@ -2031,6 +2032,7 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			}
 			completeActivity := c.contentActivity.begin(job.path)
 			text, err := extract.Text(job.path)
+			text = extract.TruncateText(text, settings.MaxStoredTextKB*1024)
 			completeActivity(err)
 			if jobCtx.Err() != nil {
 				finish()
@@ -2073,9 +2075,10 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				return
 			}
 			jobCtx, finish := c.beginBackgroundWork(ctx)
-			settings := c.snapshot().Crawler.OCR
+			crawlerSettings := c.snapshot().Crawler
+			settings := crawlerSettings.OCR
 			root, exists := c.rootByID(job.rootID)
-			if !exists || !root.ContentExtractionEnabled(c.snapshot().Crawler.ContentExtraction.Enabled) || !root.OCREnabled(settings.Enabled) {
+			if !exists || !root.ContentExtractionEnabled(crawlerSettings.ContentExtraction.Enabled) || !root.OCREnabled(settings.Enabled) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
 				}
@@ -2088,6 +2091,7 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				Engine: settings.Engine, TesseractCommand: settings.TesseractCommand,
 				OCRmyPDFCommand: settings.OCRmyPDFCommand, Languages: settings.Languages,
 			})
+			text = extract.TruncateText(text, crawlerSettings.ContentExtraction.MaxStoredTextKB*1024)
 			cancel()
 			completeActivity(err)
 			if jobCtx.Err() != nil {

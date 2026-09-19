@@ -36,6 +36,8 @@ crawler:
     worker_count: 1
     queue_size: 1000
     max_file_size_mb: 64
+    # Text is stored once and capped per document to keep SQLite predictable.
+    max_stored_text_kb: 1024
   # OCR is local-only and opt-in. In auto mode, images use Tesseract and scanned
   # PDFs use OCRmyPDF. Install those commands separately or supply full paths.
   ocr:

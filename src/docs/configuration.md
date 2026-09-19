@@ -137,12 +137,18 @@ content_extraction:
   worker_count: 1
   queue_size: 1000
   max_file_size_mb: 64
+  max_stored_text_kb: 1024
 ```
 
 When enabled, supported document text is extracted into the index. Current
 content extraction is local and best effort. Supported inputs include plain
 text, Markdown, CSV, PDF text, and common Office formats supported by the
 extractor implementation.
+
+`max_stored_text_kb` caps normalized text retained for each document. The
+default is 1024 KiB and the accepted range is 64-1024 KiB. This limit applies
+to ordinary extraction and OCR; it keeps a pathological or unusually verbose
+document from inflating the SQLite index.
 
 ## OCR
 

@@ -15,7 +15,9 @@ import (
 )
 
 const (
-	maxTextBytes          = 4 << 20
+	// One MiB is enough for useful search and highlights while keeping one
+	// unusually verbose document from dominating the on-disk index.
+	maxTextBytes          = 1 << 20
 	maxExtractionErrorLen = 320
 )
 
@@ -144,7 +146,7 @@ func officeText(path string) (string, error) {
 			parts = append(parts, text)
 		}
 	}
-	return strings.Join(parts, " "), nil
+	return normalizeText(strings.Join(parts, " ")), nil
 }
 
 func xmlText(r io.Reader) (string, error) {
@@ -162,7 +164,7 @@ func xmlText(r io.Reader) (string, error) {
 			parts = append(parts, string(chars))
 		}
 	}
-	return strings.Join(strings.Fields(strings.Join(parts, " ")), " "), nil
+	return normalizeText(strings.Join(parts, " ")), nil
 }
 
 func readText(r io.Reader) (string, error) {
@@ -170,5 +172,33 @@ func readText(r io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.Join(strings.Fields(string(b)), " "), nil
+	return normalizeText(string(b)), nil
+}
+
+// normalizeText keeps stored search text bounded after whitespace cleanup. The
+// byte slice boundary is adjusted so valid UTF-8 is never split in half.
+func normalizeText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= maxTextBytes {
+		return value
+	}
+	limit := maxTextBytes
+	for limit > 0 && (value[limit]&0xc0) == 0x80 {
+		limit--
+	}
+	return value[:limit]
+}
+
+// TruncateText applies a caller-selected storage cap after normalization. A
+// non-positive cap uses the extractor's conservative default.
+func TruncateText(value string, maxBytes int64) string {
+	value = normalizeText(value)
+	if maxBytes <= 0 || maxBytes >= int64(len(value)) {
+		return value
+	}
+	limit := int(maxBytes)
+	for limit > 0 && (value[limit]&0xc0) == 0x80 {
+		limit--
+	}
+	return value[:limit]
 }

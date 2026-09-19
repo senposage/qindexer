@@ -405,6 +405,7 @@
           <div class="rules-grid">
             <label class="check-row"><input id="settings-extraction" type="checkbox"><span>Extract Office, PDF, and text content</span></label>
             <label>Extraction file limit (MB)<input id="settings-extraction-size" type="number" min="1" step="1"></label>
+			<label>Stored text limit (KB)<input id="settings-stored-text" type="number" min="64" max="1024" step="64"></label>
             <label class="check-row"><input id="settings-ocr" type="checkbox"><span>OCR scanned PDFs and images</span></label>
             <label>OCR engine<select id="settings-ocr-engine"><option value="auto">Automatic: OCRmyPDF for PDFs, Tesseract for images</option><option value="tesseract">Tesseract images only</option><option value="ocrmypdf">OCRmyPDF PDFs only</option></select></label>
             <label>OCR language(s)<input id="settings-ocr-languages" type="text" placeholder="eng"></label>
@@ -418,6 +419,13 @@
           </div>
           <div class="form-actions"><button type="submit">Save indexing settings</button></div>
         </form>
+		<div class="settings-form maintenance-settings">
+		  <div class="form-section-title">
+			<p class="eyebrow">Index storage</p>
+			<p>Reclaims unused SQLite pages and trims legacy text above the stored-text limit. Crawls pause and resume automatically.</p>
+		  </div>
+		  <div class="form-actions"><button id="compact-index" type="button" class="secondary">Optimize index storage</button></div>
+		</div>
         <pre id="config">{}</pre>
       </div>
     </section>

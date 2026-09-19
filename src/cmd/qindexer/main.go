@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"qindexer/internal/catalog"
 	"qindexer/internal/service"
@@ -53,6 +54,31 @@ func run(log *slog.Logger) error {
 		}
 		fmt.Printf("database integrity check passed: %s\n", *databasePath)
 		return nil
+	case "db-compact":
+		fs := flag.NewFlagSet("db-compact", flag.ExitOnError)
+		databasePath := fs.String("database", "", "SQLite database file to compact")
+		maxTextKB := fs.Int64("max-stored-text-kb", 1024, "maximum stored text per document in KiB")
+		_ = fs.Parse(os.Args[2:])
+		if *databasePath == "" {
+			return fmt.Errorf("--database is required")
+		}
+		if filepath.Base(*databasePath) != "qsurfer-search.db" {
+			return fmt.Errorf("--database must name qsurfer-search.db")
+		}
+		if *maxTextKB < 64 || *maxTextKB > 1024 {
+			return fmt.Errorf("--max-stored-text-kb must be between 64 and 1024")
+		}
+		cat, err := catalog.Open(service.SignalContext(), filepath.Dir(*databasePath))
+		if err != nil {
+			return err
+		}
+		defer cat.Close()
+		result, err := cat.Compact(service.SignalContext(), *maxTextKB*1024)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("database compacted: %d -> %d bytes; trimmed %d documents (%d bytes)\n", result.Before.DatabaseBytes, result.After.DatabaseBytes, result.TrimmedDocuments, result.TrimmedTextBytes)
+		return nil
 	case "version":
 		fmt.Printf("qindexer %s (%s)\n", version.Version, version.Commit)
 		return nil
@@ -70,5 +96,6 @@ Usage:
 	  qindexer crawl --config configs/example.yaml [--root root-id]
 	  qindexer status --config configs/example.yaml
 	  qindexer db-check --database path/to/qsurfer-search.db
+	  qindexer db-compact --database path/to/qsurfer-search.db [--max-stored-text-kb 1024]
 	  qindexer version`)
 }

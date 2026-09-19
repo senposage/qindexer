@@ -1,9 +1,11 @@
 package extract
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,11 +68,14 @@ func runTesseract(ctx context.Context, path string, options OCROptions) (string,
 	if options.Languages != "" {
 		args = append(args, "-l", options.Languages)
 	}
-	out, err := exec.CommandContext(ctx, command, args...).Output()
+	var out cappedBuffer
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stdout = &out
+	err := cmd.Run()
 	if err != nil {
 		return "failed", "", commandError(command, err)
 	}
-	return "extracted", strings.Join(strings.Fields(string(out)), " "), nil
+	return "extracted", normalizeText(out.String()), nil
 }
 
 func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, string, error) {
@@ -93,11 +98,32 @@ func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, 
 	if err := exec.CommandContext(ctx, command, args...).Run(); err != nil {
 		return "failed", "", commandError(command, err)
 	}
-	text, err := os.ReadFile(sidecar)
+	f, err := os.Open(sidecar)
 	if err != nil {
 		return "failed", "", fmt.Errorf("OCR command %q did not produce a text sidecar", commandName(command))
 	}
-	return "extracted", strings.Join(strings.Fields(string(text)), " "), nil
+	defer f.Close()
+	text, err := io.ReadAll(io.LimitReader(f, maxTextBytes))
+	if err != nil {
+		return "failed", "", errors.New("could not read OCR text sidecar")
+	}
+	return "extracted", normalizeText(string(text)), nil
+}
+
+// cappedBuffer drains a command's output without allowing a malformed OCR
+// sidecar or image to allocate an unbounded buffer in the service process.
+type cappedBuffer struct{ bytes.Buffer }
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := maxTextBytes - b.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.Buffer.Write(p)
+	}
+	return written, nil
 }
 
 func commandError(command string, err error) error {
