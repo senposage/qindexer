@@ -45,22 +45,31 @@ func TestExpandRootPathsRejectsEmptyGlob(t *testing.T) {
 	}
 }
 
-func TestNeedsInitialCrawlSkipsCompletedRoot(t *testing.T) {
+func TestNeedsStartupCrawlSkipsRecentlyCompletedRoot(t *testing.T) {
 	completed := time.Now().UTC()
 	root := config.RootConfig{ID: "complete", Enabled: true}
-	if needsInitialCrawl(root, true, catalog.RootState{LastSuccessfulCrawlAt: &completed}) {
+	if needsStartupCrawl(root, true, catalog.RootState{LastSuccessfulCrawlAt: &completed, LastCrawlStatus: "ok"}, completed, time.Hour) {
 		t.Fatal("completed root should not crawl again at startup")
 	}
-	if !needsInitialCrawl(root, false, catalog.RootState{}) {
+	if !needsStartupCrawl(root, false, catalog.RootState{}, completed, time.Hour) {
 		t.Fatal("new root should be crawled at startup")
 	}
 }
 
-func TestNeedsInitialCrawlResumesInterruptedCompletedRoot(t *testing.T) {
+func TestNeedsStartupCrawlRunsOverdueRoot(t *testing.T) {
+	now := time.Now().UTC()
+	completed := now.Add(-7 * 24 * time.Hour)
+	root := config.RootConfig{ID: "overdue", Enabled: true}
+	if !needsStartupCrawl(root, true, catalog.RootState{LastSuccessfulCrawlAt: &completed, LastCrawlStatus: "ok"}, now, 6*time.Hour) {
+		t.Fatal("root overdue during service downtime should crawl at startup")
+	}
+}
+
+func TestNeedsStartupCrawlResumesInterruptedCompletedRoot(t *testing.T) {
 	completed := time.Now().UTC()
 	root := config.RootConfig{ID: "resume", Enabled: true}
 	for _, status := range []string{"cancelled", "interrupted", "running", "hint_running"} {
-		if !needsInitialCrawl(root, true, catalog.RootState{LastSuccessfulCrawlAt: &completed, LastCrawlStatus: status}) {
+		if !needsStartupCrawl(root, true, catalog.RootState{LastSuccessfulCrawlAt: &completed, LastCrawlStatus: status}, completed, time.Hour) {
 			t.Fatalf("expected %s crawl to resume at startup", status)
 		}
 	}

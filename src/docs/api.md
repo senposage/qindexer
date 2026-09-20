@@ -322,7 +322,8 @@ Validates the active config.
 ### GET /admin/v1/metrics
 
 Returns crawler rates, I/O rate, active state, pause/throttle state, and
-`index_size_bytes`.
+`index_size_bytes`. The size includes only the active SQLite database and its
+live WAL/SHM sidecars; timestamped maintenance backups are excluded.
 
 ### GET /admin/v1/diagnostics
 

@@ -246,6 +246,25 @@ func TestCompactKeepsContentSearchAndTrimsStoredText(t *testing.T) {
 	}
 }
 
+func TestCheckpointSkipsWhileCatalogWriterIsActive(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	cat.writeMu.Lock()
+	defer cat.writeMu.Unlock()
+	started := time.Now()
+	if err := cat.Checkpoint(ctx); err != nil {
+		t.Fatalf("checkpoint while writer is active: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("checkpoint waited %s for an active writer", elapsed)
+	}
+}
+
 func TestSearchMatchesFilenamePrefix(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

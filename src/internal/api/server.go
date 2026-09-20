@@ -1507,9 +1507,20 @@ func indexSizeBytes(dataDir string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Only count the active SQLite database and its live WAL/SHM sidecars.
+	// Timestamped maintenance backups deliberately remain beside the database,
+	// but must not make the operational size metric look inflated.
+	activeFiles := map[string]struct{}{
+		"qsurfer-search.db":     {},
+		"qsurfer-search.db-wal": {},
+		"qsurfer-search.db-shm": {},
+	}
 	var size int64
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "qsurfer-search.db") {
+		if entry.IsDir() {
+			continue
+		}
+		if _, active := activeFiles[entry.Name()]; !active {
 			continue
 		}
 		info, err := entry.Info()

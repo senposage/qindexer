@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,6 +106,29 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 	server.AdminHandler().ServeHTTP(result, req)
 	if result.Code != http.StatusOK || !bytes.Contains(result.Body.Bytes(), []byte(`"index_size_bytes"`)) {
 		t.Fatalf("expected index size metric, got %d: %s", result.Code, result.Body.String())
+	}
+}
+
+func TestIndexSizeBytesCountsOnlyActiveDatabaseFiles(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"qsurfer-search.db":                         "main",
+		"qsurfer-search.db-wal":                     "wal",
+		"qsurfer-search.db-shm":                     "shm",
+		"qsurfer-search.db.precompact-20260919":     strings.Repeat("x", 100),
+		"qsurfer-search.db-wal.precompact-20260919": strings.Repeat("x", 200),
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size, err := indexSizeBytes(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(len("main") + len("wal") + len("shm")); size != want {
+		t.Fatalf("active database size = %d, want %d", size, want)
 	}
 }
 

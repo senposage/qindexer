@@ -28,10 +28,10 @@ let liveDashboardRefreshing = false;
 tokenInput.value = state.token;
 endpoint.textContent = `${location.origin}/admin/v1`;
 
-document.querySelector("#save-token").addEventListener("click", () => {
+document.querySelector("#save-token").addEventListener("click", async () => {
   state.token = tokenInput.value.trim();
   sessionStorage.setItem("qindexer.admin.token", state.token);
-  refresh();
+  if (await refresh()) showView("roots");
 });
 
 document.querySelector("#clear-token").addEventListener("click", () => {
@@ -146,8 +146,10 @@ async function refresh(options = {}) {
     document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
     setAdminVisibility(true);
     setMessage(options.message || "Ready");
+	return true;
   } catch (err) {
     showLockedStatus(publicStatus, err.code === "admin_setup_required" ? "Set an admin token to continue" : "Admin token is missing or invalid");
+	return false;
   }
 }
 
@@ -209,7 +211,7 @@ async function bootstrapAdmin(event) {
     document.querySelector("#bootstrap-token").value = "";
     document.querySelector("#bootstrap-confirm").value = "";
     document.querySelector("#bootstrap-panel").classList.add("hidden");
-    refresh();
+    if (await refresh()) showView("roots");
   } catch (err) {
     setMessage(err.message);
   }

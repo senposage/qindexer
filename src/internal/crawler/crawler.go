@@ -686,27 +686,37 @@ func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
 func (c *Crawler) CrawlUnindexedRoots(ctx context.Context) []catalog.CrawlRun {
 	states, err := c.cat.RootStates(ctx)
 	if err != nil {
-		c.log.Warn("could not read root crawl state; running initial reconciliation", "error", err)
+		c.log.Warn("could not read root crawl state; running startup reconciliation", "error", err)
 		return c.CrawlAll(ctx)
 	}
+	now := time.Now().UTC()
+	scanInterval := c.snapshot().Crawler.ScanInterval()
 	return c.crawlRoots(ctx, true, func(root config.RootConfig) bool {
 		state, exists := states[root.ID]
-		return needsInitialCrawl(root, exists, state)
+		return needsStartupCrawl(root, exists, state, now, scanInterval)
 	})
 }
 
-func needsInitialCrawl(root config.RootConfig, exists bool, state catalog.RootState) bool {
-	if !root.Enabled || !exists || state.LastSuccessfulCrawlAt == nil {
-		return root.Enabled && (!exists || state.LastSuccessfulCrawlAt == nil)
+// needsStartupCrawl decides whether a root is due when the service process
+// starts. A recent clean crawl stays quiet; roots which became due while the
+// service was offline begin immediately instead of waiting another interval.
+func needsStartupCrawl(root config.RootConfig, exists bool, state catalog.RootState, now time.Time, scanInterval time.Duration) bool {
+	if !root.Enabled {
+		return false
+	}
+	if !exists || state.LastSuccessfulCrawlAt == nil {
+		return true
 	}
 	// A deliberate stop or service shutdown during a crawl leaves checkpoints
 	// behind. Resume it at startup instead of waiting for the next full scan.
 	switch state.LastCrawlStatus {
-	case "cancelled", "interrupted", "running", "hint_running":
+	case "cancelled", "interrupted", "running", "hint_running", "unreachable", "partial", "error":
 		return true
-	default:
-		return false
 	}
+	if scanInterval <= 0 {
+		return true
+	}
+	return !state.LastSuccessfulCrawlAt.Add(scanInterval).After(now)
 }
 
 func (c *Crawler) crawlRoots(ctx context.Context, initial bool, include func(config.RootConfig) bool) []catalog.CrawlRun {
@@ -858,8 +868,8 @@ func (c *Crawler) Loop(ctx context.Context) {
 		c.log.Info("crawler loop stopped before initial crawl", "reason", "context_cancelled")
 		return
 	}
-	// A restart should preserve existing index state. Only new or incomplete
-	// roots need an initial crawl; watcher events cover ordinary changes.
+	// A restart preserves recent index state, but roots which became due while
+	// the service was offline must reconcile immediately.
 	c.CrawlUnindexedRoots(ctx)
 	for {
 		select {

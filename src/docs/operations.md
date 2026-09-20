@@ -126,6 +126,10 @@ run at 1,000 WAL pages, and the service performs an additional non-blocking
 checkpoint every 30 seconds. When no client is holding an older read snapshot,
 the service truncates the WAL sidecar.
 
+The admin size metric counts only the active `qsurfer-search.db` database and
+its live `-wal` and `-shm` sidecars. Timestamped pre-maintenance backups kept
+in the same directory are intentionally excluded.
+
 Use **Optimize index storage** in the administration UI, or
 `qindexer db-compact --database /path/to/qsurfer-search.db`, to reclaim
 already-unused pages. Compaction pauses crawls and can require temporary free
@@ -135,7 +139,9 @@ space while SQLite rewrites the database.
 
 QIndexer crawls when:
 
-- The service starts and the crawler loop schedules enabled roots.
+- The service starts: new, interrupted, failed, and overdue roots run
+  immediately. A root with a successful crawl more recent than
+  `scan_interval_seconds` stays idle until it is due.
 - `scan_interval_seconds` elapses for reconciliation.
 - The watcher records dirty paths and schedules follow-up work.
 - An admin manually triggers a root crawl.

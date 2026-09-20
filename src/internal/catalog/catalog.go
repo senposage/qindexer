@@ -280,10 +280,16 @@ func (c *Catalog) Close() error {
 }
 
 // Checkpoint copies committed WAL frames back into the main database without
-// interrupting readers. When no reader is holding an older snapshot it also
-// truncates the WAL file, preventing long enrichment runs from leaving a large
-// stale sidecar behind.
+// interrupting readers. It never races a catalog writer: a busy write window
+// simply skips this maintenance cycle, which is safer than making queue claims
+// or enrichment updates fail with SQLITE_BUSY. When no reader is holding an
+// older snapshot it also truncates the WAL file, preventing long enrichment
+// runs from leaving a large stale sidecar behind.
 func (c *Catalog) Checkpoint(ctx context.Context) error {
+	if !c.writeMu.TryLock() {
+		return nil
+	}
+	defer c.writeMu.Unlock()
 	var busy, frames, checkpointed int64
 	if err := c.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &checkpointed); err != nil {
 		return err
