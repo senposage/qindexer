@@ -10,8 +10,7 @@ crawls, one serialized SQLite writer, concurrent search reads, incremental
 filesystem hints, periodic reconciliation, repair tools, and adaptive CPU/disk
 throttling are included.
 
-QIndexer indexes and reports what the service account can see. It does not
-replace operating system, domain, or NAS permissions.
+
 
 ## Highlights
 
