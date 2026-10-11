@@ -3,7 +3,6 @@ param(
   [string]$ConfigPath = "",
   [string]$BinaryPath = "",
   [switch]$InstallSidecars,
-  [switch]$EnableOCR,
   [switch]$InstallService,
   [switch]$StartService,
   [string]$ServiceName = "QIndexer"
@@ -89,7 +88,7 @@ if (Test-Path -LiteralPath $installedConfig) {
 
 if ($InstallSidecars) {
   Require-Admin
-  & (Join-Path $scriptDir "setup-sidecars-windows.ps1") -ConfigPath $installedConfig -InstallDir $InstallDir -EnableOCR:$EnableOCR
+  & (Join-Path $scriptDir "setup-sidecars-windows.ps1") -InstallDir $InstallDir
 }
 
 if ($InstallService) {

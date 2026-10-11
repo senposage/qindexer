@@ -298,17 +298,16 @@ Use the Linux installer script from the repository root:
 ```
 
 `--install-sidecars` downloads/installs the OCR runtime with the available
-package manager, verifies `tesseract`, `ocrmypdf`, `gs`, and `pdftotext`, then
-writes the resolved Tesseract/OCRmyPDF paths to the installed config. Linux
-packages use the system PATH. Add `--enable-ocr` only when ready to start OCR;
-installing sidecars alone does not create an enrichment backlog.
+package manager and verifies `tesseract`, `ocrmypdf`, `gs`, and `pdftotext`.
+The sidecars are installed in the system PATH, so QIndexer uses its normal
+default command names. Installing sidecars alone does not enable OCR or create
+an enrichment backlog.
 
 On Windows, `-InstallSidecars` uses winget for Tesseract, Ghostscript, and
 Python, creates an isolated OCRmyPDF virtual environment under the QIndexer
-install directory, configures its executable path, and registers the
-Tesseract/Ghostscript directories in the machine PATH for the service account.
-It requires an elevated PowerShell session. Add `-EnableOCR` to enable global
-OCR after verification; per-root OCR settings still take precedence.
+install directory, and registers the Tesseract, Ghostscript, and OCRmyPDF
+directories in the machine PATH for the service account. It requires an
+elevated PowerShell session; enable OCR from the admin settings after setup.
 
 The management UI can request this setup from a local interactive QIndexer
 process: Windows displays UAC and Linux displays the configured polkit prompt.

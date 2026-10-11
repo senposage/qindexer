@@ -1,9 +1,6 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)]
-  [string]$ConfigPath,
-  [string]$InstallDir = "C:\Program Files\QIndexer",
-  [switch]$EnableOCR
+  [string]$InstallDir = "C:\Program Files\QIndexer"
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,36 +34,6 @@ function Find-Executable {
   return $null
 }
 
-function Set-OCRCommandConfig {
-  param(
-    [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Tesseract,
-    [Parameter(Mandatory = $true)][string]$OCRmyPDF,
-    [bool]$Enable
-  )
-  $lines = Get-Content -LiteralPath $Path
-  $insideOCR = $false
-  $changed = $false
-  $out = foreach ($line in $lines) {
-    if ($line -match '^  ocr:\s*$') { $insideOCR = $true; $line; continue }
-    if ($insideOCR -and $line -match '^  [A-Za-z_][A-Za-z0-9_]*:\s*$') { $insideOCR = $false }
-    if ($insideOCR -and $line -match '^    tesseract_command:\s*') {
-      $changed = $true
-      '    tesseract_command: "' + $Tesseract.Replace('"', '""') + '"'
-    } elseif ($insideOCR -and $line -match '^    ocrmypdf_command:\s*') {
-      $changed = $true
-      '    ocrmypdf_command: "' + $OCRmyPDF.Replace('"', '""') + '"'
-    } elseif ($insideOCR -and $Enable -and $line -match '^    enabled:\s*') {
-      $changed = $true
-      '    enabled: true'
-    } else {
-      $line
-    }
-  }
-  if (-not $changed) { throw "Could not find the global crawler.ocr block in $Path" }
-  Set-Content -LiteralPath $Path -Value $out -Encoding utf8
-}
-
 function Add-MachinePathEntry {
   param([Parameter(Mandatory = $true)][string]$Directory)
   $current = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -75,9 +42,8 @@ function Add-MachinePathEntry {
   [Environment]::SetEnvironmentVariable("Path", (($entries + $Directory) -join ';'), "Machine")
 }
 
-if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "Config not found: $ConfigPath" }
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-  throw "winget is required for automated Windows sidecar setup. Install Tesseract OCR, Ghostscript, Python 3, and OCRmyPDF manually, then set their command paths in $ConfigPath."
+  throw "winget is required for automated Windows sidecar setup. Install Tesseract OCR, Ghostscript, Python 3, and OCRmyPDF manually, then add their executable directories to the machine PATH."
 }
 
 Install-WingetPackage "UB-Mannheim.TesseractOCR"
@@ -106,11 +72,10 @@ if (-not $tesseract -or -not (Test-Path -LiteralPath $ocrmypdf) -or -not $ghosts
 # so it works under LocalSystem and other service accounts, not just this shell.
 Add-MachinePathEntry (Split-Path -Parent $tesseract)
 Add-MachinePathEntry (Split-Path -Parent $ghostscript)
-$env:Path = (Split-Path -Parent $tesseract) + ';' + (Split-Path -Parent $ghostscript) + ';' + $env:Path
-Set-OCRCommandConfig -Path $ConfigPath -Tesseract $tesseract -OCRmyPDF $ocrmypdf -Enable $EnableOCR
-Write-Host "OCR sidecars are installed and configured."
+Add-MachinePathEntry (Split-Path -Parent $ocrmypdf)
+$env:Path = (Split-Path -Parent $tesseract) + ';' + (Split-Path -Parent $ghostscript) + ';' + (Split-Path -Parent $ocrmypdf) + ';' + $env:Path
+Write-Host "OCR sidecars are installed and available on PATH."
 Write-Host "  Tesseract: $tesseract"
 Write-Host "  OCRmyPDF:  $ocrmypdf"
 Write-Host "  Ghostscript: $ghostscript"
-Write-Host "  Service PATH: registered Tesseract and Ghostscript directories at machine scope"
-if (-not $EnableOCR) { Write-Host "OCR remains disabled in the config. Re-run with -EnableOCR when you are ready to process the backlog." }
+Write-Host "  Service PATH: registered Tesseract, Ghostscript, and OCRmyPDF directories at machine scope"

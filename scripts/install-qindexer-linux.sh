@@ -7,7 +7,6 @@ BINARY_PATH=""
 INSTALL_SIDECARS=0
 INSTALL_SERVICE=0
 START_SERVICE=0
-ENABLE_OCR=0
 SERVICE_NAME="qindexer"
 
 while [[ $# -gt 0 ]]; do
@@ -16,7 +15,6 @@ while [[ $# -gt 0 ]]; do
     --config) CONFIG_PATH="$2"; shift 2 ;;
     --binary) BINARY_PATH="$2"; shift 2 ;;
     --install-sidecars) INSTALL_SIDECARS=1; shift ;;
-    --enable-ocr) ENABLE_OCR=1; shift ;;
     --install-service) INSTALL_SERVICE=1; shift ;;
     --start-service) START_SERVICE=1; shift ;;
     --service-name) SERVICE_NAME="$2"; shift 2 ;;
@@ -29,7 +27,6 @@ Options:
   --config PATH            Config file to install as configs/qindexer.yaml
   --binary PATH            qindexer Linux binary, default outputs/bin/qindexer_linux_amd64
   --install-sidecars       Install tesseract, ocrmypdf, ghostscript, poppler-utils when possible
-  --enable-ocr             Enable global OCR after verified sidecar installation (requires --install-sidecars)
   --install-service        Install a systemd service
   --start-service          Start the systemd service after install
   --service-name NAME      systemd service name, default qindexer
@@ -75,15 +72,8 @@ elif [[ ! -f "$INSTALL_DIR/configs/qindexer.yaml" ]]; then
   [[ -f "$INSTALL_DIR/configs/qindexer.yaml" ]] || { echo "No Linux example config found in the release bundle or repository." >&2; exit 1; }
 fi
 
-if [[ "$ENABLE_OCR" -eq 1 && "$INSTALL_SIDECARS" -ne 1 ]]; then
-  echo "--enable-ocr requires --install-sidecars so commands can be verified first." >&2
-  exit 2
-fi
-
 if [[ "$INSTALL_SIDECARS" -eq 1 ]]; then
-  sidecar_args=(--config "$INSTALL_DIR/configs/qindexer.yaml")
-  if [[ "$ENABLE_OCR" -eq 1 ]]; then sidecar_args+=(--enable-ocr); fi
-  $SUDO "$INSTALL_DIR/scripts/setup-sidecars-linux.sh" "${sidecar_args[@]}"
+  $SUDO "$INSTALL_DIR/scripts/setup-sidecars-linux.sh"
 fi
 
 if [[ "$INSTALL_SERVICE" -eq 1 ]]; then

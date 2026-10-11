@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.8
+
+### Fixed
+
+- OCR sidecar setup is now fully automatic: it never requires a QIndexer
+  config path and installs the sidecar executables into the system PATH.
+- The admin OCR installer resolves helpers in both installed and portable
+  release-bundle layouts.
+
 ## 1.0.7
 
 ### Added
@@ -13,8 +22,7 @@
 
 ### Changed
 
-- OCR command paths are written into the installed config after sidecar setup.
-  OCR stays disabled unless explicitly enabled, avoiding an accidental backlog.
+- OCR stays disabled unless explicitly enabled, avoiding an accidental backlog.
 
 ## 1.1.0
 

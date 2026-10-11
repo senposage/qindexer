@@ -1700,36 +1700,50 @@ func (s *Server) runSidecarInstaller(script string, enableOCR bool) {
 	var command *exec.Cmd
 	if runtime.GOOS == "windows" {
 		installDir := filepath.Dir(filepath.Dir(script))
-		arguments := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ConfigPath", configPath, "-InstallDir", installDir}
-		if enableOCR {
-			arguments = append(arguments, "-EnableOCR")
-		}
+		arguments := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-InstallDir", installDir}
 		command = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", startElevatedPowerShell(arguments))
 	} else {
-		arguments := []string{script, "--config", configPath}
-		if enableOCR {
-			arguments = append(arguments, "--enable-ocr")
-		}
-		command = exec.Command("pkexec", arguments...)
+		command = exec.Command("pkexec", script)
 	}
 	output, err := command.CombinedOutput()
 	if err != nil {
 		s.log.Error("OCR sidecar installation failed", "error", err, "output", strings.TrimSpace(string(output)))
 		return
 	}
-	candidate, err := config.Load(configPath)
-	if err != nil {
-		s.log.Error("OCR sidecar installation completed but config reload failed", "error", err)
-		return
+	if runtime.GOOS == "windows" {
+		if err := refreshWindowsSystemPath(); err != nil {
+			s.log.Warn("OCR sidecar installation completed but current process PATH refresh failed", "error", err)
+		}
 	}
-	s.mu.Lock()
-	err = s.saveConfigLocked(candidate)
-	s.mu.Unlock()
-	if err != nil {
-		s.log.Error("OCR sidecar installation completed but live config apply failed", "error", err)
-		return
+	if enableOCR {
+		candidate, err := config.Load(configPath)
+		if err != nil {
+			s.log.Error("OCR sidecar installation completed but config reload failed", "error", err)
+			return
+		}
+		candidate.Crawler.OCR.Enabled = true
+		candidate.Crawler.ContentExtraction.Enabled = true
+		s.mu.Lock()
+		err = s.saveConfigLocked(candidate)
+		s.mu.Unlock()
+		if err != nil {
+			s.log.Error("OCR sidecar installation completed but live config apply failed", "error", err)
+			return
+		}
 	}
-	s.log.Info("OCR sidecar installation completed", "tesseract_command", candidate.Crawler.OCR.TesseractCommand, "ocrmypdf_command", candidate.Crawler.OCR.OCRmyPDFCommand, "ocr_enabled", candidate.Crawler.OCR.Enabled)
+	s.log.Info("OCR sidecar installation completed", "ocr_enabled", enableOCR)
+}
+
+func refreshWindowsSystemPath() error {
+	output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "[Environment]::GetEnvironmentVariable('Path','Machine')").Output()
+	if err != nil {
+		return err
+	}
+	machinePath := strings.TrimSpace(string(output))
+	if machinePath == "" {
+		return errors.New("machine PATH is empty")
+	}
+	return os.Setenv("PATH", machinePath+";"+os.Getenv("PATH"))
 }
 
 func commandAvailable(command string) bool {
@@ -1753,7 +1767,16 @@ func sidecarInstallerPath() string {
 	if runtime.GOOS == "windows" {
 		name = "setup-sidecars-windows.ps1"
 	}
-	return filepath.Join(filepath.Dir(filepath.Dir(executable)), "scripts", name)
+	executableDir := filepath.Dir(executable)
+	for _, candidate := range []string{
+		filepath.Join(executableDir, "scripts", name),
+		filepath.Join(filepath.Dir(executableDir), "scripts", name),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return filepath.Join(filepath.Dir(executableDir), "scripts", name)
 }
 
 func startElevatedPowerShell(arguments []string) string {
