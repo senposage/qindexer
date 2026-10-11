@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.7
+
+### Added
+
+- OCR dependency setup from the local admin settings. When Tesseract or
+  OCRmyPDF is unavailable, the UI can launch the packaged installer helper,
+  with UAC on Windows and polkit on Linux.
+- Windows and Linux deployment scripts now install, verify, and configure
+  Tesseract, Ghostscript, OCRmyPDF, and Poppler sidecars. Release bundles
+  include the corresponding deployment helpers and example configurations.
+
+### Changed
+
+- OCR command paths are written into the installed config after sidecar setup.
+  OCR stays disabled unless explicitly enabled, avoiding an accidental backlog.
+
 ## 1.1.0
 
 ### Added

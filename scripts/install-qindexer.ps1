@@ -3,6 +3,7 @@ param(
   [string]$ConfigPath = "",
   [string]$BinaryPath = "",
   [switch]$InstallSidecars,
+  [switch]$EnableOCR,
   [switch]$InstallService,
   [switch]$StartService,
   [string]$ServiceName = "QIndexer"
@@ -42,57 +43,53 @@ function Set-PrivateAcl {
   Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
-function Install-CommandSidecars {
-  if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install --id UB-Mannheim.TesseractOCR --exact --accept-package-agreements --accept-source-agreements
-    winget install --id ArtifexSoftware.Ghostscript --exact --accept-package-agreements --accept-source-agreements
-  } else {
-    Write-Warning "winget not found; install Tesseract OCR and Ghostscript manually."
-  }
-
-  $python = Get-Command py -ErrorAction SilentlyContinue
-  if ($python) {
-    py -m pip install --user --upgrade ocrmypdf
-  } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    python -m pip install --user --upgrade ocrmypdf
-  } else {
-    Write-Warning "Python not found; install Python and run: python -m pip install --user ocrmypdf"
-  }
-}
-
 $repoRoot = Resolve-RepoRoot
 if (-not $BinaryPath) {
-  $BinaryPath = Join-Path $repoRoot "outputs\bin\qindexer_windows_amd64.exe"
+  $candidates = @(
+    (Join-Path $repoRoot "qindexer_windows_amd64.exe"),
+    (Join-Path $repoRoot "outputs\bin\qindexer_windows_amd64.exe"),
+    (Join-Path $repoRoot "src\dist\qindexer_windows_amd64.exe")
+  )
+  $BinaryPath = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 if (-not (Test-Path -LiteralPath $BinaryPath)) {
   throw "QIndexer binary not found: $BinaryPath"
 }
 
 $binDir = Join-Path $InstallDir "bin"
+$scriptDir = Join-Path $InstallDir "scripts"
 $configDir = Join-Path $InstallDir "configs"
 $dataDir = Join-Path $InstallDir "data"
 $logDir = Join-Path $dataDir "logs"
-New-Item -ItemType Directory -Force -Path $binDir, $configDir, $dataDir, $logDir | Out-Null
+New-Item -ItemType Directory -Force -Path $binDir, $scriptDir, $configDir, $dataDir, $logDir | Out-Null
 
 $installedBinary = Join-Path $binDir "qindexer.exe"
 Copy-Item -LiteralPath $BinaryPath -Destination $installedBinary -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-sidecars-windows.ps1") -Destination (Join-Path $scriptDir "setup-sidecars-windows.ps1") -Force
 
 if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
   Copy-Item -LiteralPath $ConfigPath -Destination (Join-Path $configDir "qindexer.yaml") -Force
 } elseif (-not (Test-Path -LiteralPath (Join-Path $configDir "qindexer.yaml"))) {
-  Copy-Item -LiteralPath (Join-Path $repoRoot "src\configs\example.yaml") -Destination (Join-Path $configDir "qindexer.yaml") -Force
+  $sampleConfig = @(
+    (Join-Path $repoRoot "configs\example.yaml"),
+    (Join-Path $repoRoot "src\configs\example.yaml")
+  ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $sampleConfig) { throw "No example config found in the release bundle or repository." }
+  Copy-Item -LiteralPath $sampleConfig -Destination (Join-Path $configDir "qindexer.yaml") -Force
 }
 
 Set-PrivateAcl -Path $configDir
 Set-PrivateAcl -Path $dataDir
 Set-PrivateAcl -Path $logDir
+Set-PrivateAcl -Path $scriptDir
 $installedConfig = Join-Path $configDir "qindexer.yaml"
 if (Test-Path -LiteralPath $installedConfig) {
   Set-PrivateAcl -Path $installedConfig
 }
 
 if ($InstallSidecars) {
-  Install-CommandSidecars
+  Require-Admin
+  & (Join-Path $scriptDir "setup-sidecars-windows.ps1") -ConfigPath $installedConfig -InstallDir $InstallDir -EnableOCR:$EnableOCR
 }
 
 if ($InstallService) {

@@ -12,6 +12,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -28,24 +31,25 @@ import (
 )
 
 type Server struct {
-	cfg           *config.Config
-	configPath    string
-	cat           *catalog.Catalog
-	crawler       *crawler.Crawler
-	watcher       *watcher.Watcher
-	log           *slog.Logger
-	accessLog     *slog.Logger
-	mu            sync.RWMutex
-	searchToken   string
-	adminToken    string
-	instanceID    string
-	searchSlots   chan struct{}
-	shutdown      func()
-	logPath       string
-	configChanged func(*config.Config)
-	resumeRoots   map[string]struct{}
-	repairMu      sync.RWMutex
-	repair        repairProgress
+	cfg                   *config.Config
+	configPath            string
+	cat                   *catalog.Catalog
+	crawler               *crawler.Crawler
+	watcher               *watcher.Watcher
+	log                   *slog.Logger
+	accessLog             *slog.Logger
+	mu                    sync.RWMutex
+	searchToken           string
+	adminToken            string
+	instanceID            string
+	searchSlots           chan struct{}
+	shutdown              func()
+	logPath               string
+	configChanged         func(*config.Config)
+	resumeRoots           map[string]struct{}
+	repairMu              sync.RWMutex
+	repair                repairProgress
+	sidecarInstallRunning bool
 }
 
 type repairProgress struct {
@@ -185,6 +189,8 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /admin/v1/crawler/stop", s.withAdminAuth(s.stopCrawler))
 	mux.HandleFunc("POST /admin/v1/service/stop", s.withAdminAuth(s.stopService))
 	mux.HandleFunc("PUT /admin/v1/crawler/settings", s.withAdminAuth(s.updateCrawlerSettings))
+	mux.HandleFunc("GET /admin/v1/sidecars", s.withAdminAuth(s.sidecars))
+	mux.HandleFunc("POST /admin/v1/sidecars/install", s.withAdminAuth(s.installSidecars))
 	mux.HandleFunc("PUT /admin/v1/network", s.withAdminAuth(s.updateNetworkSettings))
 	mux.HandleFunc("GET /admin/v1/roots", s.withAdminAuth(s.roots))
 	mux.HandleFunc("POST /admin/v1/roots", s.withAdminAuth(s.createRoot))
@@ -1632,6 +1638,130 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("crawler settings update completed", "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler, "watcher": s.cfg.Watcher})
+}
+
+func (s *Server) sidecars(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	ocr := s.cfg.Crawler.OCR
+	s.mu.RUnlock()
+	tesseract := commandAvailable(ocr.TesseractCommand)
+	ocrmypdf := commandAvailable(ocr.OCRmyPDFCommand)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tesseract": map[string]any{"command": ocr.TesseractCommand, "available": tesseract},
+		"ocrmypdf":  map[string]any{"command": ocr.OCRmyPDFCommand, "available": ocrmypdf},
+		"available": tesseract && ocrmypdf,
+		"installer": sidecarInstallerPath(),
+	})
+}
+
+func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r) {
+		writeError(w, http.StatusForbidden, "sidecar_install_local_only", "OCR dependencies can only be installed from the local administration UI")
+		return
+	}
+	var req struct {
+		EnableOCR bool `json:"enable_ocr"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	script := sidecarInstallerPath()
+	if _, err := os.Stat(script); err != nil {
+		writeError(w, http.StatusNotFound, "sidecar_installer_missing", "the packaged sidecar installer is not available beside this QIndexer installation")
+		return
+	}
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" {
+		writeError(w, http.StatusNotImplemented, "sidecar_install_unsupported", "automated OCR setup is supported on Windows and Linux")
+		return
+	}
+	s.mu.Lock()
+	if s.sidecarInstallRunning {
+		s.mu.Unlock()
+		writeError(w, http.StatusConflict, "sidecar_install_running", "OCR dependency installation is already running")
+		return
+	}
+	s.sidecarInstallRunning = true
+	s.mu.Unlock()
+	go s.runSidecarInstaller(script, req.EnableOCR)
+	s.log.Info("OCR sidecar installation accepted", "enable_ocr", req.EnableOCR, "platform", runtime.GOOS)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "elevation_requested", "message": "Complete the local elevation prompt to install OCR dependencies, then QIndexer will reload the resulting configuration."})
+}
+
+func (s *Server) runSidecarInstaller(script string, enableOCR bool) {
+	defer func() {
+		s.mu.Lock()
+		s.sidecarInstallRunning = false
+		s.mu.Unlock()
+	}()
+	s.mu.RLock()
+	configPath := s.configPath
+	s.mu.RUnlock()
+	var command *exec.Cmd
+	if runtime.GOOS == "windows" {
+		installDir := filepath.Dir(filepath.Dir(script))
+		arguments := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ConfigPath", configPath, "-InstallDir", installDir}
+		if enableOCR {
+			arguments = append(arguments, "-EnableOCR")
+		}
+		command = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", startElevatedPowerShell(arguments))
+	} else {
+		arguments := []string{script, "--config", configPath}
+		if enableOCR {
+			arguments = append(arguments, "--enable-ocr")
+		}
+		command = exec.Command("pkexec", arguments...)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		s.log.Error("OCR sidecar installation failed", "error", err, "output", strings.TrimSpace(string(output)))
+		return
+	}
+	candidate, err := config.Load(configPath)
+	if err != nil {
+		s.log.Error("OCR sidecar installation completed but config reload failed", "error", err)
+		return
+	}
+	s.mu.Lock()
+	err = s.saveConfigLocked(candidate)
+	s.mu.Unlock()
+	if err != nil {
+		s.log.Error("OCR sidecar installation completed but live config apply failed", "error", err)
+		return
+	}
+	s.log.Info("OCR sidecar installation completed", "tesseract_command", candidate.Crawler.OCR.TesseractCommand, "ocrmypdf_command", candidate.Crawler.OCR.OCRmyPDFCommand, "ocr_enabled", candidate.Crawler.OCR.Enabled)
+}
+
+func commandAvailable(command string) bool {
+	if strings.TrimSpace(command) == "" {
+		return false
+	}
+	if filepath.IsAbs(command) {
+		_, err := os.Stat(command)
+		return err == nil
+	}
+	_, err := exec.LookPath(command)
+	return err == nil
+}
+
+func sidecarInstallerPath() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	name := "setup-sidecars-linux.sh"
+	if runtime.GOOS == "windows" {
+		name = "setup-sidecars-windows.ps1"
+	}
+	return filepath.Join(filepath.Dir(filepath.Dir(executable)), "scripts", name)
+}
+
+func startElevatedPowerShell(arguments []string) string {
+	quoted := make([]string, 0, len(arguments))
+	for _, argument := range arguments {
+		quoted = append(quoted, "'"+strings.ReplaceAll(argument, "'", "''")+"'")
+	}
+	return "Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList @(" + strings.Join(quoted, ",") + ")"
 }
 
 func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {

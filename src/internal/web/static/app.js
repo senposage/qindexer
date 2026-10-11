@@ -62,6 +62,8 @@ document.querySelector("#add-root").addEventListener("click", openNewRoot);
 document.querySelector("#bootstrap-form").addEventListener("submit", bootstrapAdmin);
 document.querySelector("#network-settings-form").addEventListener("submit", saveNetworkSettings);
 document.querySelector("#indexing-settings-form").addEventListener("submit", saveIndexingSettings);
+document.querySelector("#settings-ocr").addEventListener("change", ensureOCRDependencies);
+document.querySelector("#install-ocr-sidecars").addEventListener("click", installOCRDependencies);
 document.querySelector("#compact-index").addEventListener("click", compactIndex);
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
@@ -596,6 +598,37 @@ async function saveIndexingSettings(event) {
     await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
     await refresh({ quiet: true, message: "Indexing settings saved" });
   } catch (err) { setMessage(err.message); }
+}
+
+async function ensureOCRDependencies(event) {
+  if (!event.target.checked) return;
+  try {
+    const status = await api("/admin/v1/sidecars");
+    if (status.available) return;
+    event.target.checked = false;
+    if (window.confirm("OCR dependencies are not ready. Install Tesseract, Ghostscript, and OCRmyPDF now? Windows will show a UAC prompt; Linux uses the local elevation prompt.")) {
+      await installOCRDependencies(true);
+    }
+  } catch (err) {
+    event.target.checked = false;
+    setMessage(err.message);
+  }
+}
+
+async function installOCRDependencies(enableOCR = false) {
+  const button = document.querySelector("#install-ocr-sidecars");
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Awaiting elevation...";
+  try {
+    const data = await api("/admin/v1/sidecars/install", { method: "POST", body: JSON.stringify({ enable_ocr: enableOCR }) });
+    setMessage(data.message || "Complete the local elevation prompt. QIndexer will reload OCR settings when installation finishes.");
+  } catch (err) {
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 
 async function compactIndex() {

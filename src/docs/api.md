@@ -302,6 +302,19 @@ Localhost-only first-run token setup:
 
 Admin-authenticated health view.
 
+### GET /admin/v1/sidecars
+
+Returns whether the configured Tesseract and OCRmyPDF commands are available,
+plus the packaged installer location when present. Requires admin auth.
+
+### POST /admin/v1/sidecars/install
+
+Starts the packaged OCR dependency installer from the local machine only. The
+request body is `{"enable_ocr": true|false}`. Windows asks for UAC and Linux
+uses polkit; an elevated service cannot surface a desktop prompt, so perform
+that setup from an interactive process. Returns `202` once elevation has been
+requested. Requires admin auth and a loopback request.
+
 ### GET /admin/v1/config
 
 Returns effective configuration with tokens redacted.

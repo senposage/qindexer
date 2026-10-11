@@ -297,10 +297,23 @@ Use the Linux installer script from the repository root:
 ./scripts/install-qindexer-linux.sh --install-dir /opt/qindexer --config ./src/configs/linux-nas.example.yaml --install-sidecars --install-service --start-service
 ```
 
-`--install-sidecars` attempts the available package manager, then verifies
-`tesseract`, `ocrmypdf`, `gs`, and `pdftotext`. If your distro uses different
-package names, install those commands manually or set explicit command paths in
-`qindexer.yaml`.
+`--install-sidecars` downloads/installs the OCR runtime with the available
+package manager, verifies `tesseract`, `ocrmypdf`, `gs`, and `pdftotext`, then
+writes the resolved Tesseract/OCRmyPDF paths to the installed config. Linux
+packages use the system PATH. Add `--enable-ocr` only when ready to start OCR;
+installing sidecars alone does not create an enrichment backlog.
+
+On Windows, `-InstallSidecars` uses winget for Tesseract, Ghostscript, and
+Python, creates an isolated OCRmyPDF virtual environment under the QIndexer
+install directory, configures its executable path, and registers the
+Tesseract/Ghostscript directories in the machine PATH for the service account.
+It requires an elevated PowerShell session. Add `-EnableOCR` to enable global
+OCR after verification; per-root OCR settings still take precedence.
+
+The management UI can request this setup from a local interactive QIndexer
+process: Windows displays UAC and Linux displays the configured polkit prompt.
+A Windows service cannot safely display UAC in a signed-in desktop session; for
+that deployment, run the installer from an elevated desktop/QSurfer process.
 
 Example unit:
 
