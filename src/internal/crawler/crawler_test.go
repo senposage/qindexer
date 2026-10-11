@@ -127,6 +127,36 @@ func TestShouldSkipOfficeTemporaryLockFile(t *testing.T) {
 	}
 }
 
+func TestShouldSkipOperationalWindowsDirectories(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "probe"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		`C:\System Volume Information`,
+		`C:\Users\Test\AppData\Local\Microsoft\Windows\WebCache`,
+		`C:\Windows\System32\sru`,
+		`C:\Users\Test\AppData\Local\Temp\_MEI12345`,
+	} {
+		if !shouldSkip(config.RootConfig{}, path, entries[0], false) {
+			t.Fatalf("expected operational directory %q to be skipped", path)
+		}
+	}
+}
+
+func TestConfiguredRootPathRequiresExactNonGlobMatch(t *testing.T) {
+	if !isConfiguredRootPath(`X:\Legal`, `x:/legal`) {
+		t.Fatal("expected Windows root paths to compare case-insensitively")
+	}
+	if isConfiguredRootPath(`X:\*`, `X:\Legal`) {
+		t.Fatal("globbed root must not make each child a configured root")
+	}
+}
+
 func TestDirectoryQueueInterleavesTopLevelBranches(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	queue := newDirQueue([]string{root})

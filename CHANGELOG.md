@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.9
+
+### Fixed
+
+- Windows reparse points and legacy profile junctions are skipped before they
+  can enter the crawler queue.
+- Built-in exclusions now cover non-indexable system and volatile locations,
+  including System Volume Information, recycle folders, Windows WebCache, SRU,
+  and generated `_MEI*` temporary folders.
+- A denied or disappearing child directory now produces a degraded crawl that
+  preserves existing index records and waits for the normal next crawl. It no
+  longer starts a 30-second whole-root retry or marks unseen files missing.
+- Cancelled admin metric requests no longer add misleading catalog warnings to
+  the service log.
+
 ## 1.0.8
 
 ### Fixed

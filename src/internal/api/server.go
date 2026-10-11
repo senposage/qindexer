@@ -77,6 +77,7 @@ var defaultRootExcludeFolderPatterns = []string{
 	"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**",
 	"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
 	"**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
+	"**/System Volume Information/**", "**/AppData/Local/Microsoft/Windows/WebCache/**", "**/Windows/System32/sru/**", "**/AppData/Local/Temp/_MEI*/**",
 }
 
 type rootAliasView struct {
@@ -1458,11 +1459,11 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		s.log.Debug("could not read index size", "error", err)
 	}
 	indexStats, statsErr := s.cat.IndexStats(r.Context())
-	if statsErr != nil {
+	if statsErr != nil && !errors.Is(statsErr, context.Canceled) && !errors.Is(statsErr, context.DeadlineExceeded) {
 		s.log.Debug("could not read index type stats", "error", statsErr)
 	}
 	storage, storageErr := s.cat.StorageStats(r.Context(), maxStoredTextBytes)
-	if storageErr != nil {
+	if storageErr != nil && !errors.Is(storageErr, context.Canceled) && !errors.Is(storageErr, context.DeadlineExceeded) {
 		s.log.Debug("could not read index storage stats", "error", storageErr)
 	}
 	watcherStats := watcher.Stats{}

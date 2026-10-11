@@ -33,6 +33,10 @@ import (
 var (
 	errRootTraversalIncomplete = errors.New("root traversal incomplete")
 	errRootTraversalPartial    = errors.New("root traversal partially completed")
+	// A child branch could not be read, but the configured root remained
+	// available. This must not cause a 30-second full-root retry or mark the
+	// unseen branch as missing.
+	errRootTraversalDegraded = errors.New("root traversal completed with skipped branches")
 )
 
 type Crawler struct {
@@ -1051,10 +1055,6 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 	if priorityErr != nil {
 		c.log.Warn("missing-path priority lookup failed", "root", root.ID, "error", priorityErr)
 	}
-	priorityMissing := make(map[string]struct{}, len(priorityPaths))
-	for _, path := range priorityPaths {
-		priorityMissing[path] = struct{}{}
-	}
 	var filesSeen, filesAdded, filesUpdated, filesUnchanged, errorsCount int64
 	var workers sync.WaitGroup
 	batchSize := max(1, settings.IndexBatchSize/max(1, settings.MetadataWorkerCount))
@@ -1109,10 +1109,16 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 					if isCrawlerCancellation(ctx, err) {
 						return
 					}
-					if _, priority := priorityMissing[path]; priority && errors.Is(err, fs.ErrNotExist) {
-						// It was missing last pass and is still absent. Leave the
-						// existing missing record alone without turning recovery into
-						// an error storm.
+					if errors.Is(err, fs.ErrNotExist) {
+						// A file may be deleted, or a legacy junction target may vanish,
+						// between directory enumeration and metadata collection. Neither
+						// is a crawler failure.
+						continue
+					}
+					if isPermissionError(err) {
+						atomic.AddInt64(&errorsCount, 1)
+						c.recordProgressError(root.ID, path, err)
+						c.logSuppressed("metadata-access:"+root.ID+":"+path, "metadata access denied", err.Error(), 5*time.Minute, "root", root.ID, "path", path, "error", err)
 						continue
 					}
 					atomic.AddInt64(&errorsCount, 1)
@@ -1175,6 +1181,12 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 				run.Status = "failed"
 				run.ErrorMessage = err.Error()
 			}
+		} else if errors.Is(walkErr, errRootTraversalDegraded) {
+			// Do not mark unseen paths as missing after a child branch was skipped.
+			// Unlike an unreachable root, this is revisited on the normal crawl
+			// interval and must not trigger an immediate full-root retry.
+			run.Status = "degraded"
+			run.ErrorMessage = walkErr.Error()
 		} else {
 			run.Status = "failed"
 			run.ErrorMessage = walkErr.Error()
@@ -1197,7 +1209,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 	if err := c.finishCrawl(ctx, run); err != nil {
 		return run, err
 	}
-	if run.Status == "unreachable" || run.Status == "partial" {
+	if run.Status == "unreachable" || run.Status == "partial" || run.Status == "degraded" {
 		c.logSuppressed("crawl-unreachable:"+root.ID, "crawl finished", run.ErrorMessage, 5*time.Minute, "root", root.ID, "status", run.Status, "seen", run.FilesSeen, "added", run.FilesAdded, "updated", run.FilesUpdated, "missing", run.FilesMissing, "errors", run.Errors, "error", run.ErrorMessage)
 	} else {
 		c.log.Info("crawl finished", "root", root.ID, "status", run.Status, "seen", run.FilesSeen, "added", run.FilesAdded, "updated", run.FilesUpdated, "missing", run.FilesMissing, "errors", run.Errors)
@@ -1431,7 +1443,14 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 		} else {
 			c.logSuppressed("dir-read:"+root.ID+":"+dir, "directory read failed", err.Error(), 5*time.Minute, "root", root.ID, "path", dir, "error", err)
 		}
-		queue.setPartialErr(fmt.Errorf("%w: could not read %s: %v", errRootTraversalPartial, dir, err))
+		if isConfiguredRootPath(root.Path, dir) {
+			queue.setPartialErr(fmt.Errorf("%w: could not read configured root %s: %v", errRootTraversalIncomplete, dir, err))
+		} else {
+			// A branch can be denied, temporarily disappear, or be a broken
+			// reparse point. Preserve existing records and revisit it during the
+			// next normal crawl without repeatedly restarting the entire root.
+			queue.setPartialErr(fmt.Errorf("%w: could not read %s: %v", errRootTraversalDegraded, dir, err))
+		}
 		return
 	}
 	folders := 0
@@ -1454,7 +1473,7 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 		if shouldSkip(root, path, entry, c.snapshot().Crawler.IgnoreHidden) {
 			continue
 		}
-		if entry.Type()&os.ModeSymlink != 0 && !c.snapshot().Crawler.FollowSymlinks {
+		if (entry.IsDir() || entry.Type()&os.ModeSymlink != 0) && isReparsePoint(path, entry) && !c.snapshot().Crawler.FollowSymlinks {
 			continue
 		}
 		if entry.IsDir() {
@@ -1507,6 +1526,10 @@ func (c *Crawler) finishCrawl(ctx context.Context, run catalog.CrawlRun) error {
 
 func isCrawlerCancellation(ctx context.Context, err error) bool {
 	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func isConfiguredRootPath(configured, path string) bool {
+	return !hasGlob(configured) && comparablePath(configured) == comparablePath(path)
 }
 
 func (c *Crawler) waitIfPaused(ctx context.Context, adaptivePause bool) error {
@@ -2203,10 +2226,28 @@ func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHi
 	if !entry.IsDir() && strings.HasPrefix(strings.TrimLeft(name, `\\/`), "~$") {
 		return true
 	}
-	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || matchesAny(path, []string{"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**"})) {
+	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || isOperationalFolder(path)) {
 		return true
 	}
 	return matchesAny(path, root.ExcludePatterns)
+}
+
+var defaultOperationalFolderExclusions = []string{
+	"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
+	"**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
+	"**/System Volume Information/**",
+	"**/AppData/Local/Microsoft/Windows/WebCache/**", "**/Windows/System32/sru/**", "**/AppData/Local/Temp/_MEI*/**",
+}
+
+func isOperationalFolder(path string) bool {
+	if matchesAny(path, defaultOperationalFolderExclusions) {
+		return true
+	}
+	// The generated _MEI directory is unique per application launch, so a
+	// wildcard is needed. Match it separately because a trailing /** glob only
+	// recognizes a fixed directory name when considering the directory itself.
+	normalized := comparablePath(path)
+	return strings.Contains(normalized, "/appdata/local/temp/_mei")
 }
 
 func extensionAllowed(root config.RootConfig, ext string) bool {
