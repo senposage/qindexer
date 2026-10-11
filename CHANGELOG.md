@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.10
+
+### Fixed
+
+- Windows OCR setup now resolves the current upstream Tesseract GitHub release
+  at install time instead of relying on a per-user `winget` registration.
+- Existing OCRmyPDF installations are reused; only missing dependencies are
+  installed.
+- Sidecar setup distinguishes an interactive UAC request from a Windows
+  service in Session 0, where it runs directly with the service's privileges.
+- The admin UI reports installer progress and failures, while the installer
+  writes its own transcript for diagnosis.
+
 ## 1.0.9
 
 ### Fixed

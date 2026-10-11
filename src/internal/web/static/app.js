@@ -623,12 +623,33 @@ async function installOCRDependencies(enableOCR = false) {
   try {
     const data = await api("/admin/v1/sidecars/install", { method: "POST", body: JSON.stringify({ enable_ocr: enableOCR }) });
     setMessage(data.message || "Complete the local elevation prompt. QIndexer will reload OCR settings when installation finishes.");
+    await waitForOCRInstallation(button);
   } catch (err) {
     setMessage(err.message);
   } finally {
     button.disabled = false;
     button.textContent = original;
   }
+}
+
+async function waitForOCRInstallation(button) {
+  const deadline = Date.now() + (15 * 60 * 1000);
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const status = await api("/admin/v1/sidecars");
+    const installation = status.installation || {};
+    if (installation.status === "completed") {
+      setMessage(installation.message || "OCR dependencies installed and verified.");
+      await refresh({ quiet: true });
+      return;
+    }
+    if (installation.status === "failed") {
+      throw new Error(installation.message || "OCR dependency installation failed. Check the service log for details.");
+    }
+    button.textContent = installation.status === "awaiting_elevation" ? "Awaiting elevation..." : "Installing OCR...";
+    if (installation.message) setMessage(installation.message);
+  }
+  throw new Error("OCR setup is still running. Check the service log for the installer transcript.");
 }
 
 async function compactIndex() {

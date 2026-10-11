@@ -31,25 +31,33 @@ import (
 )
 
 type Server struct {
-	cfg                   *config.Config
-	configPath            string
-	cat                   *catalog.Catalog
-	crawler               *crawler.Crawler
-	watcher               *watcher.Watcher
-	log                   *slog.Logger
-	accessLog             *slog.Logger
-	mu                    sync.RWMutex
-	searchToken           string
-	adminToken            string
-	instanceID            string
-	searchSlots           chan struct{}
-	shutdown              func()
-	logPath               string
-	configChanged         func(*config.Config)
-	resumeRoots           map[string]struct{}
-	repairMu              sync.RWMutex
-	repair                repairProgress
-	sidecarInstallRunning bool
+	cfg            *config.Config
+	configPath     string
+	cat            *catalog.Catalog
+	crawler        *crawler.Crawler
+	watcher        *watcher.Watcher
+	log            *slog.Logger
+	accessLog      *slog.Logger
+	mu             sync.RWMutex
+	searchToken    string
+	adminToken     string
+	instanceID     string
+	searchSlots    chan struct{}
+	shutdown       func()
+	logPath        string
+	configChanged  func(*config.Config)
+	resumeRoots    map[string]struct{}
+	repairMu       sync.RWMutex
+	repair         repairProgress
+	sidecarInstall sidecarInstallProgress
+}
+
+type sidecarInstallProgress struct {
+	Status    string    `json:"status"`
+	Message   string    `json:"message,omitempty"`
+	LogPath   string    `json:"log_path,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 type repairProgress struct {
@@ -1644,14 +1652,19 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) sidecars(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	ocr := s.cfg.Crawler.OCR
+	installation := s.sidecarInstall
 	s.mu.RUnlock()
+	if installation.Status == "" {
+		installation.Status = "idle"
+	}
 	tesseract := commandAvailable(ocr.TesseractCommand)
 	ocrmypdf := commandAvailable(ocr.OCRmyPDFCommand)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tesseract": map[string]any{"command": ocr.TesseractCommand, "available": tesseract},
-		"ocrmypdf":  map[string]any{"command": ocr.OCRmyPDFCommand, "available": ocrmypdf},
-		"available": tesseract && ocrmypdf,
-		"installer": sidecarInstallerPath(),
+		"tesseract":    map[string]any{"command": ocr.TesseractCommand, "available": tesseract},
+		"ocrmypdf":     map[string]any{"command": ocr.OCRmyPDFCommand, "available": ocrmypdf},
+		"available":    tesseract && ocrmypdf,
+		"installer":    sidecarInstallerPath(),
+		"installation": installation,
 	})
 }
 
@@ -1677,38 +1690,58 @@ func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if s.sidecarInstallRunning {
+	if s.sidecarInstall.Status == "awaiting_elevation" || s.sidecarInstall.Status == "installing" {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, "sidecar_install_running", "OCR dependency installation is already running")
 		return
 	}
-	s.sidecarInstallRunning = true
+	logPath := s.sidecarInstallLogPathLocked()
+	now := time.Now().UTC()
+	s.sidecarInstall = sidecarInstallProgress{
+		Status:    "awaiting_elevation",
+		Message:   "Waiting for the local elevation prompt.",
+		LogPath:   logPath,
+		StartedAt: now,
+		UpdatedAt: now,
+	}
 	s.mu.Unlock()
-	go s.runSidecarInstaller(script, req.EnableOCR)
+	go s.runSidecarInstaller(script, logPath, req.EnableOCR)
 	s.log.Info("OCR sidecar installation accepted", "enable_ocr", req.EnableOCR, "platform", runtime.GOOS)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "elevation_requested", "message": "Complete the local elevation prompt to install OCR dependencies, then QIndexer will reload the resulting configuration."})
 }
 
-func (s *Server) runSidecarInstaller(script string, enableOCR bool) {
-	defer func() {
-		s.mu.Lock()
-		s.sidecarInstallRunning = false
-		s.mu.Unlock()
-	}()
+func (s *Server) runSidecarInstaller(script, logPath string, enableOCR bool) {
+	s.setSidecarInstallProgress("installing", "Installing OCR dependencies.", logPath)
 	s.mu.RLock()
 	configPath := s.configPath
 	s.mu.RUnlock()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+		s.setSidecarInstallProgress("failed", "Could not create the sidecar installer log: "+err.Error(), logPath)
+		return
+	}
 	var command *exec.Cmd
 	if runtime.GOOS == "windows" {
 		installDir := filepath.Dir(filepath.Dir(script))
-		arguments := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-InstallDir", installDir}
-		command = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", startElevatedPowerShell(arguments))
+		arguments := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-InstallDir", installDir, "-LogPath", logPath}
+		if windowsCanShowElevationPrompt() {
+			command = exec.Command("powershell.exe", "-NoProfile", "-Command", startElevatedPowerShell(arguments))
+		} else {
+			// Services run in Session 0, where UAC cannot reach the signed-in
+			// desktop. They are normally already privileged, so run the helper
+			// directly instead of waiting on an impossible prompt.
+			command = exec.Command("powershell.exe", arguments...)
+		}
 	} else {
 		command = exec.Command("pkexec", script)
 	}
 	output, err := command.CombinedOutput()
 	if err != nil {
-		s.log.Error("OCR sidecar installation failed", "error", err, "output", strings.TrimSpace(string(output)))
+		detail := strings.TrimSpace(string(output))
+		if transcript := sidecarInstallTranscript(logPath); transcript != "" {
+			detail = transcript
+		}
+		s.log.Error("OCR sidecar installation failed", "error", err, "output", detail, "log_path", logPath)
+		s.setSidecarInstallProgress("failed", "OCR setup failed: "+firstLine(detail, err.Error()), logPath)
 		return
 	}
 	if runtime.GOOS == "windows" {
@@ -1720,6 +1753,7 @@ func (s *Server) runSidecarInstaller(script string, enableOCR bool) {
 		candidate, err := config.Load(configPath)
 		if err != nil {
 			s.log.Error("OCR sidecar installation completed but config reload failed", "error", err)
+			s.setSidecarInstallProgress("failed", "OCR installed, but configuration reload failed: "+err.Error(), logPath)
 			return
 		}
 		candidate.Crawler.OCR.Enabled = true
@@ -1729,10 +1763,47 @@ func (s *Server) runSidecarInstaller(script string, enableOCR bool) {
 		s.mu.Unlock()
 		if err != nil {
 			s.log.Error("OCR sidecar installation completed but live config apply failed", "error", err)
+			s.setSidecarInstallProgress("failed", "OCR installed, but configuration could not be applied: "+err.Error(), logPath)
 			return
 		}
 	}
 	s.log.Info("OCR sidecar installation completed", "ocr_enabled", enableOCR)
+	s.setSidecarInstallProgress("completed", "OCR dependencies installed and verified.", logPath)
+}
+
+func (s *Server) sidecarInstallLogPathLocked() string {
+	return filepath.Join(config.ResolveDataDir(s.configPath, s.cfg.Index.DataDir), "logs", "sidecar-install.log")
+}
+
+func (s *Server) setSidecarInstallProgress(status, message, logPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sidecarInstall.Status = status
+	s.sidecarInstall.Message = message
+	s.sidecarInstall.LogPath = logPath
+	if s.sidecarInstall.StartedAt.IsZero() {
+		s.sidecarInstall.StartedAt = time.Now().UTC()
+	}
+	s.sidecarInstall.UpdatedAt = time.Now().UTC()
+}
+
+func sidecarInstallTranscript(logPath string) string {
+	contents, err := os.ReadFile(logPath)
+	if err != nil || len(contents) == 0 {
+		return ""
+	}
+	const maxTail = 4000
+	if len(contents) > maxTail {
+		contents = contents[len(contents)-maxTail:]
+	}
+	return strings.TrimSpace(string(contents))
+}
+
+func firstLine(value, fallback string) string {
+	if line := strings.TrimSpace(strings.Split(value, "\n")[0]); line != "" {
+		return line
+	}
+	return fallback
 }
 
 func refreshWindowsSystemPath() error {
@@ -1785,7 +1856,8 @@ func startElevatedPowerShell(arguments []string) string {
 	for _, argument := range arguments {
 		quoted = append(quoted, "'"+strings.ReplaceAll(argument, "'", "''")+"'")
 	}
-	return "Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList @(" + strings.Join(quoted, ",") + ")"
+	return "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList @(" +
+		strings.Join(quoted, ",") + "); if ($p.ExitCode -ne 0) { exit $p.ExitCode }"
 }
 
 func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {
