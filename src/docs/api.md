@@ -309,11 +309,11 @@ plus the packaged installer location when present. Requires admin auth.
 
 ### POST /admin/v1/sidecars/install
 
-Starts the packaged OCR dependency installer from the local machine only. The
-request body is `{"enable_ocr": true|false}`. Windows asks for UAC and Linux
-uses polkit; an elevated service cannot surface a desktop prompt, so perform
-that setup from an interactive process. Returns `202` once elevation has been
-requested. Requires admin auth and a loopback request.
+Starts the packaged OCR dependency installer. The request body is
+`{"enable_ocr": true|false}`. Windows asks for UAC when QIndexer is running
+interactively; a Windows service runs the helper directly with its service
+account privileges. Linux uses polkit. Returns `202` once installation starts.
+Requires admin auth.
 
 ### GET /admin/v1/config
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.11
+
+### Fixed
+
+- The authenticated admin UI can now start OCR sidecar setup through a LAN
+  address; it is no longer incorrectly restricted to loopback-only requests.
+
 ## 1.0.10
 
 ### Fixed

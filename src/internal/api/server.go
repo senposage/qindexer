@@ -1669,10 +1669,6 @@ func (s *Server) sidecars(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackRequest(r) {
-		writeError(w, http.StatusForbidden, "sidecar_install_local_only", "OCR dependencies can only be installed from the local administration UI")
-		return
-	}
 	var req struct {
 		EnableOCR bool `json:"enable_ocr"`
 	}
