@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.9 - 2026-10-12
+
+- Correct missing-document retention: each successful full crawl now advances already-missing records, and records are physically removed after `missing_after_successful_crawls` clean misses instead of being retained as hidden rows indefinitely.
+- Add standalone service setup scripts: Windows uses NSSM and Linux writes a native systemd unit. Both preserve an existing configuration, otherwise create a loopback-only configuration with no roots or token, offer optional OCR sidecar setup, and start the service.
+
 ## 1.1.8 - 2026-10-12
 
 - Keep filesystem change notifications visible and self-healing: unavailable native watcher handles now report the reason in the admin UI and retry every 30 seconds.
