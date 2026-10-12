@@ -1670,16 +1670,12 @@ func (s *Server) sidecars(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
+	s.log.Info("OCR sidecar installation requested", "remote", r.RemoteAddr, "platform", runtime.GOOS)
 	var req struct {
 		EnableOCR bool `json:"enable_ocr"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
-		return
-	}
-	script := sidecarInstallerPath()
-	if _, err := os.Stat(script); err != nil {
-		writeError(w, http.StatusNotFound, "sidecar_installer_missing", "the packaged sidecar installer is not available beside this QIndexer installation")
 		return
 	}
 	if runtime.GOOS != "windows" && runtime.GOOS != "linux" {
@@ -1702,7 +1698,7 @@ func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: now,
 	}
 	s.mu.Unlock()
-	go s.runSidecarInstaller(script, logPath, req.EnableOCR)
+	go s.runSidecarInstaller(sidecarInstallerPath(), logPath, req.EnableOCR)
 	s.log.Info("OCR sidecar installation accepted", "enable_ocr", req.EnableOCR, "platform", runtime.GOOS)
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "installing", "message": "OCR dependency installation started. QIndexer will reload the resulting configuration when it finishes."})
 }
@@ -1714,6 +1710,11 @@ func (s *Server) runSidecarInstaller(script, logPath string, enableOCR bool) {
 	s.mu.RUnlock()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 		s.setSidecarInstallProgress("failed", "Could not create the sidecar installer log: "+err.Error(), logPath)
+		return
+	}
+	if err := ensureSidecarInstaller(script); err != nil {
+		s.log.Error("OCR sidecar installer unavailable", "error", err, "path", script)
+		s.setSidecarInstallProgress("failed", "Could not prepare the OCR installer: "+err.Error(), logPath)
 		return
 	}
 	var command *exec.Cmd
@@ -1857,6 +1858,52 @@ func sidecarInstallerPath() string {
 		}
 	}
 	return filepath.Join(filepath.Dir(executableDir), "scripts", name)
+}
+
+// ensureSidecarInstaller recovers the release-matched helper when a managed
+// deployment has installed only qindexer.exe. Portable installs still use the
+// local packaged script without a network request.
+func ensureSidecarInstaller(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	name := filepath.Base(path)
+	url := fmt.Sprintf("https://raw.githubusercontent.com/senposage/qindexer/v%s/scripts/%s", version.Version, name)
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("User-Agent", "QIndexer/"+version.Version)
+	client := &http.Client{Timeout: 30 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", name, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: upstream returned %s", name, response.Status)
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+	if len(contents) == 0 {
+		return fmt.Errorf("download %s: empty response", name)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	temporary := path + ".download"
+	if err := os.WriteFile(temporary, contents, 0755); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
 }
 
 func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {

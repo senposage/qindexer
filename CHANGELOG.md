@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.3 - 2026-10-12
+
+- Make OCR sidecar deployment self-contained for managed installs: when the helper script is absent beside QIndexer, the service retrieves the release-matched script into its own `scripts` directory before executing it.
+- Log each OCR installer request before helper preparation, so a rejected or failed request is diagnosable from the operational log.
+
 ## 1.1.2 - 2026-10-12
 
 - Run the packaged OCR dependency installer directly under the QIndexer service identity for authenticated admin requests, regardless of whether the dashboard is reached locally or remotely.
