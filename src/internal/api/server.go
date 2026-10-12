@@ -1695,8 +1695,8 @@ func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
 	logPath := s.sidecarInstallLogPathLocked()
 	now := time.Now().UTC()
 	s.sidecarInstall = sidecarInstallProgress{
-		Status:    "awaiting_elevation",
-		Message:   "Waiting for the local elevation prompt.",
+		Status:    "installing",
+		Message:   "Starting OCR dependency installation.",
 		LogPath:   logPath,
 		StartedAt: now,
 		UpdatedAt: now,
@@ -1704,7 +1704,7 @@ func (s *Server) installSidecars(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	go s.runSidecarInstaller(script, logPath, req.EnableOCR)
 	s.log.Info("OCR sidecar installation accepted", "enable_ocr", req.EnableOCR, "platform", runtime.GOOS)
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "elevation_requested", "message": "Complete the local elevation prompt to install OCR dependencies, then QIndexer will reload the resulting configuration."})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "installing", "message": "OCR dependency installation started. QIndexer will reload the resulting configuration when it finishes."})
 }
 
 func (s *Server) runSidecarInstaller(script, logPath string, enableOCR bool) {
@@ -1720,14 +1720,9 @@ func (s *Server) runSidecarInstaller(script, logPath string, enableOCR bool) {
 	if runtime.GOOS == "windows" {
 		installDir := filepath.Dir(filepath.Dir(script))
 		arguments := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-InstallDir", installDir, "-LogPath", logPath}
-		if windowsCanShowElevationPrompt() {
-			command = exec.Command("powershell.exe", "-NoProfile", "-Command", startElevatedPowerShell(arguments))
-		} else {
-			// Services run in Session 0, where UAC cannot reach the signed-in
-			// desktop. They are normally already privileged, so run the helper
-			// directly instead of waiting on an impossible prompt.
-			command = exec.Command("powershell.exe", arguments...)
-		}
+		// Run under QIndexer's existing service identity. The authenticated admin
+		// request may originate locally or remotely; neither affects installation.
+		command = exec.Command("powershell.exe", arguments...)
 	} else {
 		command = exec.Command("pkexec", script)
 	}
@@ -1862,15 +1857,6 @@ func sidecarInstallerPath() string {
 		}
 	}
 	return filepath.Join(filepath.Dir(executableDir), "scripts", name)
-}
-
-func startElevatedPowerShell(arguments []string) string {
-	quoted := make([]string, 0, len(arguments))
-	for _, argument := range arguments {
-		quoted = append(quoted, "'"+strings.ReplaceAll(argument, "'", "''")+"'")
-	}
-	return "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList @(" +
-		strings.Join(quoted, ",") + "); if ($p.ExitCode -ne 0) { exit $p.ExitCode }"
 }
 
 func (s *Server) updateNetworkSettings(w http.ResponseWriter, r *http.Request) {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2 - 2026-10-12
+
+- Run the packaged OCR dependency installer directly under the QIndexer service identity for authenticated admin requests, regardless of whether the dashboard is reached locally or remotely.
+- Clarify OCR installation progress in the admin UI.
+
 ## 1.1.1
 
 ### Fixed

@@ -712,7 +712,7 @@ async function ensureOCRDependencies(event) {
     const status = await api("/admin/v1/sidecars");
     if (status.available) return;
     event.target.checked = false;
-    if (window.confirm("OCR dependencies are not ready. Install Tesseract, Ghostscript, and OCRmyPDF now? Windows will show a UAC prompt; Linux uses the local elevation prompt.")) {
+    if (window.confirm("OCR dependencies are not ready. Install Tesseract, Ghostscript, and OCRmyPDF now?")) {
       await installOCRDependencies(true);
     }
   } catch (err) {
@@ -725,10 +725,10 @@ async function installOCRDependencies(enableOCR = false) {
   const button = document.querySelector("#install-ocr-sidecars");
   button.disabled = true;
   const original = button.textContent;
-  button.textContent = "Awaiting elevation...";
+  button.textContent = "Starting installer...";
   try {
     const data = await api("/admin/v1/sidecars/install", { method: "POST", body: JSON.stringify({ enable_ocr: enableOCR }) });
-    setMessage(data.message || "Complete the local elevation prompt. QIndexer will reload OCR settings when installation finishes.");
+    setMessage(data.message || "Installing OCR dependencies. QIndexer will reload OCR settings when installation finishes.");
     await waitForOCRInstallation(button);
   } catch (err) {
     setMessage(err.message);
@@ -752,7 +752,7 @@ async function waitForOCRInstallation(button) {
     if (installation.status === "failed") {
       throw new Error(installation.message || "OCR dependency installation failed. Check the service log for details.");
     }
-    button.textContent = installation.status === "awaiting_elevation" ? "Awaiting elevation..." : "Installing OCR...";
+    button.textContent = "Installing OCR...";
     if (installation.message) setMessage(installation.message);
   }
   throw new Error("OCR setup is still running. Check the service log for the installer transcript.");
