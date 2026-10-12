@@ -201,6 +201,46 @@ func TestUpsertDocumentsRestoresMissingRecordsInOneBatch(t *testing.T) {
 	}
 }
 
+func TestMarkMissingDeletesAfterConsecutiveSuccessfulCrawls(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	doc := Document{ID: "gone", RootID: "test", Path: `D:\fixtures\gone.txt`, NormalizedPath: NormalizePath(`D:\fixtures\gone.txt`), Name: "gone.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	for generation := int64(2); generation <= 3; generation++ {
+		if _, err := cat.MarkMissing(ctx, "test", generation, 3); err != nil {
+			t.Fatal(err)
+		}
+		paths, err := cat.MissingDocumentPaths(ctx, "test", 10)
+		if err != nil || len(paths) != 1 {
+			t.Fatalf("generation %d missing paths = %#v, %v", generation, paths, err)
+		}
+	}
+	if _, err := cat.MarkMissing(ctx, "test", 4, 3); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := cat.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE root_id = 'test'`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("expired missing document count = %d, want 0", remaining)
+	}
+	var ftsRows int
+	if err := cat.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents_fts`).Scan(&ftsRows); err != nil {
+		t.Fatal(err)
+	}
+	if ftsRows != 0 {
+		t.Fatalf("expired document remained in FTS index: %d rows", ftsRows)
+	}
+}
+
 func TestContentMatchMetadataUsesBoundedExcerpt(t *testing.T) {
 	doc := Document{Name: "report.docx", Path: `C:\Finance\report.docx`, ContentText: "The quarterly revenue plan is ready for the finance review."}
 	addMatchMetadata(&doc, "revenue", nil)

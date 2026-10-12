@@ -1875,6 +1875,13 @@ func (c *Catalog) MarkMissing(ctx context.Context, rootID string, generation int
 		return 0, err
 	}
 	defer tx.Rollback()
+	// A clean full crawl is evidence that every previously missing record which
+	// was not rediscovered is still absent. Advance its consecutive-miss count
+	// before turning newly unseen active records into first-time misses.
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET missing_count = missing_count + 1
+		WHERE root_id = ? AND status = 'missing' AND last_seen_generation <> ?`, rootID, generation); err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE documents
 		SET status = 'missing', access_status = 'missing', missing_count = missing_count + 1
 		WHERE root_id = ? AND status = 'active' AND last_seen_generation <> ?`,
@@ -1884,7 +1891,12 @@ func (c *Catalog) MarkMissing(ctx context.Context, rootID string, generation int
 	}
 	missing, _ := res.RowsAffected()
 	if deleteAfter > 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE documents SET status = 'deleted' WHERE root_id = ? AND status = 'missing' AND missing_count >= ?`, rootID, deleteAfter); err != nil {
+		// Remove rather than merely hide expired records. DELETE triggers keep the
+		// external-content FTS index synchronized, while a later compact returns
+		// SQLite's freed pages to the filesystem.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM documents
+			WHERE root_id = ? AND status IN ('missing', 'deleted')
+			AND missing_count >= ? AND last_seen_generation <> ?`, rootID, deleteAfter, generation); err != nil {
 			return 0, err
 		}
 	}
