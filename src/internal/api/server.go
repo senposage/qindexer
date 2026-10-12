@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -1864,8 +1865,12 @@ func sidecarInstallerPath() string {
 // deployment has installed only qindexer.exe. Portable installs still use the
 // local packaged script without a network request.
 func ensureSidecarInstaller(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
+	if contents, err := os.ReadFile(path); err == nil {
+		// Replace the helper QIndexer recovered before v1.1.4, which rejected
+		// the official Tesseract installer solely for lacking Authenticode.
+		if !bytes.Contains(contents, []byte(`Confirm-SignedExecutable -Path $installer -Name "Tesseract installer"`)) {
+			return nil
+		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -1897,6 +1902,10 @@ func ensureSidecarInstaller(path string) error {
 	}
 	temporary := path + ".download"
 	if err := os.WriteFile(temporary, contents, 0755); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(temporary)
 		return err
 	}
 	if err := os.Rename(temporary, path); err != nil {

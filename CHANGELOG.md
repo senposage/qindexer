@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.5 - 2026-10-12
+
+- Replace a previously recovered Windows OCR helper that still contains the obsolete Tesseract Authenticode check.
+- Remove the remaining Authenticode check from Python sidecar setup.
+
 ## 1.1.4 - 2026-10-12
 
 - Allow the official upstream Tesseract Windows installer to run without an Authenticode signature check.

@@ -34,14 +34,6 @@ function Find-Executable {
   return $null
 }
 
-function Confirm-SignedExecutable {
-  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Name)
-  $signature = Get-AuthenticodeSignature -FilePath $Path
-  if ($signature.Status -ne "Valid") {
-    throw "$Name download does not have a valid Authenticode signature (status $($signature.Status))."
-  }
-}
-
 function Get-BundledExtractor {
   param([Parameter(Mandatory = $true)][string]$InstallDir)
   $toolsDir = Join-Path $InstallDir "sidecars\tools\7zip"
@@ -159,7 +151,6 @@ function Install-Python {
     Write-Host "Downloading Python $version from python.org..."
     Invoke-WebRequest -Uri "https://www.python.org/ftp/python/$version/python-$version-amd64.exe" -OutFile $installer -UseBasicParsing
     if ((Get-Item -LiteralPath $installer).Length -lt 20MB) { throw "Downloaded Python installer is unexpectedly small." }
-    Confirm-SignedExecutable -Path $installer -Name "Python installer"
     Write-Host "Installing Python for all users..."
     $arguments = "/quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_launcher=1 Include_test=0 Include_doc=0 Shortcuts=0"
     $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
