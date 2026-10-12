@@ -16,9 +16,12 @@
       </div>
     </div>
     <div class="auth">
-      <input id="token" type="password" autocomplete="current-password" placeholder="Admin token">
-      <button id="save-token" type="button">Connect</button>
-      <button id="clear-token" type="button" class="secondary">Forget</button>
+      <div class="auth-controls">
+        <input id="token" type="password" autocomplete="current-password" placeholder="Admin token" aria-describedby="auth-state">
+        <button id="save-token" type="button">Connect</button>
+        <button id="clear-token" type="button" class="secondary">Forget</button>
+      </div>
+      <span id="auth-state" class="auth-state" data-state="logged-out" role="status">Not connected</span>
     </div>
   </header>
 

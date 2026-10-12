@@ -39,6 +39,9 @@ install_with() {
     pacman)
       $SUDO pacman -Sy --needed --noconfirm tesseract tesseract-data-eng ocrmypdf ghostscript poppler
       ;;
+    apk)
+      $SUDO apk add --no-cache tesseract-ocr tesseract-ocr-data-eng ocrmypdf ghostscript poppler-utils
+      ;;
     brew)
       brew install tesseract ocrmypdf ghostscript poppler
       ;;
@@ -46,7 +49,7 @@ install_with() {
 }
 
 manager=""
-for candidate in dnf apt-get zypper pacman brew; do
+for candidate in dnf apt-get zypper pacman apk brew; do
   if command -v "$candidate" >/dev/null 2>&1; then
     manager="$candidate"
     break

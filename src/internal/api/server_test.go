@@ -59,6 +59,22 @@ func TestAdminBootstrapLocksManagementUntilTokenIsSet(t *testing.T) {
 		t.Fatalf("expected authenticated service response, got %d: %s", afterResult.Code, afterResult.Body.String())
 	}
 
+	invalidSession := httptest.NewRequest(http.MethodGet, "/admin/v1/session", nil)
+	invalidSession.Header.Set("Authorization", "Bearer not-the-token")
+	invalidSessionResult := httptest.NewRecorder()
+	handler.ServeHTTP(invalidSessionResult, invalidSession)
+	if invalidSessionResult.Code != http.StatusUnauthorized {
+		t.Fatalf("expected rejected admin session, got %d: %s", invalidSessionResult.Code, invalidSessionResult.Body.String())
+	}
+
+	session := httptest.NewRequest(http.MethodGet, "/admin/v1/session", nil)
+	session.Header.Set("Authorization", "Bearer sixteen-character-token")
+	sessionResult := httptest.NewRecorder()
+	handler.ServeHTTP(sessionResult, session)
+	if sessionResult.Code != http.StatusOK || !bytes.Contains(sessionResult.Body.Bytes(), []byte(`"authenticated":true`)) {
+		t.Fatalf("expected authenticated admin session, got %d: %s", sessionResult.Code, sessionResult.Body.String())
+	}
+
 	search := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	search.Header.Set("Authorization", "Bearer sixteen-character-token")
 	searchResult := httptest.NewRecorder()

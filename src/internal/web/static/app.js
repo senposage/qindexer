@@ -1,6 +1,8 @@
 const tokenInput = document.querySelector("#token");
 const message = document.querySelector("#message");
 const endpoint = document.querySelector("#endpoint");
+const authState = document.querySelector("#auth-state");
+const connectButton = document.querySelector("#save-token");
 
 const defaultRootExcludeFilePatterns = [
   "~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*",
@@ -28,16 +30,19 @@ let liveDashboardRefreshing = false;
 tokenInput.value = state.token;
 endpoint.textContent = `${location.origin}/admin/v1`;
 
-document.querySelector("#save-token").addEventListener("click", async () => {
-  state.token = tokenInput.value.trim();
-  sessionStorage.setItem("qindexer.admin.token", state.token);
-  if (await refresh()) showView("roots");
+connectButton.addEventListener("click", () => connectAdmin());
+tokenInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    connectAdmin();
+  }
 });
 
 document.querySelector("#clear-token").addEventListener("click", () => {
   state.token = "";
   tokenInput.value = "";
   sessionStorage.removeItem("qindexer.admin.token");
+  setAuthState("logged-out", "Not connected");
   refresh({ quiet: true, message: "Admin token cleared" });
 });
 
@@ -63,7 +68,7 @@ document.querySelector("#bootstrap-form").addEventListener("submit", bootstrapAd
 document.querySelector("#network-settings-form").addEventListener("submit", saveNetworkSettings);
 document.querySelector("#indexing-settings-form").addEventListener("submit", saveIndexingSettings);
 document.querySelector("#settings-ocr").addEventListener("change", ensureOCRDependencies);
-document.querySelector("#install-ocr-sidecars").addEventListener("click", installOCRDependencies);
+document.querySelector("#install-ocr-sidecars").addEventListener("click", () => installOCRDependencies());
 document.querySelector("#compact-index").addEventListener("click", compactIndex);
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
@@ -92,66 +97,167 @@ function headers() {
   return h;
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    cache: "no-store",
-    headers: { ...headers(), ...(options.headers || {}) },
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    const err = new Error(data.error?.message || res.statusText);
-    err.code = data.error?.code;
+async function request(path, options = {}, includeAuth = true) {
+  const { timeoutMs = 12000, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(path, {
+      ...fetchOptions,
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        ...(includeAuth ? headers() : {}),
+        ...(fetchOptions.headers || {}),
+      },
+    });
+    const text = await res.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+    if (!res.ok) {
+      const err = new Error(data.error?.message || res.statusText);
+      err.code = data.error?.code;
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  } catch (err) {
+    if (err.name === "AbortError") {
+      const timeout = new Error("The service did not respond in time. It may be busy; try again shortly.");
+      timeout.code = "request_timeout";
+      throw timeout;
+    }
     throw err;
+  } finally {
+    window.clearTimeout(timer);
   }
-  return data;
 }
 
-async function publicAPI(path) {
-  const res = await fetch(path, { cache: "no-store" });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) throw new Error(data.error?.message || res.statusText);
-  return data;
+function api(path, options = {}) {
+  return request(path, options, true);
+}
+
+function publicAPI(path, options = {}) {
+  return request(path, options, false);
+}
+
+async function connectAdmin(options = {}) {
+  const candidate = String(options.token ?? tokenInput.value).trim();
+  const previousToken = state.token;
+  const previousStoredToken = sessionStorage.getItem("qindexer.admin.token") || "";
+  if (!candidate) {
+    setAuthState("invalid", "Enter an admin token to connect");
+    tokenInput.focus();
+    return false;
+  }
+
+  setConnectBusy(true);
+  setAuthState("connecting", "Verifying admin token...");
+  setMessage("Checking administrator access...");
+  let publicStatus = options.publicStatus;
+  try {
+    publicStatus ||= await publicAPI("/admin/v1/status", { timeoutMs: 4000 });
+    renderService(publicStatus);
+    if (publicStatus.admin_configured === false) {
+      state.token = "";
+      sessionStorage.removeItem("qindexer.admin.token");
+      showLockedStatus(publicStatus, "Set the first admin token to continue");
+      setAuthState("setup", "Admin token setup is required");
+      return false;
+    }
+
+    state.token = candidate;
+    await api("/admin/v1/session", { timeoutMs: 4000 });
+    sessionStorage.setItem("qindexer.admin.token", candidate);
+    setAdminVisibility(true);
+    setAuthState("authenticated", "Connected");
+    setMessage("Authenticated. Loading dashboard...");
+    showView("roots");
+    void refresh({ quiet: true, skipPublicStatus: true });
+    return true;
+  } catch (err) {
+    state.token = err.code === "unauthorized" ? "" : previousToken;
+    if (previousStoredToken && previousStoredToken !== candidate) {
+      sessionStorage.setItem("qindexer.admin.token", previousStoredToken);
+    } else {
+      sessionStorage.removeItem("qindexer.admin.token");
+    }
+    const invalid = err.code === "unauthorized";
+    const detail = invalid
+      ? "Incorrect admin token"
+      : err.code === "admin_setup_required"
+        ? "Set the first admin token to continue"
+        : `Could not connect: ${err.message}`;
+    showLockedStatus(publicStatus, detail);
+    setAuthState(invalid ? "invalid" : "unavailable", detail);
+    tokenInput.focus();
+    return false;
+  } finally {
+    setConnectBusy(false);
+  }
 }
 
 async function refresh(options = {}) {
   let publicStatus;
   try {
-    if (!options.quiet) setMessage("Refreshing...");
-    publicStatus = await publicAPI("/admin/v1/status");
-    renderService(publicStatus);
+    if (!options.quiet) setMessage("Refreshing dashboard...");
+    if (!options.skipPublicStatus) {
+      publicStatus = await publicAPI("/admin/v1/status", { timeoutMs: 4000 });
+      renderService(publicStatus);
+    }
     if (!state.token) {
       showLockedStatus(publicStatus, options.message || "Enter an admin token to manage this service");
       return;
     }
-    const [service, roots, crawls, config, metrics, logs] = await Promise.all([
-      api("/admin/v1/service"),
-      api("/admin/v1/roots"),
-      api("/admin/v1/crawls"),
-      api("/admin/v1/config"),
-      api("/admin/v1/metrics"),
-      api("/admin/v1/logs?limit=160").catch((err) => ({ error: err.message, lines: [] })),
+    const results = await Promise.allSettled([
+      api("/admin/v1/service", { timeoutMs: 8000 }),
+      api("/admin/v1/roots", { timeoutMs: 10000 }),
+      api("/admin/v1/crawls", { timeoutMs: 8000 }),
+      api("/admin/v1/config", { timeoutMs: 8000 }),
+      api("/admin/v1/metrics", { timeoutMs: 10000 }),
+      api("/admin/v1/logs?limit=160", { timeoutMs: 8000 }),
     ]);
-    renderService(service);
-    renderMetrics(metrics);
-    renderRoots(roots.roots || []);
-    renderCrawls(crawls.crawls || []);
-    renderRootErrors(roots.roots || []);
-    renderLogs(logs);
-    state.crawler = config.crawler || {};
-    state.watcher = config.watcher || {};
-    state.network = { server: config.server || {}, management: config.management || {} };
-    renderNetworkSettings(state.network);
-    renderIndexingSettings(state.crawler, state.watcher);
-    document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
+    const authenticationFailure = results.find((item) => item.status === "rejected" && (item.reason?.code === "unauthorized" || item.reason?.code === "admin_setup_required"));
+    if (authenticationFailure) throw authenticationFailure.reason;
+    const value = (index) => results[index].status === "fulfilled" ? results[index].value : null;
+    const [service, roots, crawls, config, metrics, logs] = [value(0), value(1), value(2), value(3), value(4), value(5)];
+    if (service) renderService(service);
+    if (metrics) renderMetrics(metrics);
+    if (roots) {
+      renderRoots(roots.roots || []);
+      renderRootErrors(roots.roots || []);
+    }
+    if (crawls) renderCrawls(crawls.crawls || []);
+    if (logs) renderLogs(logs);
+    if (config) {
+      state.crawler = config.crawler || {};
+      state.watcher = config.watcher || {};
+      state.network = { server: config.server || {}, management: config.management || {} };
+      renderNetworkSettings(state.network);
+      renderIndexingSettings(state.crawler, state.watcher);
+      document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
+    }
     setAdminVisibility(true);
-    setMessage(options.message || "Ready");
-	return true;
+    const failures = results.filter((item) => item.status === "rejected");
+    setMessage(options.message || (failures.length ? `Authenticated. ${failures.length} dashboard request${failures.length === 1 ? "" : "s"} delayed or unavailable.` : "Ready"));
+    return true;
   } catch (err) {
-    showLockedStatus(publicStatus, err.code === "admin_setup_required" ? "Set an admin token to continue" : "Admin token is missing or invalid");
-	return false;
+    if (err.code === "unauthorized" || err.code === "admin_setup_required") {
+      sessionStorage.removeItem("qindexer.admin.token");
+      state.token = "";
+      showLockedStatus(publicStatus, err.code === "admin_setup_required" ? "Set an admin token to continue" : "Admin token is missing or invalid");
+      setAuthState("invalid", "Admin token is missing or invalid");
+      return false;
+    }
+    if (state.token) {
+      setAdminVisibility(true);
+      setAuthState("authenticated", "Connected");
+      setMessage(`Authenticated, but dashboard data is unavailable: ${err.message}`);
+      return false;
+    }
+    showLockedStatus(publicStatus, `Could not reach the service: ${err.message}`);
+    setAuthState("unavailable", "Service unavailable");
+    return false;
   }
 }
 
@@ -1116,6 +1222,17 @@ function setMessage(text) {
   message.textContent = text;
 }
 
+function setAuthState(status, text) {
+  authState.dataset.state = status;
+  authState.textContent = text;
+}
+
+function setConnectBusy(busy) {
+  connectButton.disabled = busy;
+  connectButton.dataset.busy = String(busy);
+  connectButton.textContent = busy ? "Connecting" : "Connect";
+}
+
 function formatRate(value) {
   if (value >= 100) return Math.round(value).toLocaleString();
   if (value >= 10) return value.toFixed(1);
@@ -1171,9 +1288,27 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#96;");
 }
 
-refresh().then(() => {
+async function initialize() {
+  let publicStatus;
+  try {
+    publicStatus = await publicAPI("/admin/v1/status", { timeoutMs: 4000 });
+    renderService(publicStatus);
+  } catch (err) {
+    showLockedStatus(null, `Could not reach the service: ${err.message}`);
+    setAuthState("unavailable", "Service unavailable");
+    return;
+  }
+
+  if (state.token && publicStatus.admin_configured !== false) {
+    await connectAdmin({ token: state.token, publicStatus });
+  } else {
+    showLockedStatus(publicStatus, publicStatus.admin_configured === false ? "Set the first admin token to continue" : "Enter an admin token to manage this service");
+    setAuthState(publicStatus.admin_configured === false ? "setup" : "logged-out", publicStatus.admin_configured === false ? "Admin token setup is required" : "Not connected");
+  }
   startLiveMetrics();
-  if (location.pathname === "/config" || location.hash === "#config") {
+  if (state.token && (location.pathname === "/config" || location.hash === "#config")) {
     showView("config");
   }
-});
+}
+
+initialize();

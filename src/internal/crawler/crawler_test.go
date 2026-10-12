@@ -108,6 +108,12 @@ func TestMatchesAnyRecognizesRecoveryDirectoryItself(t *testing.T) {
 	}
 }
 
+func TestMatchesAnyNormalizesWindowsPathsForDoubleStarRules(t *testing.T) {
+	if !matchesAny(`C:\Users\Test\AppData\Local\Temp\build\artifact.tmp`, []string{"**/AppData/Local/Temp/**"}) {
+		t.Fatal("expected Windows path to match a slash-normalized double-star rule")
+	}
+}
+
 func TestShouldSkipOfficeTemporaryLockFile(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"~$Draft.docx", `\~$Draft.docx`} {
@@ -138,6 +144,10 @@ func TestShouldSkipOperationalWindowsDirectories(t *testing.T) {
 	}
 	for _, path := range []string{
 		`C:\System Volume Information`,
+		`C:\Windows\System32`,
+		`C:\Program Files\QIndexer`,
+		`C:\ProgramData\QSurfer`,
+		`C:\Users\Test\AppData\Local\Temp\qindexer-ocr-123`,
 		`C:\Users\Test\AppData\Local\Microsoft\Windows\WebCache`,
 		`C:\Windows\System32\sru`,
 		`C:\Users\Test\AppData\Local\Temp\_MEI12345`,

@@ -303,13 +303,15 @@ The sidecars are installed in the system PATH, so QIndexer uses its normal
 default command names. Installing sidecars alone does not enable OCR or create
 an enrichment backlog.
 
-On Windows, `-InstallSidecars` downloads the current upstream Tesseract
-installer, uses winget for missing Ghostscript or Python, reuses an existing
-OCRmyPDF installation when available, and otherwise creates an isolated
-OCRmyPDF virtual environment under the QIndexer install directory. It
-registers the Tesseract, Ghostscript, and OCRmyPDF directories in the machine
-PATH for the service account. It requires an elevated PowerShell session;
-enable OCR from the admin settings after setup.
+On Windows, `-InstallSidecars` is self-contained. It downloads the current
+upstream Tesseract installer, a private 7-Zip extraction runtime, the official
+Ghostscript payload, and the supported all-users Python runtime. Ghostscript is
+expanded beneath the QIndexer installation instead of running its interactive
+installer. QIndexer then creates an isolated OCRmyPDF virtual environment under
+the installation directory. It does not require winget, a preinstalled Python,
+or a preinstalled archiver. It registers the Tesseract, Ghostscript, and
+OCRmyPDF directories in the machine PATH for the service account. It requires
+an elevated PowerShell session; enable OCR from the admin settings after setup.
 
 The management UI can request this setup from a local interactive QIndexer
 process: Windows displays UAC and Linux displays the configured polkit prompt.

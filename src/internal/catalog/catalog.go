@@ -107,6 +107,8 @@ type Document struct {
 	LastIndexedAt      time.Time           `json:"indexed_at"`
 	ContentStatus      string              `json:"content_status,omitempty"`
 	OCRStatus          string              `json:"ocr_status,omitempty"`
+	ContentError       string              `json:"content_error,omitempty"`
+	OCRError           string              `json:"ocr_error,omitempty"`
 	ContentText        string              `json:"-"`
 	ContentHash        string              `json:"content_hash,omitempty"`
 	HashStatus         string              `json:"hash_status,omitempty"`
@@ -992,8 +994,8 @@ func (c *Catalog) BackgroundBacklog(ctx context.Context) (BackgroundBacklog, err
 	placeholders := placeholders(len(extensions))
 	args := stringsToAny(extensions)
 	query := `SELECT
-		SUM(CASE WHEN content_status IN ('not_indexed', 'queued') AND extension IN (` + placeholders + `) THEN 1 ELSE 0 END),
-		SUM(CASE WHEN ocr_status IN ('pending', 'queued') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN content_status IN ('not_indexed', 'retry_pending', 'queued') AND extension IN (` + placeholders + `) THEN 1 ELSE 0 END),
+		SUM(CASE WHEN ocr_status IN ('pending', 'retry_pending', 'queued') THEN 1 ELSE 0 END),
 		SUM(CASE WHEN hash_status IN ('not_hashed', 'queued') THEN 1 ELSE 0 END)
 		FROM documents WHERE status = 'active' AND is_folder = 0`
 	var backlog BackgroundBacklog
@@ -1039,6 +1041,12 @@ func (c *Catalog) migrate(ctx context.Context) error {
 			last_indexed_at TEXT NOT NULL,
 			content_status TEXT NOT NULL,
 			ocr_status TEXT NOT NULL DEFAULT 'not_requested',
+			content_error TEXT NOT NULL DEFAULT '',
+			ocr_error TEXT NOT NULL DEFAULT '',
+			content_attempts INTEGER NOT NULL DEFAULT 0,
+			ocr_attempts INTEGER NOT NULL DEFAULT 0,
+			content_retry_at TEXT NOT NULL DEFAULT '',
+			ocr_retry_at TEXT NOT NULL DEFAULT '',
 			content_text TEXT NOT NULL DEFAULT '',
 			content_hash TEXT NOT NULL DEFAULT '',
 			hash_status TEXT NOT NULL DEFAULT 'not_hashed',
@@ -1115,6 +1123,18 @@ func (c *Catalog) migrate(ctx context.Context) error {
 	}
 	if err := c.ensureColumn(ctx, "documents", "ocr_status", "TEXT NOT NULL DEFAULT 'not_requested'"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"content_error", "TEXT NOT NULL DEFAULT ''"},
+		{"ocr_error", "TEXT NOT NULL DEFAULT ''"},
+		{"content_attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"ocr_attempts", "INTEGER NOT NULL DEFAULT 0"},
+		{"content_retry_at", "TEXT NOT NULL DEFAULT ''"},
+		{"ocr_retry_at", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := c.ensureColumn(ctx, "documents", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	if err := c.ensureColumn(ctx, "documents", "content_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
@@ -1506,7 +1526,7 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE documents
 		SET path = ?, name = ?, extension = ?, size = ?, modified_at = ?, created_at = ?, status = 'active',
-		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
+		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_error = '', ocr_error = '', content_attempts = 0, ocr_attempts = 0, content_retry_at = '', ocr_retry_at = '', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
 		WHERE id = ?`,
 		doc.Path, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID)
 	if err != nil {
@@ -1594,7 +1614,7 @@ func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc Document) (UpsertResu
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE documents
 		SET path = ?, name = ?, extension = ?, size = ?, modified_at = ?, created_at = ?, status = 'active',
-		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
+		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_error = '', ocr_error = '', content_attempts = 0, ocr_attempts = 0, content_retry_at = '', ocr_retry_at = '', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
 		WHERE id = ?`,
 		doc.Path, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID); err != nil {
 		return UpsertResult{}, err
@@ -1627,7 +1647,7 @@ func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, sta
 		}
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = ?, content_text = ? WHERE id = ?`, status, content, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = ?, content_text = ?, content_error = '', content_attempts = 0, content_retry_at = '' WHERE id = ?`, status, content, id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1636,7 +1656,7 @@ func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, sta
 func (c *Catalog) UpdateOCRStatus(ctx context.Context, id, signature, status string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err := c.db.ExecContext(ctx, `UPDATE documents SET ocr_status = ? WHERE id = ? AND signature = ?`, status, id, signature)
+	_, err := c.db.ExecContext(ctx, `UPDATE documents SET ocr_status = ?, ocr_error = '', ocr_attempts = 0, ocr_retry_at = '' WHERE id = ? AND signature = ?`, status, id, signature)
 	return err
 }
 
@@ -1662,7 +1682,7 @@ func (c *Catalog) UpdateOCRContent(ctx context.Context, id, signature, status, c
 		}
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = 'extracted', content_text = ?, ocr_status = ? WHERE id = ?`, content, status, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET content_status = 'extracted', content_text = ?, ocr_status = ?, ocr_error = '', ocr_attempts = 0, ocr_retry_at = '' WHERE id = ?`, content, status, id); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1676,22 +1696,64 @@ func (c *Catalog) UpdateContentHash(ctx context.Context, id, signature, hash, st
 }
 
 func (c *Catalog) ReleaseContentClaim(ctx context.Context, id, signature string) error {
-	return c.releaseBackgroundClaim(ctx, "content_status", "not_indexed", id, signature)
+	return c.releaseBackgroundClaim(ctx, "content_status", "content_retry_at", id, signature)
 }
 
 func (c *Catalog) ReleaseOCRClaim(ctx context.Context, id, signature string) error {
-	return c.releaseBackgroundClaim(ctx, "ocr_status", "pending", id, signature)
+	return c.releaseBackgroundClaim(ctx, "ocr_status", "ocr_retry_at", id, signature)
 }
 
 func (c *Catalog) ReleaseHashClaim(ctx context.Context, id, signature string) error {
-	return c.releaseBackgroundClaim(ctx, "hash_status", "not_hashed", id, signature)
-}
-
-func (c *Catalog) releaseBackgroundClaim(ctx context.Context, column, pending, id, signature string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err := c.db.ExecContext(ctx, `UPDATE documents SET `+column+` = ? WHERE id = ? AND signature = ? AND `+column+` = 'queued'`, pending, id, signature)
+	_, err := c.db.ExecContext(ctx, `UPDATE documents SET hash_status = 'not_hashed' WHERE id = ? AND signature = ? AND hash_status = 'queued'`, id, signature)
 	return err
+}
+
+func (c *Catalog) releaseBackgroundClaim(ctx context.Context, column, retryAtColumn, id, signature string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.db.ExecContext(ctx, `UPDATE documents SET `+column+` = 'retry_pending', `+retryAtColumn+` = ? WHERE id = ? AND signature = ? AND `+column+` = 'queued'`, time.Now().UTC().Add(30*time.Second).Format(time.RFC3339Nano), id, signature)
+	return err
+}
+
+// RecordContentFailure keeps transient extraction failures out of the normal
+// queue. After the bounded retry budget is exhausted, the document remains
+// searchable by metadata but is explicitly marked unindexable for content.
+func (c *Catalog) RecordContentFailure(ctx context.Context, id, signature, reason string, retryable bool) (string, error) {
+	return c.recordBackgroundFailure(ctx, "content_status", "content_error", "content_attempts", "content_retry_at", id, signature, reason, retryable)
+}
+
+// RecordOCRFailure applies the same bounded retry policy to OCR jobs.
+func (c *Catalog) RecordOCRFailure(ctx context.Context, id, signature, reason string, retryable bool) (string, error) {
+	return c.recordBackgroundFailure(ctx, "ocr_status", "ocr_error", "ocr_attempts", "ocr_retry_at", id, signature, reason, retryable)
+}
+
+func (c *Catalog) recordBackgroundFailure(ctx context.Context, statusColumn, errorColumn, attemptsColumn, retryAtColumn, id, signature, reason string, retryable bool) (string, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var attempts int
+	if err := tx.QueryRowContext(ctx, `SELECT `+attemptsColumn+` FROM documents WHERE id = ? AND signature = ?`, id, signature).Scan(&attempts); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	attempts++
+	status, retryAt := "unindexable", ""
+	if retryable && attempts < 3 {
+		status = "retry_pending"
+		retryAt = time.Now().UTC().Add(time.Duration(attempts*attempts) * time.Minute).Format(time.RFC3339Nano)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET `+statusColumn+` = ?, `+errorColumn+` = ?, `+attemptsColumn+` = ?, `+retryAtColumn+` = ? WHERE id = ? AND signature = ?`, status, reason, attempts, retryAt, id, signature); err != nil {
+		return "", err
+	}
+	return status, tx.Commit()
 }
 
 // ResetQueuedBackground releases work that was claimed before a controlled
@@ -1725,11 +1787,27 @@ func (c *Catalog) ClaimPendingOCR(ctx context.Context, rootIDs []string, limit i
 	return c.claimPending(ctx, "ocr_status", "pending", "queued", rootIDs, nil, limit, maxSize)
 }
 
+func (c *Catalog) ClaimRetryContent(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPendingDue(ctx, "content_status", "content_retry_at", rootIDs, extract.IndexableExtensions(), limit, maxSize)
+}
+
+func (c *Catalog) ClaimRetryOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimPendingDue(ctx, "ocr_status", "ocr_retry_at", rootIDs, nil, limit, maxSize)
+}
+
 func (c *Catalog) ClaimPendingHashes(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
 	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", rootIDs, nil, limit, maxSize)
 }
 
 func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimBackground(ctx, column, pending, claimed, "", rootIDs, extensions, limit, maxSize)
+}
+
+func (c *Catalog) claimPendingDue(ctx context.Context, column, retryAtColumn string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimBackground(ctx, column, "retry_pending", "queued", retryAtColumn, rootIDs, extensions, limit, maxSize)
+}
+
+func (c *Catalog) claimBackground(ctx context.Context, column, pending, claimed, retryAtColumn string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
 	if len(rootIDs) == 0 || limit <= 0 || maxSize <= 0 {
 		return nil, nil
 	}
@@ -1742,6 +1820,11 @@ func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed str
 	defer tx.Rollback()
 	rootPlaceholders := strings.TrimRight(strings.Repeat("?,", len(rootIDs)), ",")
 	args := []any{pending, maxSize}
+	retryClause := ""
+	if retryAtColumn != "" {
+		retryClause = " AND " + retryAtColumn + " <= ?"
+		args = append(args, time.Now().UTC().Format(time.RFC3339Nano))
+	}
 	for _, rootID := range rootIDs {
 		args = append(args, rootID)
 	}
@@ -1756,7 +1839,7 @@ func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed str
 	// New or changed documents receive a fresh last_indexed_at value. Prefer
 	// them over the historical backlog so watcher hints reach the secondary
 	// content/OCR/hash pass promptly after structural indexing is idle.
-	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ? AND root_id IN (` + rootPlaceholders + `)` + extensionClause + ` ORDER BY last_indexed_at DESC, path ASC LIMIT ?`
+	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ?` + retryClause + ` AND root_id IN (` + rootPlaceholders + `)` + extensionClause + ` ORDER BY last_indexed_at DESC, path ASC LIMIT ?`
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -2095,7 +2178,7 @@ func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int)
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.ocr_status, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.moved_from_path, d.signature
+	query := `SELECT d.id, d.root_id, d.path, d.normalized_path, d.name, d.extension, d.is_folder, d.size, d.modified_at, d.created_at, d.status, d.last_seen_generation, d.last_indexed_at, d.content_status, d.ocr_status, d.content_error, d.ocr_error, d.content_text, d.content_hash, d.hash_status, d.owner, d.access_status, d.moved_from_path, d.signature
 		FROM ` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	args = append(args, limit+1, req.Offset)
 	rows, err := c.db.QueryContext(ctx, query, args...)
@@ -2303,7 +2386,7 @@ type documentScanner interface {
 func scanDocument(row documentScanner) (Document, error) {
 	var d Document
 	var modified, created, indexed string
-	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.OCRStatus, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.MovedFromPath, &d.Signature); err != nil {
+	if err := row.Scan(&d.ID, &d.RootID, &d.Path, &d.NormalizedPath, &d.Name, &d.Extension, &d.IsFolder, &d.Size, &modified, &created, &d.Status, &d.LastSeenGeneration, &indexed, &d.ContentStatus, &d.OCRStatus, &d.ContentError, &d.OCRError, &d.ContentText, &d.ContentHash, &d.HashStatus, &d.Owner, &d.AccessStatus, &d.MovedFromPath, &d.Signature); err != nil {
 		return d, err
 	}
 	d.ModifiedAt, _ = time.Parse(time.RFC3339Nano, modified)

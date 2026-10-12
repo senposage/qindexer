@@ -681,6 +681,46 @@ func TestClaimPendingWorkRespectsRootSelection(t *testing.T) {
 	}
 }
 
+func TestBackgroundFailuresAreBoundedAndSeparatedFromNewWork(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, id := range []string{"transient", "invalid"} {
+		doc := Document{ID: id, RootID: "root", Path: `D:\` + id + `.txt`, NormalizedPath: NormalizePath(`D:\` + id + `.txt`), Name: id + ".txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claimed, err := cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024)
+	if err != nil || len(claimed) != 2 {
+		t.Fatalf("initial claims = %#v, %v", claimed, err)
+	}
+	if status, err := cat.RecordContentFailure(ctx, "invalid", Signature(1, modified), "invalid or incomplete PDF", false); err != nil || status != "unindexable" {
+		t.Fatalf("permanent failure = %q, %v", status, err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		status, err := cat.RecordContentFailure(ctx, "transient", Signature(1, modified), "resource temporarily unavailable", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "retry_pending"
+		if attempt == 3 {
+			want = "unindexable"
+		}
+		if status != want {
+			t.Fatalf("attempt %d status = %q, want %q", attempt, status, want)
+		}
+	}
+	claimed, err = cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024)
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("terminal failures returned to normal queue: %#v, %v", claimed, err)
+	}
+}
+
 func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

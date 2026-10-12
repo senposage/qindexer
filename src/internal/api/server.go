@@ -78,14 +78,19 @@ const maxRequestBodyBytes = 1 << 20
 
 var defaultRootExcludeFilePatterns = []string{
 	"~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*",
-	"*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo",
+	"*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo", "*.lock", "*.lck", "*.dmp",
+	"pagefile.sys", "swapfile.sys", "hiberfil.sys",
 }
 
 var defaultRootExcludeFolderPatterns = []string{
 	"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**",
 	"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
 	"**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
-	"**/System Volume Information/**", "**/AppData/Local/Microsoft/Windows/WebCache/**", "**/Windows/System32/sru/**", "**/AppData/Local/Temp/_MEI*/**",
+	"**/.svn/**", "**/.hg/**", "**/.terraform/**", "**/.venv/**", "**/__pycache__/**", "**/.pytest_cache/**",
+	"**/System Volume Information/**", "**/$WinREAgent/**", "**/Recovery/**", "**/PerfLogs/**", "**/Config.Msi/**", "**/MSOCache/**",
+	"**/Windows/**", "**/Program Files/**", "**/Program Files (x86)/**", "**/ProgramData/**",
+	"**/AppData/Local/Temp/**", "**/AppData/Local/CrashDumps/**", "**/AppData/Local/Microsoft/Windows/WebCache/**", "**/AppData/Local/Packages/**",
+	"**/proc/**", "**/sys/**", "**/dev/**", "**/run/**", "**/lost+found/**", "**/var/cache/**",
 }
 
 type rootAliasView struct {
@@ -184,6 +189,9 @@ func (s *Server) AdminHandler() http.Handler {
 	// The admin UI needs a small unauthenticated status view. Keep this payload
 	// deliberately service-level: configuration and root details stay protected.
 	mux.HandleFunc("GET /admin/v1/status", s.publicStatus)
+	// Session validation intentionally avoids SQLite. A busy crawl must not make
+	// an otherwise valid administrator token look like a failed login.
+	mux.HandleFunc("GET /admin/v1/session", s.withAdminAuth(s.adminSession))
 	mux.HandleFunc("GET /admin/v1/service", s.withAdminAuth(s.health))
 	mux.HandleFunc("GET /admin/v1/config", s.withAdminAuth(s.configView))
 	mux.HandleFunc("GET /admin/v1/config/export", s.withAdminAuth(s.exportConfig))
@@ -218,30 +226,23 @@ func (s *Server) publicStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	adminConfigured := s.adminToken != ""
 	s.mu.RUnlock()
-
-	states, err := s.cat.RootStates(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":           "degraded",
-			"protocol_version": "1.1",
-			"service_instance": s.instanceID,
-			"version":          version.Version,
-			"admin_configured": adminConfigured,
-			"index":            map[string]any{"ready": false, "document_count": 0},
-		})
-		return
-	}
-	var count int64
-	for _, state := range states {
-		count += state.DocumentCount
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":           "ok",
 		"protocol_version": "1.1",
 		"service_instance": s.instanceID,
 		"version":          version.Version,
 		"admin_configured": adminConfigured,
-		"index":            map[string]any{"ready": true, "document_count": count},
+		"index":            map[string]any{"ready": true},
+	})
+}
+
+func (s *Server) adminSession(w http.ResponseWriter, r *http.Request) {
+	s.log.Info("admin session authenticated", "remote", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated":    true,
+		"service_instance": s.instanceID,
+		"service_version":  version.Version,
+		"protocol_version": "1.1",
 	})
 }
 
@@ -1737,7 +1738,7 @@ func (s *Server) runSidecarInstaller(script, logPath string, enableOCR bool) {
 			detail = transcript
 		}
 		s.log.Error("OCR sidecar installation failed", "error", err, "output", detail, "log_path", logPath)
-		s.setSidecarInstallProgress("failed", "OCR setup failed: "+firstLine(detail, err.Error()), logPath)
+		s.setSidecarInstallProgress("failed", "OCR setup failed: "+installerFailureMessage(detail, err.Error()), logPath)
 		return
 	}
 	if runtime.GOOS == "windows" {
@@ -1800,6 +1801,22 @@ func firstLine(value, fallback string) string {
 		return line
 	}
 	return fallback
+}
+
+func installerFailureMessage(value, fallback string) string {
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+		if strings.HasPrefix(line, "PS>TerminatingError():") {
+			return strings.Trim(strings.TrimPrefix(line, "PS>TerminatingError():"), " \")")
+		}
+	}
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+		if strings.HasPrefix(line, "WARNING:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "WARNING:"))
+		}
+	}
+	return firstLine(value, fallback)
 }
 
 func refreshWindowsSystemPath() error {
@@ -1925,11 +1942,13 @@ func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 		token := s.adminToken
 		s.mu.RUnlock()
 		if token == "" {
+			s.log.Warn("admin authentication unavailable; token not configured", "remote", r.RemoteAddr, "path", r.URL.Path)
 			writeError(w, http.StatusPreconditionRequired, "admin_setup_required", "set the first admin token in the local management UI")
 			return
 		}
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if got != token {
+			s.log.Warn("admin authentication rejected", "remote", r.RemoteAddr, "path", r.URL.Path, "token_present", got != "")
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 			return
 		}

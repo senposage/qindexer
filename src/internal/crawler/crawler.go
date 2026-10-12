@@ -928,13 +928,13 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 	}
 	content := c.snapshot().Crawler.ContentExtraction
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.ContentExtractionEnabled(content.Enabled) }); len(rootIDs) > 0 {
-		c.fillBackground(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, "content")
+		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content")
 	}
 	ocr := c.snapshot().Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
-		c.fillBackground(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, "OCR")
+		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR")
 	}
 	hashing := c.snapshot().Crawler.Hashing
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.HashingEnabled(hashing.Enabled) }); len(rootIDs) > 0 {
@@ -960,10 +960,36 @@ type backgroundClaim func(context.Context, []string, int, int64) ([]catalog.Back
 // fillBackground shares capacity across roots so a sprawling root cannot starve
 // a smaller root's extraction, OCR, or hashing backlog.
 func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string) {
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, claim, kind, cap(jobs)-len(jobs))
+}
+
+// fillBackgroundWithRetries reserves a small fraction of capacity for delayed
+// retries. Fresh work always gets the majority of the queue, so an unreadable
+// document cannot crowd out the ordinary indexing backlog.
+func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, primary, retry backgroundClaim, kind string) {
+	available := cap(jobs) - len(jobs)
+	if available <= 0 {
+		return
+	}
+	retryCapacity := available / 10
+	if available >= 10 {
+		retryCapacity = max(1, retryCapacity)
+	}
+	primaryCapacity := available - retryCapacity
+	before := len(jobs)
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, primary, kind, primaryCapacity)
+	// If there is no fresh work, do not leave workers idle simply because the
+	// retry lane was intentionally small. The lane remains reserved only while
+	// normal work can actually use the capacity.
+	unusedPrimary := primaryCapacity - (len(jobs) - before)
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, retry, kind+" retry", retryCapacity+max(0, unusedPrimary))
+}
+
+func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, limit int) {
 	if ctx.Err() != nil {
 		return
 	}
-	available := cap(jobs) - len(jobs)
+	available := min(limit, cap(jobs)-len(jobs))
 	if available <= 0 {
 		return
 	}
@@ -999,6 +1025,24 @@ func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs cha
 			pending = true
 		}
 	}
+}
+
+func enrichmentFailureRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, permanent := range []string{
+		"unsupported", "malformed", "invalid or incomplete", "encrypted pdf", "not a pdf", "zip: not a valid", "unknown ocr engine", "requires an image", "only accepts pdfs",
+	} {
+		if strings.Contains(message, permanent) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial bool) (catalog.CrawlRun, error) {
@@ -2073,9 +2117,16 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			}
 			status := "extracted"
 			if err != nil {
-				status = "failed"
 				text = ""
-				c.log.Debug("content extraction failed", "path", job.path, "error", err)
+				result, recordErr := c.cat.RecordContentFailure(jobCtx, job.id, job.signature, err.Error(), enrichmentFailureRetryable(err))
+				if recordErr != nil {
+					c.log.Debug("content failure state update failed", "path", job.path, "error", recordErr)
+					_ = c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature)
+				} else {
+					c.log.Debug("content extraction failed", "path", job.path, "status", result, "error", err)
+				}
+				finish()
+				continue
 			}
 			if err := c.cat.UpdateExtractedContent(jobCtx, job.id, job.signature, status, text); err != nil {
 				c.log.Debug("content update failed", "path", job.path, "error", err)
@@ -2132,7 +2183,15 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				continue
 			}
 			if err != nil {
-				c.log.Debug("OCR failed", "path", job.path, "engine", settings.Engine, "error", err)
+				result, recordErr := c.cat.RecordOCRFailure(jobCtx, job.id, job.signature, err.Error(), enrichmentFailureRetryable(err))
+				if recordErr != nil {
+					c.log.Debug("OCR failure state update failed", "path", job.path, "error", recordErr)
+					_ = c.cat.ReleaseOCRClaim(context.Background(), job.id, job.signature)
+				} else {
+					c.log.Debug("OCR failed", "path", job.path, "engine", settings.Engine, "status", result, "error", err)
+				}
+				finish()
+				continue
 			}
 			if err := c.cat.UpdateOCRContent(jobCtx, job.id, job.signature, status, text); err != nil {
 				c.log.Debug("OCR update failed", "path", job.path, "error", err)
@@ -2235,8 +2294,11 @@ func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHi
 var defaultOperationalFolderExclusions = []string{
 	"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
 	"**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
-	"**/System Volume Information/**",
-	"**/AppData/Local/Microsoft/Windows/WebCache/**", "**/Windows/System32/sru/**", "**/AppData/Local/Temp/_MEI*/**",
+	"**/.git/**", "**/.svn/**", "**/.hg/**", "**/node_modules/**", "**/.terraform/**", "**/.venv/**", "**/__pycache__/**", "**/.pytest_cache/**",
+	"**/System Volume Information/**", "**/$WinREAgent/**", "**/Recovery/**", "**/PerfLogs/**", "**/Config.Msi/**", "**/MSOCache/**",
+	"**/Windows/**", "**/Program Files/**", "**/Program Files (x86)/**", "**/ProgramData/**",
+	"**/AppData/Local/Temp/**", "**/AppData/Local/CrashDumps/**", "**/AppData/Local/Microsoft/Windows/WebCache/**", "**/AppData/Local/Packages/**",
+	"**/proc/**", "**/sys/**", "**/dev/**", "**/run/**", "**/lost+found/**", "**/var/cache/**",
 }
 
 func isOperationalFolder(path string) bool {

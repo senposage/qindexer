@@ -54,6 +54,7 @@ func (a App) Run(ctx context.Context) error {
 	if accessLogErr != nil {
 		log.Warn("access logging unavailable; using operational log", "path", accessLogPath, "error", accessLogErr)
 	}
+	api.PrepareSidecarEnvironment(log, cfg.Crawler.OCR)
 	cat, err := catalog.Open(ctx, dataDir)
 	if err != nil {
 		return err

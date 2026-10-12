@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.1
+
+### Fixed
+
+- Content extraction and OCR failures now use a bounded, delayed retry lane.
+  A transient failure is retried twice without blocking normal enrichment work;
+  malformed, encrypted, invalid, or unsupported files are marked
+  `unindexable` immediately.
+- Search responses now expose retained `content_error` and `ocr_error` details
+  alongside enrichment status.
+- Built-in runtime exclusions now skip operating-system, recovery, installer,
+  temporary, cache, recycle, and virtual filesystem locations even for
+  existing roots.
+- Admin sign-in validates credentials through a lightweight session endpoint,
+  avoiding SQLite/catalog contention during login and clearly reporting
+  connecting, rejected-token, and unavailable-service states.
+
+### Changed
+
+- Windows sidecar setup is self-contained: QIndexer installs and resolves its
+  private Tesseract, Ghostscript, Python, and OCRmyPDF runtime without relying
+  on pre-existing system utilities.
+
 ## 1.0.11
 
 ### Fixed
