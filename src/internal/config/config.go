@@ -223,10 +223,10 @@ func (c *Config) applyDefaults() {
 		c.Crawler.RootParallelism = 1
 	}
 	if c.Crawler.DirectoryWorkerCount <= 0 {
-		c.Crawler.DirectoryWorkerCount = 4
+		c.Crawler.DirectoryWorkerCount = 16
 	}
 	if c.Crawler.MetadataWorkerCount <= 0 {
-		c.Crawler.MetadataWorkerCount = 8
+		c.Crawler.MetadataWorkerCount = 32
 	}
 	if c.Crawler.MetadataQueueSize <= 0 {
 		c.Crawler.MetadataQueueSize = 5000
@@ -238,7 +238,7 @@ func (c *Config) applyDefaults() {
 		c.Crawler.MissingAfterSuccessfulCrawls = 3
 	}
 	if c.Crawler.ContentExtraction.WorkerCount <= 0 {
-		c.Crawler.ContentExtraction.WorkerCount = 1
+		c.Crawler.ContentExtraction.WorkerCount = 3
 	}
 	if c.Crawler.ContentExtraction.QueueSize <= 0 {
 		c.Crawler.ContentExtraction.QueueSize = 1000
@@ -262,7 +262,7 @@ func (c *Config) applyDefaults() {
 		c.Crawler.OCR.Languages = "eng"
 	}
 	if c.Crawler.OCR.WorkerCount <= 0 {
-		c.Crawler.OCR.WorkerCount = 1
+		c.Crawler.OCR.WorkerCount = 2
 	}
 	if c.Crawler.OCR.QueueSize <= 0 {
 		c.Crawler.OCR.QueueSize = 100
@@ -274,7 +274,7 @@ func (c *Config) applyDefaults() {
 		c.Crawler.OCR.TimeoutSeconds = 180
 	}
 	if c.Crawler.Hashing.WorkerCount <= 0 {
-		c.Crawler.Hashing.WorkerCount = 1
+		c.Crawler.Hashing.WorkerCount = 3
 	}
 	if c.Crawler.Hashing.QueueSize <= 0 {
 		c.Crawler.Hashing.QueueSize = 1000
@@ -324,6 +324,20 @@ func (c *Config) Validate() error {
 	engine := strings.ToLower(strings.TrimSpace(c.Crawler.OCR.Engine))
 	if engine != "" && engine != "auto" && engine != "tesseract" && engine != "ocrmypdf" {
 		return fmt.Errorf("invalid OCR engine %q; expected auto, tesseract, or ocrmypdf", c.Crawler.OCR.Engine)
+	}
+	for _, workers := range []struct {
+		name  string
+		count int
+	}{
+		{"directory worker limit", c.Crawler.DirectoryWorkerCount},
+		{"metadata worker limit", c.Crawler.MetadataWorkerCount},
+		{"content worker count", c.Crawler.ContentExtraction.WorkerCount},
+		{"OCR worker count", c.Crawler.OCR.WorkerCount},
+		{"hash worker count", c.Crawler.Hashing.WorkerCount},
+	} {
+		if workers.count < 1 || workers.count > 256 {
+			return fmt.Errorf("%s must be between 1 and 256", workers.name)
+		}
 	}
 	throttle := c.Crawler.AdaptiveThrottle
 	if throttle.SampleIntervalSeconds < 1 || throttle.SampleIntervalSeconds > 3600 {

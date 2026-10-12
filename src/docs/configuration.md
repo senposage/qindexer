@@ -68,8 +68,8 @@ QIndexer stores `qsurfer-search.db`, `qsurfer-search.db-wal`, and
 crawler:
   scan_interval_seconds: 300
   root_parallelism: 1
-  directory_worker_count: 4
-  metadata_worker_count: 8
+  directory_worker_count: 16
+  metadata_worker_count: 32
   metadata_queue_size: 5000
   index_batch_size: 1000
   ignore_hidden: false
@@ -80,8 +80,11 @@ crawler:
 
 - `scan_interval_seconds`: periodic reconciliation interval.
 - `root_parallelism`: number of roots crawled at once.
-- `directory_worker_count`: directory traversal concurrency per crawl.
-- `metadata_worker_count`: file stat/enrichment scheduling concurrency.
+- `directory_worker_count`: maximum directory traversal concurrency per crawl.
+- `metadata_worker_count`: maximum file metadata concurrency per crawl.
+  QIndexer briefly measures each root at crawl start. Fast local roots use the
+  configured maxima; moderate and high-latency roots receive a lower per-root
+  cap so a slow SMB/VPN share is not treated like a local SSD.
 - `metadata_queue_size`: bounded file queue.
 - `index_batch_size`: maximum number of metadata records committed together.
   Metadata workers split this budget so the total in-flight write batch stays
@@ -134,7 +137,7 @@ and `sun`.
 ```yaml
 content_extraction:
   enabled: false
-  worker_count: 1
+  worker_count: 3
   queue_size: 1000
   max_file_size_mb: 64
   max_stored_text_kb: 1024
@@ -150,6 +153,9 @@ default is 1024 KiB and the accepted range is 64-1024 KiB. This limit applies
 to ordinary extraction and OCR; it keeps a pathological or unusually verbose
 document from inflating the SQLite index.
 
+Content extraction has an independent process-wide worker pool. It runs after
+structural indexing is idle, alongside the OCR and hashing pools.
+
 ## OCR
 
 ```yaml
@@ -159,7 +165,7 @@ ocr:
   tesseract_command: "tesseract"
   ocrmypdf_command: "ocrmypdf"
   languages: "eng"
-  worker_count: 1
+  worker_count: 2
   queue_size: 100
   max_file_size_mb: 128
   timeout_seconds: 180
@@ -169,6 +175,8 @@ ocr:
 - `tesseract_command`: command or absolute path for Tesseract.
 - `ocrmypdf_command`: command or absolute path for OCRmyPDF.
 - `languages`: OCR language list such as `eng`.
+- `worker_count`: independent OCR process limit. OCRmyPDF and Tesseract can
+  use CPU internally, so raise it gradually while observing system pressure.
 - `timeout_seconds`: per-file OCR timeout.
 
 OCR never modifies source files. In `auto` mode, images use Tesseract and
@@ -179,13 +187,13 @@ scanned PDFs use OCRmyPDF after ordinary text extraction finds no text.
 ```yaml
 hashing:
   enabled: false
-  worker_count: 1
+  worker_count: 3
   queue_size: 1000
   max_file_size_mb: 2048
 ```
 
 When enabled, QIndexer records SHA-256 hashes for duplicate detection and later
-similar-copy workflows.
+similar-copy workflows. Hashing has its own process-wide worker pool.
 
 ## Watcher
 

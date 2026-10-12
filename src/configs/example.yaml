@@ -22,8 +22,10 @@ index:
 crawler:
   scan_interval_seconds: 300
   root_parallelism: 1
-  directory_worker_count: 4
-  metadata_worker_count: 8
+  # High ceilings for a fast local root. QIndexer measures each root and caps
+  # slower SMB/NAS roots below these values.
+  directory_worker_count: 16
+  metadata_worker_count: 32
   metadata_queue_size: 5000
   index_batch_size: 1000
   ignore_hidden: false
@@ -33,7 +35,7 @@ crawler:
   collect_ownership: false
   content_extraction:
     enabled: false
-    worker_count: 1
+    worker_count: 3
     queue_size: 1000
     max_file_size_mb: 64
     # Text is stored once and capped per document to keep SQLite predictable.
@@ -46,13 +48,13 @@ crawler:
     tesseract_command: "tesseract"
     ocrmypdf_command: "ocrmypdf"
     languages: "eng"
-    worker_count: 1
+    worker_count: 2
     queue_size: 100
     max_file_size_mb: 128
     timeout_seconds: 180
   hashing:
     enabled: false
-    worker_count: 1
+    worker_count: 3
     queue_size: 1000
     max_file_size_mb: 2048
   adaptive_throttle:

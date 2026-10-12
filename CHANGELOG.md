@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.7 - 2026-10-12
+
+- Raise local-disk crawl ceilings and select an observed per-root concurrency cap from a brief directory-latency probe, keeping slow SMB/VPN roots from monopolizing workers.
+- Run content extraction, OCR, and SHA-256 hashing in independently configurable worker pools; the admin UI now exposes all crawl and enrichment worker limits.
+- Show the active root's measured concurrency profile in the operations summary and document local versus slow-share tuning.
+
 ## 1.1.6 - 2026-10-12
 
 - Streamline the admin login header: authenticated sessions hide the token input and use a Logout control; sign-out clears private dashboard state immediately.

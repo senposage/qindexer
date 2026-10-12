@@ -150,12 +150,14 @@ Crawler state is visible in the admin UI metrics cards.
 
 ## Performance Tuning
 
-Start conservatively on NAS/VPN paths:
+The generic defaults are high ceilings for local disks. QIndexer probes each
+root at crawl start and lowers concurrency for high-latency roots. Use lower
+explicit maxima for a known slow NAS/VPN path:
 
 ```yaml
 root_parallelism: 1
-directory_worker_count: 4
-metadata_worker_count: 8
+directory_worker_count: 2
+metadata_worker_count: 4
 metadata_queue_size: 5000
 index_batch_size: 1000
 ```

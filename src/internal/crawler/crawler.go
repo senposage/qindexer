@@ -123,8 +123,78 @@ type CrawlProgress struct {
 	FilesIndexed     int64     `json:"files_indexed"`
 	Errors           int64     `json:"errors"`
 	AccessErrors     int64     `json:"access_errors"`
+	PerformanceClass string    `json:"performance_class,omitempty"`
+	ProbeLatencyMS   float64   `json:"probe_latency_ms,omitempty"`
+	DirectoryWorkers int       `json:"directory_workers,omitempty"`
+	MetadataWorkers  int       `json:"metadata_workers,omitempty"`
 	LastError        string    `json:"last_error,omitempty"`
 	LastActivityUnix int64     `json:"last_activity_unix"`
+}
+
+type rootWorkProfile struct {
+	Class            string
+	Latency          time.Duration
+	DirectoryWorkers int
+	MetadataWorkers  int
+}
+
+// probeRootWork uses tiny directory reads to pick a per-root concurrency cap.
+// It deliberately avoids file-content reads, which would compete with the crawl.
+func probeRootWork(ctx context.Context, paths []string, settings config.CrawlerConfig) rootWorkProfile {
+	profile := rootWorkProfile{Class: "unmeasured", DirectoryWorkers: max(1, settings.DirectoryWorkerCount), MetadataWorkers: max(1, settings.MetadataWorkerCount)}
+	var samples []time.Duration
+	for _, path := range paths {
+		for attempt := 0; attempt < 3; attempt++ {
+			if ctx.Err() != nil {
+				return profile
+			}
+			started := time.Now()
+			file, err := os.Open(path)
+			if err != nil {
+				break
+			}
+			_, readErr := file.Readdirnames(1)
+			_ = file.Close()
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				break
+			}
+			samples = append(samples, time.Since(started))
+		}
+		if len(samples) > 0 {
+			break
+		}
+	}
+	if len(samples) == 0 {
+		profile.DirectoryWorkers = min(profile.DirectoryWorkers, 4)
+		profile.MetadataWorkers = min(profile.MetadataWorkers, 8)
+		return profile
+	}
+	var total time.Duration
+	for _, sample := range samples {
+		total += sample
+	}
+	profile.Latency = total / time.Duration(len(samples))
+	return capRootWorkProfile(profile)
+}
+
+func capRootWorkProfile(profile rootWorkProfile) rootWorkProfile {
+	switch {
+	case profile.Latency <= 8*time.Millisecond:
+		profile.Class = "fast"
+	case profile.Latency <= 35*time.Millisecond:
+		profile.Class = "moderate"
+		profile.DirectoryWorkers = min(profile.DirectoryWorkers, 12)
+		profile.MetadataWorkers = min(profile.MetadataWorkers, 24)
+	case profile.Latency <= 100*time.Millisecond:
+		profile.Class = "slow"
+		profile.DirectoryWorkers = min(profile.DirectoryWorkers, 6)
+		profile.MetadataWorkers = min(profile.MetadataWorkers, 12)
+	default:
+		profile.Class = "high_latency"
+		profile.DirectoryWorkers = min(profile.DirectoryWorkers, 4)
+		profile.MetadataWorkers = min(profile.MetadataWorkers, 8)
+	}
+	return profile
 }
 
 type crawlProgress struct {
@@ -348,6 +418,21 @@ func (c *Crawler) recordProgressFiles(rootID string, count int64) {
 	item.mu.Lock()
 	item.FilesIndexed += count
 	item.LastActivityUnix = time.Now().Unix()
+	item.mu.Unlock()
+}
+
+func (c *Crawler) recordWorkProfile(rootID string, profile rootWorkProfile) {
+	c.progressMu.RLock()
+	item := c.progress[rootID]
+	c.progressMu.RUnlock()
+	if item == nil {
+		return
+	}
+	item.mu.Lock()
+	item.PerformanceClass = profile.Class
+	item.ProbeLatencyMS = float64(profile.Latency) / float64(time.Millisecond)
+	item.DirectoryWorkers = profile.DirectoryWorkers
+	item.MetadataWorkers = profile.MetadataWorkers
 	item.mu.Unlock()
 }
 
@@ -1093,16 +1178,19 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 	}
 
 	settings := c.snapshot().Crawler
+	profile := probeRootWork(ctx, paths, settings)
+	c.recordWorkProfile(root.ID, profile)
+	c.log.Info("root concurrency selected", "root", root.ID, "class", profile.Class, "probe_latency_ms", float64(profile.Latency)/float64(time.Millisecond), "directory_workers", profile.DirectoryWorkers, "metadata_workers", profile.MetadataWorkers)
 	jobs := make(chan string, settings.MetadataQueueSize)
-	priorityLimit := max(10_000, settings.MetadataQueueSize*max(1, settings.MetadataWorkerCount)*4)
+	priorityLimit := max(10_000, settings.MetadataQueueSize*profile.MetadataWorkers*4)
 	priorityPaths, priorityErr := c.cat.MissingDocumentPaths(ctx, root.ID, priorityLimit)
 	if priorityErr != nil {
 		c.log.Warn("missing-path priority lookup failed", "root", root.ID, "error", priorityErr)
 	}
 	var filesSeen, filesAdded, filesUpdated, filesUnchanged, errorsCount int64
 	var workers sync.WaitGroup
-	batchSize := max(1, settings.IndexBatchSize/max(1, settings.MetadataWorkerCount))
-	for i := 0; i < settings.MetadataWorkerCount; i++ {
+	batchSize := max(1, settings.IndexBatchSize/profile.MetadataWorkers)
+	for i := 0; i < profile.MetadataWorkers; i++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -1193,7 +1281,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 		}
 	}
 	if walkErr == nil {
-		walkErr = c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, true, !initial)
+		walkErr = c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, true, !initial, profile.DirectoryWorkers)
 	}
 	close(jobs)
 	workers.Wait()
@@ -1349,7 +1437,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	}
 	var walkErr error
 	if info.IsDir() {
-		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, true)
+		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, true, settings.DirectoryWorkerCount)
 	} else {
 		walkErr = sendPath(ctx, jobs, path)
 	}
@@ -1376,7 +1464,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	return run, walkErr
 }
 
-func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume bool, adaptivePause bool) error {
+func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume bool, adaptivePause bool, workerCount int) error {
 	queue := newDirQueue(paths)
 	go func() {
 		<-ctx.Done()
@@ -1413,7 +1501,6 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 		return fmt.Errorf("%w: no configured paths reachable for root %s", errRootTraversalIncomplete, root.ID)
 	}
 
-	workerCount := c.snapshot().Crawler.DirectoryWorkerCount
 	if workerCount <= 0 {
 		workerCount = 1
 	}

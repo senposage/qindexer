@@ -45,6 +45,28 @@ func TestExpandRootPathsRejectsEmptyGlob(t *testing.T) {
 	}
 }
 
+func TestRootWorkProfileCapsHighLatencyRoots(t *testing.T) {
+	profile := capRootWorkProfile(rootWorkProfile{
+		Latency:          150 * time.Millisecond,
+		DirectoryWorkers: 16,
+		MetadataWorkers:  32,
+	})
+	if profile.Class != "high_latency" || profile.DirectoryWorkers != 4 || profile.MetadataWorkers != 8 {
+		t.Fatalf("unexpected high-latency profile: %#v", profile)
+	}
+}
+
+func TestRootWorkProfileKeepsFastRootsAtConfiguredMaximum(t *testing.T) {
+	profile := capRootWorkProfile(rootWorkProfile{
+		Latency:          2 * time.Millisecond,
+		DirectoryWorkers: 16,
+		MetadataWorkers:  32,
+	})
+	if profile.Class != "fast" || profile.DirectoryWorkers != 16 || profile.MetadataWorkers != 32 {
+		t.Fatalf("unexpected fast profile: %#v", profile)
+	}
+}
+
 func TestNeedsStartupCrawlSkipsRecentlyCompletedRoot(t *testing.T) {
 	completed := time.Now().UTC()
 	root := config.RootConfig{ID: "complete", Enabled: true}
