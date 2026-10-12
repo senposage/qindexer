@@ -2379,6 +2379,18 @@ func (c *Catalog) RecentCrawls(ctx context.Context, limit int) ([]CrawlRun, erro
 	return runs, rows.Err()
 }
 
+// ClearCrawlHistory removes display-only crawl history. It intentionally keeps
+// checkpoints, root state, and indexed documents intact.
+func (c *Catalog) ClearCrawlHistory(ctx context.Context) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	result, err := c.db.ExecContext(ctx, `DELETE FROM crawl_runs`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 type documentScanner interface {
 	Scan(dest ...any) error
 }

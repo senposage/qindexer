@@ -1006,29 +1006,29 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 }
 
 func (c *Crawler) refillBackground(ctx context.Context) {
-	// Structural indexing has priority. Do not compete with NAS enumeration,
-	// metadata writes, or recovery work until every active crawl is finished.
-	if atomic.LoadInt64(&c.activeCrawls) > 0 || c.InMaintenance() {
+	// Structural indexing takes priority only within its own root. A crawl of
+	// one share must not stall OCR, content extraction, or hashing for another.
+	if c.InMaintenance() {
 		return
 	}
 	content := c.snapshot().Crawler.ContentExtraction
-	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.ContentExtractionEnabled(content.Enabled) }); len(rootIDs) > 0 {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled) }); len(rootIDs) > 0 {
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content")
 	}
 	ocr := c.snapshot().Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
-		return root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
+		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR")
 	}
 	hashing := c.snapshot().Crawler.Hashing
-	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return root.HashingEnabled(hashing.Enabled) }); len(rootIDs) > 0 {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return !c.IsRootRunning(root.ID) && root.HashingEnabled(hashing.Enabled) }); len(rootIDs) > 0 {
 		c.fillBackground(ctx, rootIDs, c.hashJobs, hashing.MaxFileSizeMB<<20, c.cat.ClaimPendingHashes, "hash")
 	}
 }
 
-func (c *Crawler) waitForEnrichmentWindow(ctx context.Context) error {
-	for atomic.LoadInt64(&c.activeCrawls) > 0 || c.InMaintenance() {
+func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) error {
+	for c.IsRootRunning(rootID) || c.InMaintenance() {
 		timer := time.NewTimer(250 * time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -2181,7 +2181,7 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if c.waitForEnrichmentWindow(ctx) != nil {
+			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
 				return
 			}
 			jobCtx, finish := c.beginBackgroundWork(ctx)
@@ -2242,7 +2242,7 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if c.waitForEnrichmentWindow(ctx) != nil {
+			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
 				return
 			}
 			jobCtx, finish := c.beginBackgroundWork(ctx)
@@ -2300,7 +2300,7 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if c.waitForEnrichmentWindow(ctx) != nil {
+			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
 				return
 			}
 			jobCtx, finish := c.beginBackgroundWork(ctx)

@@ -305,6 +305,21 @@ func TestRootWorkIsVisibleToStopAndWait(t *testing.T) {
 	}
 }
 
+func TestEnrichmentForAnotherRootDoesNotWaitForActiveCrawl(t *testing.T) {
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, finish, started := c.beginRootWork(context.Background(), "root-a")
+	if !started {
+		t.Fatal("root crawl did not start")
+	}
+	defer finish()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := c.waitForEnrichmentWindow(ctx, "root-b"); err != nil {
+		t.Fatalf("enrichment for a different root was blocked by active crawl: %v", err)
+	}
+}
+
 func TestRepeatedUnreachableLogsAreSuppressed(t *testing.T) {
 	var buf bytes.Buffer
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(&buf, nil)))

@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,12 +28,13 @@ type Watcher struct {
 }
 
 type Stats struct {
-	Enabled            bool  `json:"enabled"`
-	Running            bool  `json:"running"`
-	WatchedDirectories int   `json:"watched_directories"`
-	MaxDirectories     int   `json:"max_watched_directories"`
-	LastEventUnix      int64 `json:"last_event_unix"`
-	LastRebalanceUnix  int64 `json:"last_rebalance_unix"`
+	Enabled            bool   `json:"enabled"`
+	Running            bool   `json:"running"`
+	Error              string `json:"error,omitempty"`
+	WatchedDirectories int    `json:"watched_directories"`
+	MaxDirectories     int    `json:"max_watched_directories"`
+	LastEventUnix      int64  `json:"last_event_unix"`
+	LastRebalanceUnix  int64  `json:"last_rebalance_unix"`
 }
 
 type watchSet struct {
@@ -82,10 +84,28 @@ func (w *Watcher) setStats(stats Stats) {
 func (w *Watcher) Run(ctx context.Context) error {
 	for {
 		reload, err := w.run(ctx)
-		if err != nil || ctx.Err() != nil || !reload {
+		if err != nil || ctx.Err() != nil {
 			return err
 		}
-		w.log.Info("filesystem watcher reloading configuration")
+		if reload {
+			w.log.Info("filesystem watcher reloading configuration")
+			continue
+		}
+		// Some platforms can temporarily refuse a native notification handle
+		// (for example after a network or inotify resource interruption). Keep
+		// crawling normally and retry the optional watcher instead of leaving it
+		// silently inactive for the rest of the process lifetime.
+		timer := time.NewTimer(30 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-w.reload:
+			timer.Stop()
+			w.log.Info("filesystem watcher reloading configuration")
+		case <-timer.C:
+			w.log.Info("filesystem watcher retrying after unavailable state")
+		}
 	}
 }
 
@@ -103,6 +123,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 	}
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
+		w.setUnavailable(cfg, err)
 		w.log.Warn("filesystem watcher unavailable", "error", err)
 		return false, nil
 	}
@@ -137,13 +158,16 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 			return true, nil
 		case err, ok := <-fsw.Errors:
 			if !ok {
+				w.setUnavailable(cfg, errors.New("filesystem watcher error stream closed"))
 				return false, nil
 			}
 			if err != nil {
+				w.setWatcherError(err)
 				w.log.Warn("filesystem watcher error", "error", err)
 			}
 		case event, ok := <-fsw.Events:
 			if !ok {
+				w.setUnavailable(cfg, errors.New("filesystem watcher event stream closed"))
 				return false, nil
 			}
 			if w.shouldIgnore(event.Name) {
@@ -326,6 +350,18 @@ func (w *Watcher) updateStats(set *watchSet, cfg *config.Config) {
 	w.statsMu.Lock()
 	lastEvent, lastRebalance := w.stats.LastEventUnix, w.stats.LastRebalanceUnix
 	w.stats = Stats{Enabled: cfg.Watcher.Enabled, Running: true, WatchedDirectories: len(set.paths), MaxDirectories: set.limit, LastEventUnix: lastEvent, LastRebalanceUnix: lastRebalance}
+	w.statsMu.Unlock()
+}
+
+func (w *Watcher) setUnavailable(cfg *config.Config, err error) {
+	w.statsMu.Lock()
+	w.stats = Stats{Enabled: cfg.Watcher.Enabled, Running: false, MaxDirectories: cfg.Watcher.MaxWatchedDirectories, Error: err.Error()}
+	w.statsMu.Unlock()
+}
+
+func (w *Watcher) setWatcherError(err error) {
+	w.statsMu.Lock()
+	w.stats.Error = err.Error()
 	w.statsMu.Unlock()
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.8 - 2026-10-12
+
+- Keep filesystem change notifications visible and self-healing: unavailable native watcher handles now report the reason in the admin UI and retry every 30 seconds.
+- Schedule content extraction, OCR, and SHA-256 hashing per root, so an active structural crawl on one root does not block enrichment work on another.
+- Add an authenticated Clear history action for recent crawl activity. It removes display history only and preserves roots, checkpoints, and indexed documents.
+
 ## 1.1.7 - 2026-10-12
 
 - Raise local-disk crawl ceilings and select an observed per-root concurrency cap from a brief directory-latency probe, keeping slow SMB/VPN roots from monopolizing workers.

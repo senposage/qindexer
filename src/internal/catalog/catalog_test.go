@@ -506,6 +506,42 @@ func TestMarkOpenCrawlsInterrupted(t *testing.T) {
 	}
 }
 
+func TestClearCrawlHistoryKeepsRootState(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	if _, err := cat.NextGeneration(ctx, "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.StartCrawl(ctx, CrawlRun{ID: "run-1", RootID: "shared", Generation: 1, StartedAt: time.Now().UTC(), Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := cat.ClearCrawlHistory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	runs, err := cat.RecentCrawls(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs = %#v, want empty", runs)
+	}
+	states, err := cat.RootStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := states["shared"]; !ok {
+		t.Fatal("clearing history removed root state")
+	}
+}
+
 func TestPruneRecoveryPathsRemovesOnlyRecoveryDirectories(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

@@ -220,6 +220,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /admin/v1/roots/{root_id}/validate", s.withAdminAuth(s.validateRoot))
 	mux.HandleFunc("PUT /admin/v1/roots/{root_id}/rules", s.withAdminAuth(s.updateRootRules))
 	mux.HandleFunc("GET /admin/v1/crawls", s.withAdminAuth(s.crawls))
+	mux.HandleFunc("DELETE /admin/v1/crawls", s.withAdminAuth(s.clearCrawls))
 	return s.requestLog(mux)
 }
 
@@ -1290,6 +1291,16 @@ func (s *Server) crawls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"crawls": runs})
+}
+
+func (s *Server) clearCrawls(w http.ResponseWriter, r *http.Request) {
+	removed, err := s.cat.ClearCrawlHistory(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "catalog_error", err.Error())
+		return
+	}
+	s.log.Info("crawl history cleared", "runs_removed", removed)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared", "runs_removed": removed})
 }
 
 func (s *Server) configView(w http.ResponseWriter, r *http.Request) {

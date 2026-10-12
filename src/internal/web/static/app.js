@@ -62,6 +62,7 @@ function logoutAdmin() {
 
 document.querySelector("#refresh").addEventListener("click", refresh);
 document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
+document.querySelector("#clear-crawls").addEventListener("click", clearCrawlHistory);
 document.querySelector("#validate-config").addEventListener("click", validateConfig);
 document.querySelector("#pause-crawler").addEventListener("click", pauseCrawler);
 document.querySelector("#stop-crawler").addEventListener("click", stopCrawler);
@@ -475,7 +476,12 @@ function renderOpsSummary(metrics, progress) {
   document.querySelector("#ops-directory-counts").textContent = first ? `${Number(first.directory_files || 0).toLocaleString()} files, ${Number(first.directory_folders || 0).toLocaleString()} folders` : "-";
   const workerProfile = first?.directory_workers ? ` | ${first.performance_class || "measured"} root: ${first.directory_workers} dir / ${first.metadata_workers} metadata workers` : "";
   document.querySelector("#ops-activity").textContent = metrics.last_activity_unix ? `${formatActivityAge(metrics.last_activity_unix)} | ${formatRate(metrics.files_per_second || 0)} files/s | ${formatRate(metrics.directories_per_second || 0)} dirs/s${workerProfile}` : "-";
-  document.querySelector("#ops-watcher").textContent = watch.enabled ? `${Number(watch.watched_directories || 0).toLocaleString()} / ${Number(watch.max_watched_directories || 0).toLocaleString()} folders` : "Disabled";
+  const watcherEnabled = watch.enabled || state.watcher?.enabled;
+  const watcherStatus = watch.running
+    ? `${Number(watch.watched_directories || 0).toLocaleString()} / ${Number(watch.max_watched_directories || 0).toLocaleString()} folders`
+    : (watcherEnabled ? `Unavailable${watch.error ? `: ${watch.error}` : ""}` : "Disabled");
+  document.querySelector("#ops-watcher").textContent = watcherStatus;
+  document.querySelector("#ops-watcher").title = watch.error || "";
   renderBackgroundActivity("#ops-content", metrics.content_activity, "Content", Boolean(metrics.active_crawls));
   renderBackgroundActivity("#ops-ocr", metrics.ocr_activity, "OCR", Boolean(metrics.active_crawls));
   renderBackgroundActivity("#ops-hash", metrics.hash_activity, "Hashing", Boolean(metrics.active_crawls));
@@ -827,6 +833,22 @@ function renderCrawls(crawls) {
       </div>
     `;
     list.appendChild(item);
+  }
+}
+
+async function clearCrawlHistory() {
+  if (!window.confirm("Clear the recent crawl history? This does not remove roots, checkpoints, or indexed documents.")) {
+    return;
+  }
+  const button = document.querySelector("#clear-crawls");
+  button.disabled = true;
+  try {
+    const data = await api("/admin/v1/crawls", { method: "DELETE" });
+    await refresh({ quiet: true, message: `Cleared ${Number(data.runs_removed || 0).toLocaleString()} crawl history entries` });
+  } catch (err) {
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
   }
 }
 
