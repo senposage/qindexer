@@ -68,6 +68,19 @@ Portable install scripts:
 .\scripts\install-qindexer.ps1 -InstallDir "C:\Program Files\QIndexer" -ConfigPath .\src\configs\windows-nas.example.yaml -InstallSidecars -InstallService -StartService
 ```
 
+Standalone service setup scripts create a rootless, tokenless loopback
+configuration only when one does not already exist, then start the service for
+first-run setup in the admin UI. The Windows script requires NSSM to be
+installed or supplied with `-NssmPath`.
+
+```powershell
+.\scripts\setup-qindexer-service-windows.ps1
+```
+
+```bash
+sudo ./scripts/setup-qindexer-service-linux.sh
+```
+
 Open the admin UI:
 
 ```text

@@ -1,0 +1,143 @@
+[CmdletBinding()]
+param(
+  [string]$InstallDir = "C:\ProgramData\QIndexer",
+  [string]$BinaryPath = "",
+  [string]$NssmPath = "",
+  [string]$ServiceName = "QIndexer",
+  [switch]$InstallSidecars
+)
+
+$ErrorActionPreference = "Stop"
+
+function Require-Administrator {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run this setup script from an elevated PowerShell session."
+  }
+}
+
+function Find-Nssm {
+  param([string]$PreferredPath)
+  $candidates = @(
+    $PreferredPath,
+    (Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+    (Join-Path $PSScriptRoot "nssm.exe"),
+    (Join-Path ${env:ProgramFiles} "nssm\win64\nssm.exe"),
+    (Join-Path ${env:ProgramFiles} "nssm\nssm.exe")
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+  return $candidates | Select-Object -First 1
+}
+
+function Find-Binary {
+  param([string]$PreferredPath)
+  $bundleRoot = Split-Path -Parent $PSScriptRoot
+  $candidates = @(
+    $PreferredPath,
+    (Join-Path $bundleRoot "qindexer.exe"),
+    (Join-Path $bundleRoot "qindexer_windows_amd64.exe"),
+    (Join-Path $bundleRoot "src\dist\qindexer_windows_amd64.exe")
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+  return $candidates | Select-Object -First 1
+}
+
+function Write-EmptyConfig {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$DataDir)
+  @"
+server:
+  bind: "127.0.0.1:41973"
+  bind_addresses:
+    - "127.0.0.1:41973"
+  public_base_url: "http://127.0.0.1:41973"
+  auth:
+    mode: "static-token"
+
+management:
+  enabled: true
+  bind: "127.0.0.1:41974"
+  bind_addresses:
+    - "127.0.0.1:41974"
+  auth:
+    mode: "admin-token"
+
+index:
+  data_dir: "$DataDir"
+
+roots: []
+"@ | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+Require-Administrator
+$nssm = Find-Nssm $NssmPath
+if (-not $nssm) {
+  throw "NSSM was not found. Install NSSM, add nssm.exe to PATH, or pass -NssmPath C:\path\to\nssm.exe."
+}
+$sourceBinary = Find-Binary $BinaryPath
+if (-not $sourceBinary) {
+  throw "QIndexer Windows binary was not found. Pass -BinaryPath C:\path\to\qindexer.exe."
+}
+
+$binDir = Join-Path $InstallDir "bin"
+$configDir = Join-Path $InstallDir "config"
+$dataDir = Join-Path $InstallDir "data"
+$logsDir = Join-Path $dataDir "logs"
+$scriptsDir = Join-Path $InstallDir "scripts"
+New-Item -ItemType Directory -Force -Path $binDir, $configDir, $dataDir, $logsDir, $scriptsDir | Out-Null
+
+$installedBinary = Join-Path $binDir "qindexer.exe"
+$configPath = Join-Path $configDir "qindexer.yaml"
+Copy-Item -LiteralPath $sourceBinary -Destination $installedBinary -Force
+$sidecarSource = Join-Path $PSScriptRoot "setup-sidecars-windows.ps1"
+if (Test-Path -LiteralPath $sidecarSource) {
+  Copy-Item -LiteralPath $sidecarSource -Destination (Join-Path $scriptsDir "setup-sidecars-windows.ps1") -Force
+}
+if (-not (Test-Path -LiteralPath $configPath)) {
+  Write-EmptyConfig -Path $configPath -DataDir $dataDir
+  Write-Host "Created an empty configuration. Add roots and set the first admin token in the web UI."
+}
+
+$installSidecars = $InstallSidecars
+if (-not $PSBoundParameters.ContainsKey("InstallSidecars") -and [Environment]::UserInteractive) {
+  $installSidecars = (Read-Host "Install optional OCR/extraction sidecars now? [y/N]") -match '^(?i:y|yes)$'
+}
+if ($installSidecars) {
+  $sidecarScript = Join-Path $scriptsDir "setup-sidecars-windows.ps1"
+  if (-not (Test-Path -LiteralPath $sidecarScript)) {
+    throw "The packaged Windows sidecar installer is missing: $sidecarScript"
+  }
+  & $sidecarScript -InstallDir $InstallDir -LogPath (Join-Path $logsDir "sidecar-install.log")
+}
+
+$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($existing) {
+  if ($existing.Status -ne "Stopped") {
+    & $nssm stop $ServiceName | Out-Null
+    Start-Sleep -Seconds 1
+  }
+  & $nssm remove $ServiceName confirm | Out-Null
+	Start-Sleep -Seconds 1
+}
+
+& $nssm install $ServiceName $installedBinary | Out-Null
+& $nssm set $ServiceName AppParameters "run --config `"$configPath`"" | Out-Null
+& $nssm set $ServiceName AppDirectory $InstallDir | Out-Null
+& $nssm set $ServiceName DisplayName "QIndexer" | Out-Null
+& $nssm set $ServiceName Description "QIndexer filesystem indexing and search service." | Out-Null
+& $nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+& $nssm set $ServiceName AppStdout (Join-Path $logsDir "service-stdout.log") | Out-Null
+& $nssm set $ServiceName AppStderr (Join-Path $logsDir "service-stderr.log") | Out-Null
+& $nssm set $ServiceName AppRotateFiles 1 | Out-Null
+& $nssm set $ServiceName AppRotateOnline 1 | Out-Null
+& $nssm set $ServiceName AppRotateBytes 10485760 | Out-Null
+& $nssm start $ServiceName | Out-Null
+
+$service = Get-Service -Name $ServiceName
+if ($service.Status -ne "Running") {
+  throw "The service was installed but did not start. Check $logsDir\service-stderr.log and $logsDir\qindexer.log."
+}
+
+Write-Host "QIndexer service is running."
+Write-Host "  Service: $ServiceName"
+Write-Host "  Admin UI: http://127.0.0.1:41974/"
+Write-Host "  Config: $configPath"
+Write-Host "  Logs: $logsDir"

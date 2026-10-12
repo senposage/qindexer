@@ -45,3 +45,16 @@ func TestAdaptiveThrottleValidation(t *testing.T) {
 		t.Fatal("expected invalid CPU threshold to fail validation")
 	}
 }
+
+func TestEmptyRootFirstRunConfigurationIsValid(t *testing.T) {
+	cfg := Config{
+		Server:     ServerConfig{Bind: "127.0.0.1:41973", Auth: AuthConfig{Mode: "static-token"}},
+		Management: ManagementConfig{Enabled: true, Bind: "127.0.0.1:41974", Auth: AuthConfig{Mode: "admin-token"}},
+		Index:      IndexConfig{DataDir: "data"},
+		Roots:      []RootConfig{},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty first-run configuration should validate: %v", err)
+	}
+}
