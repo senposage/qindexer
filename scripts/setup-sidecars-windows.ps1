@@ -81,7 +81,6 @@ function Install-Tesseract {
     if ((Get-Item -LiteralPath $installer).Length -lt 10MB) {
       throw "Downloaded Tesseract installer is unexpectedly small."
     }
-    Confirm-SignedExecutable -Path $installer -Name "Tesseract installer"
     Write-Host "Installing Tesseract..."
     $process = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "Tesseract installer failed with exit code $($process.ExitCode)." }

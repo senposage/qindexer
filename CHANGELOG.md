@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.4 - 2026-10-12
+
+- Allow the official upstream Tesseract Windows installer to run without an Authenticode signature check.
+
 ## 1.1.3 - 2026-10-12
 
 - Make OCR sidecar deployment self-contained for managed installs: when the helper script is absent beside QIndexer, the service retrieves the release-matched script into its own `scripts` directory before executing it.
