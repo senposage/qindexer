@@ -55,6 +55,7 @@ h2 { font-size: 16px; font-weight: 700; }
 .build { margin-left: 8px; color: var(--muted); font-size: 11px; }
 .auth { display: grid; min-width: min(490px, 48vw); gap: 4px; }
 .auth-controls { display: flex; gap: 8px; }
+.auth-controls.authenticated #token, .auth-controls.authenticated #clear-token { display: none; }
 .auth-state { min-height: 18px; padding-left: 1px; color: var(--muted); font-size: 12px; }
 .auth-state[data-state="connecting"] { color: var(--accent-dark); }
 .auth-state[data-state="authenticated"] { color: var(--ok); }

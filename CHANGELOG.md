@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.6 - 2026-10-12
+
+- Streamline the admin login header: authenticated sessions hide the token input and use a Logout control; sign-out clears private dashboard state immediately.
+
 ## 1.1.5 - 2026-10-12
 
 - Replace a previously recovered Windows OCR helper that still contains the obsolete Tesseract Authenticode check.

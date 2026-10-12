@@ -30,7 +30,13 @@ let liveDashboardRefreshing = false;
 tokenInput.value = state.token;
 endpoint.textContent = `${location.origin}/admin/v1`;
 
-connectButton.addEventListener("click", () => connectAdmin());
+connectButton.addEventListener("click", () => {
+  if (authState.dataset.state === "authenticated") {
+    logoutAdmin();
+    return;
+  }
+  connectAdmin();
+});
 tokenInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -39,12 +45,20 @@ tokenInput.addEventListener("keydown", (event) => {
 });
 
 document.querySelector("#clear-token").addEventListener("click", () => {
+  logoutAdmin();
+});
+
+function logoutAdmin() {
   state.token = "";
   tokenInput.value = "";
   sessionStorage.removeItem("qindexer.admin.token");
+  setAdminVisibility(false);
+  setAuthenticatedControls(false);
+  showLockedStatus(null, "Admin token cleared");
   setAuthState("logged-out", "Not connected");
-  refresh({ quiet: true, message: "Admin token cleared" });
-});
+  setMessage("Admin token cleared");
+  tokenInput.focus();
+}
 
 document.querySelector("#refresh").addEventListener("click", refresh);
 document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
@@ -152,6 +166,7 @@ async function connectAdmin(options = {}) {
   }
 
   setConnectBusy(true);
+  setAdminVisibility(false);
   setAuthState("connecting", "Verifying admin token...");
   setMessage("Checking administrator access...");
   let publicStatus = options.publicStatus;
@@ -170,6 +185,7 @@ async function connectAdmin(options = {}) {
     await api("/admin/v1/session", { timeoutMs: 4000 });
     sessionStorage.setItem("qindexer.admin.token", candidate);
     setAdminVisibility(true);
+    setAuthenticatedControls(true);
     setAuthState("authenticated", "Connected");
     setMessage("Authenticated. Loading dashboard...");
     showView("roots");
@@ -189,6 +205,7 @@ async function connectAdmin(options = {}) {
         ? "Set the first admin token to continue"
         : `Could not connect: ${err.message}`;
     showLockedStatus(publicStatus, detail);
+    setAuthenticatedControls(false);
     setAuthState(invalid ? "invalid" : "unavailable", detail);
     tokenInput.focus();
     return false;
@@ -316,6 +333,7 @@ async function bootstrapAdmin(event) {
     state.token = token;
     tokenInput.value = token;
     sessionStorage.setItem("qindexer.admin.token", token);
+    setAuthenticatedControls(true);
     document.querySelector("#bootstrap-token").value = "";
     document.querySelector("#bootstrap-confirm").value = "";
     document.querySelector("#bootstrap-panel").classList.add("hidden");
@@ -1230,7 +1248,15 @@ function setAuthState(status, text) {
 function setConnectBusy(busy) {
   connectButton.disabled = busy;
   connectButton.dataset.busy = String(busy);
-  connectButton.textContent = busy ? "Connecting" : "Connect";
+  connectButton.textContent = busy ? "Connecting" : authState.dataset.state === "authenticated" ? "Logout" : "Connect";
+  tokenInput.disabled = busy;
+  document.querySelector("#clear-token").disabled = busy;
+  document.querySelector("#auth-controls").setAttribute("aria-busy", String(busy));
+}
+
+function setAuthenticatedControls(authenticated) {
+  document.querySelector("#auth-controls").classList.toggle("authenticated", authenticated);
+  connectButton.textContent = authenticated ? "Logout" : "Connect";
 }
 
 function formatRate(value) {
