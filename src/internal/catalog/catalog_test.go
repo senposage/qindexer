@@ -171,6 +171,31 @@ func TestResetQueuedBackgroundForRootIsScoped(t *testing.T) {
 	}
 }
 
+func TestMarkPathInaccessibleKeepsDocumentActive(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	path := `X:\Private\locked.docx`
+	if _, err := cat.UpsertDocument(ctx, Document{ID: "locked", RootID: "root", Path: path, NormalizedPath: NormalizePath(path), Name: "locked.docx", Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.MarkPathInaccessible(ctx, "root", path, 2); err != nil {
+		t.Fatal(err)
+	}
+	var status, accessStatus string
+	var generation, missingCount int64
+	if err := cat.db.QueryRowContext(ctx, `SELECT status, access_status, last_seen_generation, missing_count FROM documents WHERE id = 'locked'`).Scan(&status, &accessStatus, &generation, &missingCount); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" || accessStatus != "inaccessible" || generation != 2 || missingCount != 0 {
+		t.Fatalf("inaccessible document state = status=%q access=%q generation=%d missing=%d", status, accessStatus, generation, missingCount)
+	}
+}
+
 func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

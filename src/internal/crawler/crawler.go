@@ -1327,6 +1327,9 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 						atomic.AddInt64(&errorsCount, 1)
 						c.recordProgressError(root.ID, path, err)
 						c.logSuppressed("metadata-access:"+root.ID+":"+path, "metadata access denied", err.Error(), 5*time.Minute, "root", root.ID, "path", path, "error", err)
+						if _, markErr := c.cat.MarkPathInaccessible(ctx, root.ID, path, generation); markErr != nil && !isCrawlerCancellation(ctx, markErr) {
+							c.log.Warn("metadata inaccessible state update failed", "root", root.ID, "path", path, "error", markErr)
+						}
 						continue
 					}
 					atomic.AddInt64(&errorsCount, 1)
@@ -2466,7 +2469,7 @@ func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHi
 	if !entry.IsDir() && strings.HasPrefix(strings.TrimLeft(name, `\\/`), "~$") {
 		return true
 	}
-	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || isOperationalFolder(path)) {
+	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || isOperationalPath(root, path)) {
 		return true
 	}
 	return matchesAny(path, root.ExcludePatterns)
@@ -2491,6 +2494,13 @@ func isOperationalFolder(path string) bool {
 	// recognizes a fixed directory name when considering the directory itself.
 	normalized := comparablePath(path)
 	return strings.Contains(normalized, "/appdata/local/temp/_mei")
+}
+
+// isOperationalPath honors an explicit root inside an otherwise excluded
+// system tree. For normal volume roots it excludes the built-in junk trees;
+// for an intentionally targeted sub-root it leaves the operator's scope alone.
+func isOperationalPath(root config.RootConfig, path string) bool {
+	return isOperationalFolder(path) && !isOperationalFolder(root.Path)
 }
 
 func extensionAllowed(root config.RootConfig, ext string) bool {
@@ -2530,7 +2540,13 @@ func PathAllowed(root config.RootConfig, path, extension string, isFolder bool) 
 		return false
 	}
 	if isFolder {
-		return !matchesAny(path, root.ExcludeFolderPatterns) && !isOperationalFolder(path)
+		return !matchesAny(path, root.ExcludeFolderPatterns) && !isOperationalPath(root, path)
+	}
+	// Traversal omits built-in operational trees such as Windows and Program
+	// Files. Apply the same rule to historical descendants during reconciliation
+	// so skipped records are retired as excluded, never mislabeled as missing.
+	if isOperationalPath(root, filepath.Dir(path)) {
+		return false
 	}
 	if strings.HasPrefix(strings.TrimLeft(filepath.Base(path), `\\/`), "~$") {
 		return false

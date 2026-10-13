@@ -214,6 +214,21 @@ func TestPathAllowedRejectsRecordsUnderExcludedFolder(t *testing.T) {
 	}
 }
 
+func TestPathAllowedRejectsRecordsUnderOperationalFolder(t *testing.T) {
+	tests := []string{
+		`C:\Program Files (x86)\Steam\steamapps\common\game\data.bin`,
+		`E:\isos\minitool 12.3\Windows\WinSxS\Catalogs\package.cat`,
+	}
+	for _, path := range tests {
+		if PathAllowed(config.RootConfig{}, path, filepath.Ext(path), false) {
+			t.Fatalf("operational descendant remained eligible: %s", path)
+		}
+	}
+	if !PathAllowed(config.RootConfig{}, `E:\client data\brief.docx`, "docx", false) {
+		t.Fatal("unrelated file was unexpectedly excluded")
+	}
+}
+
 func TestShouldSkipOfficeTemporaryLockFile(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"~$Draft.docx", `\~$Draft.docx`} {

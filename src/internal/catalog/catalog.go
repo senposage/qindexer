@@ -2090,6 +2090,23 @@ func (c *Catalog) MarkPathMissing(ctx context.Context, rootID string, path strin
 	return count, nil
 }
 
+// MarkPathInaccessible preserves a previously indexed entry when the crawler
+// can enumerate its parent but cannot read the entry's metadata. It is not
+// evidence that the entry was deleted, so keep it active and out of missing
+// reconciliation for this generation.
+func (c *Catalog) MarkPathInaccessible(ctx context.Context, rootID, path string, generation int64) (int64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	res, err := c.db.ExecContext(ctx, `UPDATE documents
+		SET status = 'active', access_status = 'inaccessible', last_seen_generation = ?, missing_count = 0
+		WHERE root_id = ? AND normalized_path = ?`, generation, rootID, NormalizePath(path))
+	if err != nil {
+		return 0, err
+	}
+	count, _ := res.RowsAffected()
+	return count, nil
+}
+
 // ReconcileMoves converts an unambiguous missing-to-active hash match into a
 // move relationship after a full crawl. Duplicate hashes are intentionally left alone.
 func (c *Catalog) ReconcileMoves(ctx context.Context, rootID string, generation int64) (int64, error) {
