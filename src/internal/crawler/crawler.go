@@ -1330,8 +1330,14 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 			run.ErrorMessage = walkErr.Error()
 		}
 	} else {
-		missing, err := c.cat.MarkMissing(ctx, root.ID, generation, c.snapshot().Crawler.MissingAfterSuccessfulCrawls)
+		ignoreHidden := c.snapshot().Crawler.IgnoreHidden
+		pruned, err := c.cat.PruneDocuments(ctx, root.ID, func(path, extension string, isFolder bool) bool {
+			return !(ignoreHidden && strings.HasPrefix(filepath.Base(path), ".")) && PathAllowed(root, path, extension, isFolder)
+		})
 		if err != nil {
+			run.Status = "failed"
+			run.ErrorMessage = err.Error()
+		} else if missing, err := c.cat.MarkMissing(ctx, root.ID, generation, c.snapshot().Crawler.MissingAfterSuccessfulCrawls); err != nil {
 			run.Status = "failed"
 			run.ErrorMessage = err.Error()
 		} else if err := c.cat.ClearRootCheckpoints(ctx, root.ID); err != nil {
@@ -1340,6 +1346,9 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 		} else {
 			run.FilesMissing = missing
 			run.Status = "ok"
+			if pruned > 0 {
+				c.log.Info("excluded records removed during crawl reconciliation", "root", root.ID, "documents", pruned)
+			}
 			if moved, moveErr := c.cat.ReconcileMoves(ctx, root.ID, generation); moveErr != nil {
 				c.log.Warn("move reconciliation failed", "root", root.ID, "error", moveErr)
 			} else if moved > 0 {
@@ -2138,12 +2147,9 @@ func (c *Crawler) describePath(root config.RootConfig, path string, generation i
 	ext := ""
 	if !isFolder {
 		ext = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-		if !extensionAllowed(root, ext) {
-			return catalog.Document{}, false, nil
-		}
-		if !filePatternAllowed(root, path) {
-			return catalog.Document{}, false, nil
-		}
+	}
+	if (c.snapshot().Crawler.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) || !PathAllowed(root, path, ext, isFolder) {
+		return catalog.Document{}, false, nil
 	}
 	doc := catalog.Document{
 		ID:                 uuid.NewString(),

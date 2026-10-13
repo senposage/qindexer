@@ -456,6 +456,63 @@ func TestManualCrawlRestoresMissingDocumentBehindStaleCheckpoint(t *testing.T) {
 	}
 }
 
+func TestCrawlPrunesExcludedMissingRecordsInsteadOfRevivingThem(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	rootDir := t.TempDir()
+	privateDir := filepath.Join(rootDir, "Private")
+	if err := os.Mkdir(privateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(privateDir, "secret.docx")
+	if err := os.WriteFile(path, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := catalog.Document{
+		ID: "excluded", RootID: "share", Path: path, NormalizedPath: catalog.NormalizePath(path),
+		Name: "secret.docx", Extension: "docx", Size: info.Size(), ModifiedAt: info.ModTime(),
+		LastSeenGeneration: 1, Signature: catalog.Signature(info.Size(), info.ModTime()), AccessStatus: "metadata_readable",
+	}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.MarkMissing(ctx, "share", 2, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "share", Path: rootDir, Enabled: true, ExcludeFolderPatterns: []string{"**/Private/**"}}}}
+	c := New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := c.CrawlRoot(ctx, "share")
+	if err != nil || run.Status != "ok" {
+		t.Fatalf("crawl = %#v, err=%v", run, err)
+	}
+	states, err := cat.RootStates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states["share"].MissingCount != 0 {
+		t.Fatalf("excluded record remained missing: %#v", states["share"])
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"share"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range resp.Results {
+		if result.Path == path {
+			t.Fatalf("excluded record was revived: %#v", result)
+		}
+	}
+}
+
 func TestHintStatFailureLeavesExistingDocumentStateUntouched(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))

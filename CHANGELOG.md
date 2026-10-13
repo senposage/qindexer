@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1 - 2026-10-12
+
+- Prevent excluded historical paths from being revived by the missing-path priority queue and immediately marked missing again at the end of the same crawl.
+- Clean up entries excluded by the current root rules during successful full-crawl reconciliation, including records that were already missing before the rule change.
+
 ## 1.2.0 - 2026-10-12
 
 - Fix stale checkpoint reuse that could cause manual and scheduled full crawls to skip completed parent directories, leaving large missing-record sets unreconciled.
