@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -1229,6 +1230,16 @@ func rootConfigFromUpdate(rootID string, req rootRulesUpdate) config.RootConfig 
 	}
 }
 
+func rootRulesAffectIndexedEntries(previous, current config.RootConfig) bool {
+	return !reflect.DeepEqual(previous.IncludeExtensions, current.IncludeExtensions) ||
+		!reflect.DeepEqual(previous.ExcludeExtensions, current.ExcludeExtensions) ||
+		!reflect.DeepEqual(previous.IncludeFilePatterns, current.IncludeFilePatterns) ||
+		!reflect.DeepEqual(previous.ExcludeFilePatterns, current.ExcludeFilePatterns) ||
+		!reflect.DeepEqual(previous.IncludeFolderPatterns, current.IncludeFolderPatterns) ||
+		!reflect.DeepEqual(previous.ExcludeFolderPatterns, current.ExcludeFolderPatterns) ||
+		!reflect.DeepEqual(previous.ExcludePatterns, current.ExcludePatterns)
+}
+
 func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 	rootID := r.PathValue("root_id")
 	s.log.Info("root rules update requested", "root", rootID)
@@ -1248,7 +1259,8 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_root_path", "root path is required")
 			return
 		}
-		previousPath := candidate.Roots[i].Path
+		previous := candidate.Roots[i]
+		previousPath := previous.Path
 		candidate.Roots[i].Path = strings.TrimSpace(req.Path)
 		candidate.Roots[i].Name = strings.TrimSpace(req.Name)
 		candidate.Roots[i].Enabled = req.Enabled
@@ -1270,14 +1282,33 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_root", err.Error())
 			return
 		}
+		rulesChanged := rootRulesAffectIndexedEntries(previous, candidate.Roots[i])
+		repairRequired := !samePathAlias(previousPath, candidate.Roots[i].Path)
+		pruneExisting := candidate.Roots[i].Enabled && !repairRequired
+		if (rulesChanged || previous.Enabled != candidate.Roots[i].Enabled || pruneExisting) && !s.stopRootCrawl(r.Context(), rootID) {
+			s.log.Warn("root rules update could not stop active crawl", "root", rootID)
+			writeError(w, http.StatusConflict, "root_still_stopping", "root crawl is still stopping; retry shortly")
+			return
+		}
 		if err := s.saveConfigLocked(candidate); err != nil {
 			s.log.Error("root rules config save failed", "root", rootID, "error", err)
 			writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 			return
 		}
-		repairRequired := !samePathAlias(previousPath, candidate.Roots[i].Path)
-		s.log.Info("root rules update completed", "root", rootID, "old_path", previousPath, "new_path", candidate.Roots[i].Path, "aliases", len(candidate.Roots[i].PathAliases), "repair_required", repairRequired)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "root": candidate.Roots[i], "repair_required": repairRequired})
+		var documentsRemoved int64
+		var cleanupError string
+		if pruneExisting {
+			var err error
+			documentsRemoved, err = s.cat.PruneDocuments(r.Context(), rootID, func(path, extension string, isFolder bool) bool {
+				return crawler.PathAllowed(candidate.Roots[i], path, extension, isFolder)
+			})
+			if err != nil {
+				cleanupError = err.Error()
+				s.log.Error("root rules cleanup failed", "root", rootID, "error", err)
+			}
+		}
+		s.log.Info("root rules update completed", "root", rootID, "old_path", previousPath, "new_path", candidate.Roots[i].Path, "aliases", len(candidate.Roots[i].PathAliases), "repair_required", repairRequired, "documents_removed", documentsRemoved, "cleanup_error", cleanupError)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "root": candidate.Roots[i], "repair_required": repairRequired, "documents_removed": documentsRemoved, "cleanup_error": cleanupError})
 		return
 	}
 	s.log.Warn("root rules update failed; root not found", "root", rootID)

@@ -88,6 +88,58 @@ func TestDescendantPathLikePreservesDriveRootSeparator(t *testing.T) {
 	}
 }
 
+func TestPruneDocumentsRemovesExcludedRecordsRegardlessOfStatus(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	add := func(id, path, status string) {
+		t.Helper()
+		doc := Document{
+			ID: id, RootID: "shared", Path: path, NormalizedPath: NormalizePath(path),
+			Name: filepath.Base(path), Extension: "docx", Size: 1, ModifiedAt: modified,
+			LastSeenGeneration: 1, Signature: Signature(1, modified),
+		}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET status = ? WHERE id = ?`, status, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("active-private", `X:\Cases\Private\draft.docx`, "active")
+	add("missing-private", `X:\Cases\Private\old.docx`, "missing")
+	add("active-public", `X:\Cases\Public\brief.docx`, "active")
+
+	removed, err := cat.PruneDocuments(ctx, "shared", func(path, _ string, _ bool) bool {
+		return !strings.Contains(path, `\Private\`)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed %d records, want 2", removed)
+	}
+	var count int
+	if err := cat.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents WHERE root_id = 'shared'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("remaining documents %d, want 1", count)
+	}
+	var ftsCount int
+	if err := cat.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM documents_fts`).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if ftsCount != 1 {
+		t.Fatalf("remaining FTS records %d, want 1", ftsCount)
+	}
+}
+
 func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

@@ -2428,6 +2428,25 @@ func filePatternAllowed(root config.RootConfig, path string) bool {
 	return !matchesAny(path, root.ExcludeFilePatterns)
 }
 
+// PathAllowed reports whether an already indexed path remains eligible under
+// a root's current rules. The management API uses it to retire records that a
+// rule change deliberately excludes, rather than treating them as missing.
+func PathAllowed(root config.RootConfig, path, extension string, isFolder bool) bool {
+	if matchesAny(path, root.ExcludePatterns) {
+		return false
+	}
+	if isFolder {
+		return !matchesAny(path, root.ExcludeFolderPatterns) && !isOperationalFolder(path)
+	}
+	if strings.HasPrefix(strings.TrimLeft(filepath.Base(path), `\\/`), "~$") {
+		return false
+	}
+	if !extensionAllowed(root, extension) {
+		return false
+	}
+	return filePatternAllowed(root, path)
+}
+
 func matchesAny(path string, patterns []string) bool {
 	normalized := comparablePath(path)
 	base := comparablePath(filepath.Base(path))

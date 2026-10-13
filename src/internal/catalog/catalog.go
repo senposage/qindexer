@@ -471,6 +471,78 @@ func (c *Catalog) ClearRoot(ctx context.Context, rootID string) (int64, error) {
 	return count, tx.Commit()
 }
 
+// PruneDocuments removes records a root's current rules no longer permit.
+// The callback runs in small batches so a large rules update does not hold the
+// serialized catalog writer for the entire root.
+func (c *Catalog) PruneDocuments(ctx context.Context, rootID string, keep func(path, extension string, isFolder bool) bool) (int64, error) {
+	if keep == nil {
+		return 0, errors.New("document prune rule is required")
+	}
+	const batchSize = 500
+	var afterRowID, removed int64
+	for {
+		c.writeMu.Lock()
+		tx, err := c.db.BeginTx(ctx, nil)
+		if err != nil {
+			c.writeMu.Unlock()
+			return removed, err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT rowid, path, extension, is_folder FROM documents
+			WHERE root_id = ? AND rowid > ? ORDER BY rowid LIMIT ?`, rootID, afterRowID, batchSize)
+		if err != nil {
+			_ = tx.Rollback()
+			c.writeMu.Unlock()
+			return removed, err
+		}
+		rowIDs := make([]int64, 0, batchSize)
+		count := 0
+		for rows.Next() {
+			var rowID int64
+			var path, extension string
+			var isFolder bool
+			if err := rows.Scan(&rowID, &path, &extension, &isFolder); err != nil {
+				_ = rows.Close()
+				_ = tx.Rollback()
+				c.writeMu.Unlock()
+				return removed, err
+			}
+			afterRowID = rowID
+			count++
+			if !keep(path, extension, isFolder) {
+				rowIDs = append(rowIDs, rowID)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			_ = tx.Rollback()
+			c.writeMu.Unlock()
+			return removed, err
+		}
+		if len(rowIDs) > 0 {
+			placeholders := strings.TrimRight(strings.Repeat("?,", len(rowIDs)), ",")
+			args := make([]any, len(rowIDs))
+			for i, rowID := range rowIDs {
+				args[i] = rowID
+			}
+			result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE rowid IN (`+placeholders+`)`, args...)
+			if err != nil {
+				_ = tx.Rollback()
+				c.writeMu.Unlock()
+				return removed, err
+			}
+			deleted, _ := result.RowsAffected()
+			removed += deleted
+		}
+		if err := tx.Commit(); err != nil {
+			c.writeMu.Unlock()
+			return removed, err
+		}
+		c.writeMu.Unlock()
+		if count < batchSize {
+			return removed, nil
+		}
+	}
+}
+
 func (c *Catalog) DeactivateRoot(ctx context.Context, rootID string) (int64, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()

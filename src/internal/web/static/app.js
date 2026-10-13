@@ -649,7 +649,8 @@ async function saveRules(event) {
       const repair = await repairRootIndex(rootId, { confirm: false, refreshAfter: false });
       await refresh({ quiet: true, message: `${rootId}: saved, repaired ${repair.paths_rewritten || 0}, merged ${repair.duplicate_paths_merged || 0}` });
     } else {
-      await refresh({ quiet: true, message: data.repair_required ? `${rootId}: saved; repair index when ready` : `${rootId}: ${data.status}` });
+      const cleanup = data.cleanup_error ? `; rule cleanup failed: ${data.cleanup_error}` : (data.documents_removed ? `; removed ${Number(data.documents_removed).toLocaleString()} excluded entries` : "");
+      await refresh({ quiet: true, message: data.repair_required ? `${rootId}: saved; repair index when ready${cleanup}` : `${rootId}: ${data.status}${cleanup}` });
     }
     closeRules();
   } catch (err) {

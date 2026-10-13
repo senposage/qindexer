@@ -136,6 +136,19 @@ func TestMatchesAnyNormalizesWindowsPathsForDoubleStarRules(t *testing.T) {
 	}
 }
 
+func TestPathAllowedRejectsRecordsUnderExcludedFolder(t *testing.T) {
+	root := config.RootConfig{ExcludeFolderPatterns: []string{"**/Private/**"}}
+	if PathAllowed(root, `X:\Cases\Private`, "", true) {
+		t.Fatal("excluded directory remained eligible")
+	}
+	if PathAllowed(root, `X:\Cases\Private\draft.docx`, "docx", false) {
+		t.Fatal("file beneath excluded directory remained eligible")
+	}
+	if !PathAllowed(root, `X:\Cases\Public\brief.docx`, "docx", false) {
+		t.Fatal("unrelated file was unexpectedly excluded")
+	}
+}
+
 func TestShouldSkipOfficeTemporaryLockFile(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"~$Draft.docx", `\~$Draft.docx`} {

@@ -419,6 +419,59 @@ func TestUpdateRootRulesSavesPathWithoutBlockingOnRepair(t *testing.T) {
 	}
 }
 
+func TestUpdateRootRulesPrunesNowExcludedIndexedRecords(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+		Roots:      []config.RootConfig{{ID: "shared", Path: `X:\`, Enabled: true}},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	modified := time.Now().UTC()
+	for _, item := range []struct{ id, path string }{
+		{"excluded-active", `X:\Cases\Private\draft.docx`},
+		{"excluded-missing", `X:\Cases\Private\old.docx`},
+		{"retained", `X:\Cases\Public\brief.docx`},
+	} {
+		doc := catalog.Document{ID: item.id, RootID: "shared", Path: item.path, NormalizedPath: catalog.NormalizePath(item.path), Name: filepath.Base(item.path), Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := cat.MarkMissing(ctx, "shared", 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	retained := catalog.Document{ID: "retained", RootID: "shared", Path: `X:\Cases\Public\brief.docx`, NormalizedPath: catalog.NormalizePath(`X:\Cases\Public\brief.docx`), Name: "brief.docx", Extension: "docx", Size: 1, ModifiedAt: modified, LastSeenGeneration: 2, Signature: catalog.Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, retained); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPut, "/admin/v1/roots/shared/rules", bytes.NewBufferString(`{"path":"X:\\","enabled":true,"exclude_folder_patterns":["**/Private/**"]}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("expected update success, got %d: %s", result.Code, result.Body.String())
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte(`"documents_removed":2`)) {
+		t.Fatalf("expected two removed entries, got %s", result.Body.String())
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"shared"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Path != `X:\Cases\Public\brief.docx` {
+		t.Fatalf("unexpected retained entries: %#v", resp.Results)
+	}
+}
+
 func TestRepairRootIndexRewritesAliasPaths(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))

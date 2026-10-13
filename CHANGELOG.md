@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.10 - 2026-10-12
+
+- Apply root rules immediately to the existing catalog when rules are saved. Entries excluded by folder, file, extension, or generic path rules are deleted rather than being marked missing during the next crawl.
+- Rule cleanup includes historical missing records, batches catalog writes to keep the service responsive, and reports the number of removed entries in the admin UI.
+
 ## 1.1.9 - 2026-10-12
 
 - Correct missing-document retention: each successful full crawl now advances already-missing records, and records are physically removed after `missing_after_successful_crawls` clean misses instead of being retained as hidden rows indefinitely.
