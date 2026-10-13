@@ -565,6 +565,8 @@ func (c *Crawler) CrawlRoot(ctx context.Context, rootID string) (catalog.CrawlRu
 	if !ok {
 		return catalog.CrawlRun{}, os.ErrNotExist
 	}
+	// An operator-requested crawl is an explicit full reconciliation. Never let
+	// an old resume checkpoint turn it into a partial no-op.
 	return c.crawl(ctx, root, true)
 }
 
@@ -1281,7 +1283,11 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 		}
 	}
 	if walkErr == nil {
-		walkErr = c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, true, !initial, profile.DirectoryWorkers)
+		// Directory checkpoints record that a directory's enumeration completed,
+		// not that every queued descendant completed. The pending queue is not
+		// persisted, so skipping a checkpointed parent after restart can strand
+		// whole branches. Rebuild traversal from the root every time.
+		walkErr = c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, false, true, !initial, profile.DirectoryWorkers)
 	}
 	close(jobs)
 	workers.Wait()
@@ -1328,6 +1334,9 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 		if err != nil {
 			run.Status = "failed"
 			run.ErrorMessage = err.Error()
+		} else if err := c.cat.ClearRootCheckpoints(ctx, root.ID); err != nil {
+			run.Status = "failed"
+			run.ErrorMessage = fmt.Sprintf("clear completed crawl checkpoints: %v", err)
 		} else {
 			run.FilesMissing = missing
 			run.Status = "ok"
@@ -1437,7 +1446,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	}
 	var walkErr error
 	if info.IsDir() {
-		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, true, settings.DirectoryWorkerCount)
+		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, false, true, settings.DirectoryWorkerCount)
 	} else {
 		walkErr = sendPath(ctx, jobs, path)
 	}
@@ -1464,7 +1473,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	return run, walkErr
 }
 
-func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume bool, adaptivePause bool, workerCount int) error {
+func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths []string, jobs chan<- string, errorsCount *int64, generation int64, resume, checkpoint, adaptivePause bool, workerCount int) error {
 	queue := newDirQueue(paths)
 	go func() {
 		<-ctx.Done()
@@ -1544,7 +1553,7 @@ func (c *Crawler) walkPaths(ctx context.Context, root config.RootConfig, paths [
 						continue
 					}
 				}
-				c.walkDirectory(ctx, root, dir, queue, jobs, errorsCount, generation, resume, adaptivePause)
+				c.walkDirectory(ctx, root, dir, queue, jobs, errorsCount, generation, checkpoint, adaptivePause)
 				queue.done()
 			}
 		}()

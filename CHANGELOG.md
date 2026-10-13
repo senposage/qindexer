@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.11 - 2026-10-12
+
+- Fix stale checkpoint reuse that could cause manual and scheduled full crawls to skip completed parent directories, leaving large missing-record sets unreconciled.
+- Full crawls now rebuild traversal from the configured root and clear checkpoints only after a clean reconciliation, while interrupted runs still retain checkpoints for diagnostics.
+
 ## 1.1.10 - 2026-10-12
 
 - Apply root rules immediately to the existing catalog when rules are saved. Entries excluded by folder, file, extension, or generic path rules are deleted rather than being marked missing during the next crawl.

@@ -395,6 +395,67 @@ func TestUnreachableRootLeavesExistingDocumentStateUntouched(t *testing.T) {
 	}
 }
 
+func TestManualCrawlRestoresMissingDocumentBehindStaleCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	rootDir := t.TempDir()
+	path := filepath.Join(rootDir, "case.docx")
+	if err := os.WriteFile(path, []byte("case"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := catalog.Document{
+		ID: "existing", RootID: "share", Path: path, NormalizedPath: catalog.NormalizePath(path),
+		Name: "case.docx", Extension: "docx", Size: info.Size(), ModifiedAt: info.ModTime(),
+		LastSeenGeneration: 1, Signature: catalog.Signature(info.Size(), info.ModTime()), AccessStatus: "metadata_readable",
+	}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.MarkMissing(ctx, "share", 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.MarkDirectoryCheckpoint(ctx, "share", rootDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "share", Path: rootDir, Enabled: true}}}
+	c := New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := c.CrawlRoot(ctx, "share")
+	if err != nil || run.Status != "ok" {
+		t.Fatalf("manual crawl = %#v, err=%v", run, err)
+	}
+	resp, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"share"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored bool
+	for _, result := range resp.Results {
+		if result.Path == path && result.Status == "active" {
+			restored = true
+			break
+		}
+	}
+	if !restored {
+		t.Fatalf("manual crawl did not restore the missing document: %#v", resp.Results)
+	}
+	checkpointed, err := cat.DirectoryCheckpointed(ctx, "share", rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointed {
+		t.Fatal("successful full crawl left a stale resume checkpoint")
+	}
+}
+
 func TestHintStatFailureLeavesExistingDocumentStateUntouched(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
