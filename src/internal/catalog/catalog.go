@@ -1800,6 +1800,40 @@ func (c *Catalog) RecordOCRFailure(ctx context.Context, id, signature, reason st
 	return c.recordBackgroundFailure(ctx, "ocr_status", "ocr_error", "ocr_attempts", "ocr_retry_at", id, signature, reason, retryable)
 }
 
+// ResetEnrichmentFailures gives an operator-requested crawl one fresh attempt
+// at files previously abandoned by the automatic retry budget. Scheduled and
+// watcher crawls intentionally do not call this method.
+func (c *Catalog) ResetEnrichmentFailures(ctx context.Context, rootID string) (content, ocr int64, err error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE documents
+		SET content_status = 'not_indexed', content_error = '', content_attempts = 0, content_retry_at = ''
+		WHERE root_id = ? AND content_status IN ('retry_pending', 'unindexable')`, rootID)
+	if err != nil {
+		return 0, 0, err
+	}
+	content, err = result.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE documents
+		SET ocr_status = 'pending', ocr_error = '', ocr_attempts = 0, ocr_retry_at = ''
+		WHERE root_id = ? AND ocr_status IN ('retry_pending', 'unindexable')`, rootID)
+	if err != nil {
+		return 0, 0, err
+	}
+	ocr, err = result.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	return content, ocr, tx.Commit()
+}
+
 func (c *Catalog) recordBackgroundFailure(ctx context.Context, statusColumn, errorColumn, attemptsColumn, retryAtColumn, id, signature, reason string, retryable bool) (string, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()

@@ -793,7 +793,7 @@ func (s *Server) crawlRoot(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if _, err := s.crawler.CrawlRoot(ctx, rootID); err != nil {
+		if _, err := s.crawler.CrawlRootManual(ctx, rootID); err != nil {
 			s.log.Warn("manual crawl failed", "root", rootID, "error", err)
 		}
 	}()

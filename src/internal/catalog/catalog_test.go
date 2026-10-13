@@ -849,6 +849,44 @@ func TestBackgroundFailuresAreBoundedAndSeparatedFromNewWork(t *testing.T) {
 	}
 }
 
+func TestResetEnrichmentFailuresIsScopedToRequestedRoot(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, rootID := range []string{"manual", "other"} {
+		doc := Document{ID: rootID, RootID: rootID, Path: `D:\` + rootID + `.txt`, NormalizedPath: NormalizePath(`D:\` + rootID + `.txt`), Name: rootID + ".txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.RecordContentFailure(ctx, doc.ID, doc.Signature, "access denied", false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.RecordOCRFailure(ctx, doc.ID, doc.Signature, "access denied", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content, ocr, err := cat.ResetEnrichmentFailures(ctx, "manual")
+	if err != nil || content != 1 || ocr != 1 {
+		t.Fatalf("reset = content %d, ocr %d, err %v", content, ocr, err)
+	}
+	contentJobs, err := cat.ClaimPendingContent(ctx, []string{"manual"}, 10, 1024)
+	if err != nil || len(contentJobs) != 1 {
+		t.Fatalf("manual content claim = %#v, %v", contentJobs, err)
+	}
+	ocrJobs, err := cat.ClaimPendingOCR(ctx, []string{"manual"}, 10, 1024)
+	if err != nil || len(ocrJobs) != 1 {
+		t.Fatalf("manual OCR claim = %#v, %v", ocrJobs, err)
+	}
+	otherContent, err := cat.ClaimPendingContent(ctx, []string{"other"}, 10, 1024)
+	if err != nil || len(otherContent) != 0 {
+		t.Fatalf("automatic root requeued terminal work: %#v, %v", otherContent, err)
+	}
+}
+
 func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

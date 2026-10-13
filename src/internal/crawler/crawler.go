@@ -565,8 +565,23 @@ func (c *Crawler) CrawlRoot(ctx context.Context, rootID string) (catalog.CrawlRu
 	if !ok {
 		return catalog.CrawlRun{}, os.ErrNotExist
 	}
-	// An operator-requested crawl is an explicit full reconciliation. Never let
-	// an old resume checkpoint turn it into a partial no-op.
+	return c.crawl(ctx, root, true)
+}
+
+// CrawlRootManual retries enrichment work the automatic retry budget has
+// abandoned, then performs an explicit full reconciliation of this root.
+func (c *Crawler) CrawlRootManual(ctx context.Context, rootID string) (catalog.CrawlRun, error) {
+	root, ok := c.rootByID(rootID)
+	if !ok {
+		return catalog.CrawlRun{}, os.ErrNotExist
+	}
+	content, ocr, err := c.cat.ResetEnrichmentFailures(ctx, rootID)
+	if err != nil {
+		return catalog.CrawlRun{}, err
+	}
+	if content > 0 || ocr > 0 {
+		c.log.Info("manual crawl reset enrichment retry state", "root", rootID, "content", content, "ocr", ocr)
+	}
 	return c.crawl(ctx, root, true)
 }
 

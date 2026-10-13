@@ -243,7 +243,7 @@ func (a App) CrawlOnce(ctx context.Context, rootID string) error {
 		cr.CrawlAll(ctx)
 		return nil
 	}
-	_, err = cr.CrawlRoot(ctx, rootID)
+	_, err = cr.CrawlRootManual(ctx, rootID)
 	return err
 }
 

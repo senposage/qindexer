@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.4 - 2026-10-13
+
+- Keep automatic content extraction and OCR failures bounded at three attempts per unchanged file.
+- Make an operator-requested root crawl reset only that root's abandoned enrichment retries for a deliberate fresh attempt.
+
 ## 1.2.3 - 2026-10-13
 
 - Run passive SQLite WAL checkpoints during active indexing instead of silently skipping every maintenance cycle while a writer holds the catalog mutex.
