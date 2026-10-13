@@ -53,6 +53,7 @@ type dirtyPath struct {
 }
 
 const hotFolderLookupTimeout = 2 * time.Second
+const hotWatchAddTimeout = 2 * time.Second
 const watchRootLookupTimeout = 5 * time.Second
 
 func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
@@ -264,11 +265,23 @@ func (w *Watcher) addHotWatches(ctx context.Context, set *watchSet, cfg *config.
 		w.log.Debug("hot folder lookup deferred", "error", err)
 		return
 	}
+	addCtx, addCancel := context.WithTimeout(ctx, hotWatchAddTimeout)
+	defer addCancel()
+	roots := make(map[string]config.RootConfig, len(cfg.Roots))
+	for _, root := range cfg.Roots {
+		if root.Enabled {
+			roots[root.ID] = root
+		}
+	}
 	candidates := map[string][]string{}
 	for _, item := range hot {
+		root, ok := roots[item.RootID]
+		if !ok || !crawler.PathAllowed(root, item.Path, "", true) {
+			continue
+		}
 		candidates[item.RootID] = append(candidates[item.RootID], item.Path)
 	}
-	w.addRoundRobin(ctx, set, candidates, enabledRootIDs(cfg), false)
+	w.addRoundRobin(addCtx, set, candidates, enabledRootIDs(cfg), false)
 }
 
 func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Config) {
@@ -292,8 +305,14 @@ func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Conf
 
 func (w *Watcher) addRoundRobin(ctx context.Context, set *watchSet, candidates map[string][]string, rootIDs []string, pinned bool) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		added := false
 		for _, rootID := range rootIDs {
+			if ctx.Err() != nil {
+				return
+			}
 			paths := candidates[rootID]
 			if len(paths) == 0 {
 				continue
@@ -316,6 +335,9 @@ func (w *Watcher) addRoundRobin(ctx context.Context, set *watchSet, candidates m
 }
 
 func (s *watchSet) add(ctx context.Context, path, rootID string, pinned bool) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	path = filepath.Clean(path)
 	if s.paths[path] != "" {
 		if pinned {
