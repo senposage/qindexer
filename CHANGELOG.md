@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.7 - 2026-10-13
+
+- Bound hot-folder watcher registration so slow, unavailable, or stale
+  candidate paths cannot keep filesystem notifications from entering their
+  normal event and rebalance loop.
+- Skip built-in excluded paths when selecting hot watch candidates.
+
 ## 1.2.6 - 2026-10-13
 
 - Reconcile built-in operational exclusions consistently for folders and their
