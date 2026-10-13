@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.3 - 2026-10-13
+
+- Run passive SQLite WAL checkpoints during active indexing instead of silently skipping every maintenance cycle while a writer holds the catalog mutex.
+- Continue to reserve WAL truncation for a quiet write window, keeping crawler and search work responsive.
+
 ## 1.2.2 - 2026-10-12
 
 - Start filesystem notifications before the optional hot-folder activity query, so a busy SQLite index cannot leave the watcher falsely reported as unavailable.
