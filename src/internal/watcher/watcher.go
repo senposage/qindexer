@@ -49,6 +49,8 @@ type dirtyPath struct {
 	removed bool
 }
 
+const hotFolderLookupTimeout = 2 * time.Second
+
 func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
 	return &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1)}
 }
@@ -130,9 +132,13 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 	defer fsw.Close()
 
 	set := &watchSet{fsw: fsw, paths: map[string]string{}, pinned: map[string]bool{}, limit: cfg.Watcher.MaxWatchedDirectories}
-	w.seedWatches(ctx, set, cfg)
+	w.seedWatches(set, cfg)
 	w.updateStats(set, cfg)
 	w.log.Info("filesystem watcher started", "directories", len(set.paths), "limit", set.limit, "strategy", "hot_folders")
+	// The native watcher is useful immediately. Do not make its availability
+	// depend on an activity query waiting behind a busy index writer.
+	w.addHotWatches(ctx, set, cfg)
+	w.updateStats(set, cfg)
 
 	dirty := map[string]map[string]dirtyPath{}
 	var mu sync.Mutex
@@ -203,7 +209,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 	}
 }
 
-func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Config) {
+func (w *Watcher) seedWatches(set *watchSet, cfg *config.Config) {
 	topLevel := map[string][]string{}
 	rootIDs := make([]string, 0)
 	for _, root := range cfg.Roots {
@@ -235,19 +241,24 @@ func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Co
 		}
 	}
 	w.addRoundRobin(set, topLevel, rootIDs, true)
+}
+
+func (w *Watcher) addHotWatches(ctx context.Context, set *watchSet, cfg *config.Config) {
 	if len(set.paths) >= set.limit {
 		return
 	}
-	hot, err := w.crawler.HotFolders(ctx, rootIDs, cfg.Watcher.ActivityHalfLife(), set.limit-len(set.paths))
+	lookupCtx, cancel := context.WithTimeout(ctx, hotFolderLookupTimeout)
+	defer cancel()
+	hot, err := w.crawler.HotFolders(lookupCtx, enabledRootIDs(cfg), cfg.Watcher.ActivityHalfLife(), set.limit-len(set.paths))
 	if err != nil {
-		w.log.Debug("hot folder lookup failed", "error", err)
+		w.log.Debug("hot folder lookup deferred", "error", err)
 		return
 	}
 	candidates := map[string][]string{}
 	for _, item := range hot {
 		candidates[item.RootID] = append(candidates[item.RootID], item.Path)
 	}
-	w.addRoundRobin(set, candidates, rootIDs, false)
+	w.addRoundRobin(set, candidates, enabledRootIDs(cfg), false)
 }
 
 func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Config) {
@@ -258,19 +269,7 @@ func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Conf
 		_ = set.fsw.Remove(path)
 		delete(set.paths, path)
 	}
-	rootIDs := enabledRootIDs(cfg)
-	if len(set.paths) < set.limit {
-		hot, err := w.crawler.HotFolders(ctx, rootIDs, cfg.Watcher.ActivityHalfLife(), set.limit-len(set.paths))
-		if err != nil {
-			w.log.Debug("hot folder lookup failed", "error", err)
-		} else {
-			candidates := map[string][]string{}
-			for _, item := range hot {
-				candidates[item.RootID] = append(candidates[item.RootID], item.Path)
-			}
-			w.addRoundRobin(set, candidates, rootIDs, false)
-		}
-	}
+	w.addHotWatches(ctx, set, cfg)
 	w.statsMu.Lock()
 	w.stats.LastRebalanceUnix = time.Now().Unix()
 	w.statsMu.Unlock()

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.2 - 2026-10-12
+
+- Start filesystem notifications before the optional hot-folder activity query, so a busy SQLite index cannot leave the watcher falsely reported as unavailable.
+- Bound hot-folder lookups during startup and rebalance; a busy catalog defers that enrichment rather than blocking active root-level watches.
+
 ## 1.2.1 - 2026-10-12
 
 - Prevent excluded historical paths from being revived by the missing-path priority queue and immediately marked missing again at the end of the same crawl.
