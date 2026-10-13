@@ -67,6 +67,71 @@ func TestRootWorkProfileKeepsFastRootsAtConfiguredMaximum(t *testing.T) {
 	}
 }
 
+func TestCancelRootEnrichmentDoesNotInterruptOtherRoots(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	c := New(&config.Config{}, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	aCtx, finishA, ok := c.beginBackgroundWork(ctx, "root-a", c.backgroundJobEpoch("root-a"))
+	if !ok {
+		t.Fatal("root-a work did not start")
+	}
+	bCtx, finishB, ok := c.beginBackgroundWork(ctx, "root-b", c.backgroundJobEpoch("root-b"))
+	if !ok {
+		t.Fatal("root-b work did not start")
+	}
+	c.CancelRootEnrichment("root-a")
+	select {
+	case <-aCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("root-a enrichment was not cancelled")
+	}
+	select {
+	case <-bCtx.Done():
+		t.Fatal("root-b enrichment was incorrectly cancelled")
+	default:
+	}
+	finishA()
+	if !c.WaitRootEnrichment(context.Background(), "root-a") {
+		t.Fatal("root-a enrichment did not drain")
+	}
+	if _, _, valid := c.beginBackgroundWork(ctx, "root-a", 0); valid {
+		t.Fatal("stale root-a job remained valid after cancellation")
+	}
+	finishB()
+}
+
+func TestRemovalHintDoesNotMarkDocumentsMissing(t *testing.T) {
+	ctx := context.Background()
+	rootPath := t.TempDir()
+	cat, err := catalog.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	doc := catalog.Document{ID: "existing", RootID: "root", Path: filepath.Join(rootPath, "existing.txt"), NormalizedPath: catalog.NormalizePath(filepath.Join(rootPath, "existing.txt")), Name: "existing.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	cr := New(&config.Config{Roots: []config.RootConfig{{ID: "root", Path: rootPath, Enabled: true}}}, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := cr.CrawlHint(ctx, "root", filepath.Join(rootPath, "existing.txt"), true)
+	if err != nil || run.Status != "hint_ok" {
+		t.Fatalf("removal hint = %#v, %v", run, err)
+	}
+	results, err := cat.Search(ctx, catalog.SearchRequest{Filters: catalog.SearchFilters{Roots: []string{"root"}}, Limit: 10}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results.Results) != 1 || results.Results[0].Status != "active" {
+		t.Fatalf("removal hint changed indexed state: %#v", results.Results)
+	}
+}
+
 func TestNeedsStartupCrawlSkipsRecentlyCompletedRoot(t *testing.T) {
 	completed := time.Now().UTC()
 	root := config.RootConfig{ID: "complete", Enabled: true}

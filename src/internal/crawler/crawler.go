@@ -74,10 +74,8 @@ type Crawler struct {
 	retry               map[string]bool
 	logState            map[string]suppressedLog
 	backgroundMu        sync.Mutex
-	backgroundCtx       context.Context
-	backgroundEnd       context.CancelFunc
-	backgroundN         int64
-	backgroundZero      chan struct{}
+	background          map[string]*backgroundWork
+	backgroundEpoch     map[string]uint64
 	contentActivity     backgroundActivity
 	ocrActivity         backgroundActivity
 	hashActivity        backgroundActivity
@@ -86,6 +84,17 @@ type Crawler struct {
 type backgroundJob struct {
 	id, rootID, path, signature string
 	size                        int64
+	epoch                       uint64
+}
+
+// backgroundWork is per-root so an operator action on one root cannot
+// interrupt extraction, OCR, or hashing for every other root.
+type backgroundWork struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	n      int64
+	zero   chan struct{}
+	epoch  uint64
 }
 
 // BackgroundActivity exposes the current and most recently completed
@@ -218,9 +227,7 @@ type adaptivePressure struct {
 
 func New(cfg *config.Config, cat *catalog.Catalog, log *slog.Logger) *Crawler {
 	snapshot := config.Clone(cfg)
-	zero := make(chan struct{})
-	close(zero)
-	return &Crawler{cfg: snapshot, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, progress: map[string]*crawlProgress{}, retry: map[string]bool{}, logState: map[string]suppressedLog{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, snapshot.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, snapshot.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, snapshot.Crawler.Hashing.QueueSize), backgroundZero: zero}
+	return &Crawler{cfg: snapshot, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, progress: map[string]*crawlProgress{}, retry: map[string]bool{}, logState: map[string]suppressedLog{}, background: map[string]*backgroundWork{}, backgroundEpoch: map[string]uint64{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, snapshot.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, snapshot.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, snapshot.Crawler.Hashing.QueueSize)}
 }
 
 func (c *Crawler) snapshot() *config.Config {
@@ -575,6 +582,14 @@ func (c *Crawler) CrawlRootManual(ctx context.Context, rootID string) (catalog.C
 	if !ok {
 		return catalog.CrawlRun{}, os.ErrNotExist
 	}
+	if c.InMaintenance() {
+		return catalog.CrawlRun{RootID: root.ID, Status: "maintenance_paused", ErrorMessage: "crawler maintenance in progress"}, nil
+	}
+	workCtx, finish, started := c.beginRootWork(ctx, root.ID)
+	if !started {
+		return catalog.CrawlRun{RootID: root.ID, Status: "already_running"}, nil
+	}
+	defer finish()
 	content, ocr, err := c.cat.ResetEnrichmentFailures(ctx, rootID)
 	if err != nil {
 		return catalog.CrawlRun{}, err
@@ -582,7 +597,7 @@ func (c *Crawler) CrawlRootManual(ctx context.Context, rootID string) (catalog.C
 	if content > 0 || ocr > 0 {
 		c.log.Info("manual crawl reset enrichment retry state", "root", rootID, "content", content, "ocr", ocr)
 	}
-	return c.crawl(ctx, root, true)
+	return c.crawlWithRootWork(workCtx, root, true)
 }
 
 func (c *Crawler) IsRootRunning(rootID string) bool {
@@ -604,13 +619,31 @@ func (c *Crawler) CancelRoot(rootID string) bool {
 	}
 	c.log.Info("crawler root stop requested", "root", rootID)
 	cancel()
-	c.cancelBackgroundWork()
+	c.CancelRootEnrichment(rootID)
 	return true
 }
 
-// CancelEnrichment interrupts in-flight content extraction, OCR, and hashing.
-// It is intentionally global because the worker pool is shared between roots.
+// CancelEnrichment interrupts in-flight content extraction, OCR, and hashing
+// across every root. Root management operations should use CancelRootEnrichment
+// instead, preserving other roots' background work.
 func (c *Crawler) CancelEnrichment() { c.cancelBackgroundWork() }
+
+func (c *Crawler) CancelRootEnrichment(rootID string) {
+	c.backgroundMu.Lock()
+	c.backgroundEpoch[rootID]++
+	work := c.background[rootID]
+	if work != nil {
+		work.cancel()
+	}
+	c.backgroundMu.Unlock()
+	resetCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if c.cat != nil {
+		if err := c.cat.ResetQueuedBackgroundForRoot(resetCtx, rootID); err != nil {
+			c.log.Warn("could not release cancelled root enrichment jobs", "root", rootID, "error", err)
+		}
+	}
+}
 
 func (c *Crawler) CancelAll() []string {
 	c.mu.Lock()
@@ -662,46 +695,81 @@ func (c *Crawler) WaitAll(ctx context.Context) bool {
 
 func (c *Crawler) WaitEnrichment(ctx context.Context) bool {
 	c.backgroundMu.Lock()
-	backgroundZero := c.backgroundZero
+	zeros := make([]chan struct{}, 0, len(c.background))
+	for _, work := range c.background {
+		zeros = append(zeros, work.zero)
+	}
 	c.backgroundMu.Unlock()
+	for _, zero := range zeros {
+		select {
+		case <-zero:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Crawler) WaitRootEnrichment(ctx context.Context, rootID string) bool {
+	c.backgroundMu.Lock()
+	work := c.background[rootID]
+	c.backgroundMu.Unlock()
+	if work == nil {
+		return true
+	}
 	select {
-	case <-backgroundZero:
+	case <-work.zero:
 		return true
 	case <-ctx.Done():
 		return false
 	}
 }
 
-func (c *Crawler) beginBackgroundWork(parent context.Context) (context.Context, func()) {
+func (c *Crawler) backgroundJobEpoch(rootID string) uint64 {
 	c.backgroundMu.Lock()
-	if c.backgroundCtx == nil {
-		c.backgroundCtx, c.backgroundEnd = context.WithCancel(parent)
+	defer c.backgroundMu.Unlock()
+	if _, exists := c.backgroundEpoch[rootID]; !exists {
+		c.backgroundEpoch[rootID] = 0
 	}
-	if c.backgroundN == 0 {
-		c.backgroundZero = make(chan struct{})
+	return c.backgroundEpoch[rootID]
+}
+
+func (c *Crawler) beginBackgroundWork(parent context.Context, rootID string, epoch uint64) (context.Context, func(), bool) {
+	c.backgroundMu.Lock()
+	if c.backgroundEpoch[rootID] != epoch {
+		c.backgroundMu.Unlock()
+		return nil, nil, false
 	}
-	c.backgroundN++
-	ctx := c.backgroundCtx
+	work := c.background[rootID]
+	if work == nil || work.epoch != epoch {
+		workCtx, cancel := context.WithCancel(parent)
+		work = &backgroundWork{ctx: workCtx, cancel: cancel, zero: make(chan struct{}), epoch: epoch}
+		c.background[rootID] = work
+	}
+	work.n++
 	c.backgroundMu.Unlock()
-	return ctx, func() {
+	return work.ctx, func() {
 		c.backgroundMu.Lock()
-		c.backgroundN--
-		if c.backgroundN == 0 {
-			close(c.backgroundZero)
+		work.n--
+		if work.n == 0 {
+			close(work.zero)
+			if c.background[rootID] == work {
+				delete(c.background, rootID)
+			}
 		}
 		c.backgroundMu.Unlock()
-	}
+	}, true
 }
 
 func (c *Crawler) cancelBackgroundWork() {
 	c.backgroundMu.Lock()
-	if c.backgroundEnd != nil {
-		c.backgroundEnd()
+	for _, work := range c.background {
+		work.cancel()
 	}
-	c.backgroundCtx = nil
-	c.backgroundEnd = nil
+	for rootID := range c.backgroundEpoch {
+		c.backgroundEpoch[rootID]++
+	}
 	c.backgroundMu.Unlock()
-	c.discardQueuedEnrichment()
 	resetCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if c.cat != nil {
@@ -709,23 +777,6 @@ func (c *Crawler) cancelBackgroundWork() {
 			c.log.Warn("could not release cancelled enrichment jobs", "error", err)
 		}
 	}
-}
-
-// A cancelled crawl can have queued work using paths from before a root-path
-// repair. Drop those jobs; the refill loop reads the repaired catalog paths.
-func (c *Crawler) discardQueuedEnrichment() {
-	drain := func(jobs chan backgroundJob) {
-		for {
-			select {
-			case <-jobs:
-			default:
-				return
-			}
-		}
-	}
-	drain(c.contentJobs)
-	drain(c.ocrJobs)
-	drain(c.hashJobs)
 }
 
 func (c *Crawler) WaitRoot(ctx context.Context, rootID string) bool {
@@ -1029,7 +1080,9 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 		return
 	}
 	content := c.snapshot().Crawler.ContentExtraction
-	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled) }); len(rootIDs) > 0 {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
+		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled)
+	}); len(rootIDs) > 0 {
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content")
 	}
 	ocr := c.snapshot().Crawler.OCR
@@ -1039,7 +1092,9 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR")
 	}
 	hashing := c.snapshot().Crawler.Hashing
-	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool { return !c.IsRootRunning(root.ID) && root.HashingEnabled(hashing.Enabled) }); len(rootIDs) > 0 {
+	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
+		return !c.IsRootRunning(root.ID) && root.HashingEnabled(hashing.Enabled)
+	}); len(rootIDs) > 0 {
 		c.fillBackground(ctx, rootIDs, c.hashJobs, hashing.MaxFileSizeMB<<20, c.cat.ClaimPendingHashes, "hash")
 	}
 }
@@ -1120,7 +1175,7 @@ func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, j
 			item := batches[i][0]
 			batches[i] = batches[i][1:]
 			select {
-			case jobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size}:
+			case jobs <- backgroundJob{id: item.ID, rootID: item.RootID, path: item.Path, signature: item.Signature, size: item.Size, epoch: c.backgroundJobEpoch(item.RootID)}:
 			case <-ctx.Done():
 				return
 			}
@@ -1157,6 +1212,10 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 		return catalog.CrawlRun{RootID: root.ID, Status: "already_running"}, nil
 	}
 	defer finish()
+	return c.crawlWithRootWork(ctx, root, initial)
+}
+
+func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig, initial bool) (catalog.CrawlRun, error) {
 	defer c.beginProgress(root.ID, root.Path)()
 	atomic.AddInt64(&c.activeCrawls, 1)
 	atomic.AddInt64(&c.fullCrawls, 1)
@@ -1415,16 +1474,12 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 		return run, err
 	}
 	if removed {
-		missing, err := c.cat.MarkPathMissing(ctx, root.ID, path)
-		run.FilesMissing = missing
+		// A filesystem notification is only a hint. Network shares and editors
+		// routinely emit rename/remove sequences for paths that reappear moments
+		// later, so let a successful full reconciliation establish missing state.
 		run.Status = "hint_ok"
-		if err != nil {
-			run.Status = "hint_failed"
-			run.ErrorMessage = err.Error()
-			run.Errors = 1
-		}
 		_ = c.finishCrawl(ctx, run)
-		return run, err
+		return run, nil
 	}
 
 	info, err := os.Stat(path)
@@ -2214,7 +2269,10 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
 				return
 			}
-			jobCtx, finish := c.beginBackgroundWork(ctx)
+			jobCtx, finish, valid := c.beginBackgroundWork(ctx, job.rootID, job.epoch)
+			if !valid {
+				continue
+			}
 			settings := c.snapshot().Crawler.ContentExtraction
 			root, exists := c.rootByID(job.rootID)
 			if !exists || !root.ContentExtractionEnabled(settings.Enabled) {
@@ -2275,7 +2333,10 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
 				return
 			}
-			jobCtx, finish := c.beginBackgroundWork(ctx)
+			jobCtx, finish, valid := c.beginBackgroundWork(ctx, job.rootID, job.epoch)
+			if !valid {
+				continue
+			}
 			crawlerSettings := c.snapshot().Crawler
 			settings := crawlerSettings.OCR
 			root, exists := c.rootByID(job.rootID)
@@ -2333,7 +2394,10 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
 				return
 			}
-			jobCtx, finish := c.beginBackgroundWork(ctx)
+			jobCtx, finish, valid := c.beginBackgroundWork(ctx, job.rootID, job.epoch)
+			if !valid {
+				continue
+			}
 			root, exists := c.rootByID(job.rootID)
 			if !exists || !root.HashingEnabled(c.snapshot().Crawler.Hashing.Enabled) {
 				if jobCtx.Err() == nil {

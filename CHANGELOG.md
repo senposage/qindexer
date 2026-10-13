@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.5 - 2026-10-13
+
+- Keep root maintenance isolated: deleting, clearing, or changing one root no
+  longer interrupts content extraction, OCR, or hashing for other roots.
+- Cache storage metrics so live admin refreshes do not repeatedly scan all
+  indexed text.
+- Keep root-rule saves responsive while existing entries are reconciled, and
+  reject stale concurrent rule edits rather than overwriting newer
+  configuration.
+- Make filesystem watcher root probes bounded and self-healing after share
+  reconnects; report unavailable watch paths in watcher status.
+- Treat filesystem remove and rename notifications as reconciliation hints
+  rather than immediately marking entire subtrees missing.
+- Make manual crawl retry resets atomic with root crawl admission.
+
 ## 1.2.4 - 2026-10-13
 
 - Keep automatic content extraction and OCR failures bounded at three attempts per unchanged file.

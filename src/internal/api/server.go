@@ -41,6 +41,7 @@ type Server struct {
 	log            *slog.Logger
 	accessLog      *slog.Logger
 	mu             sync.RWMutex
+	rulesMu        sync.Mutex
 	searchToken    string
 	adminToken     string
 	instanceID     string
@@ -1067,11 +1068,11 @@ func (s *Server) stopRootCrawl(ctx context.Context, rootID string) bool {
 	if s.crawler.IsRootRunning(rootID) {
 		s.crawler.CancelRoot(rootID)
 	} else {
-		s.crawler.CancelEnrichment()
+		s.crawler.CancelRootEnrichment(rootID)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	return s.crawler.WaitRoot(waitCtx, rootID) && s.crawler.WaitEnrichment(waitCtx)
+	return s.crawler.WaitRoot(waitCtx, rootID) && s.crawler.WaitRootEnrichment(waitCtx, rootID)
 }
 
 func (s *Server) removePreviousPathAliases(rootID string) (int, error) {
@@ -1248,9 +1249,13 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Rule cleanup can scan a large root. Serialize rule edits without holding
+	// the server-wide config lock, so status, login, and search remain responsive.
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
+	s.mu.RLock()
 	candidate := config.Clone(s.cfg)
+	s.mu.RUnlock()
 	for i := range candidate.Roots {
 		if candidate.Roots[i].ID != rootID {
 			continue
@@ -1290,25 +1295,48 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "root_still_stopping", "root crawl is still stopping; retry shortly")
 			return
 		}
-		if err := s.saveConfigLocked(candidate); err != nil {
+		updated := candidate.Roots[i]
+		s.mu.Lock()
+		latest := config.Clone(s.cfg)
+		latestIndex := -1
+		for j := range latest.Roots {
+			if latest.Roots[j].ID == rootID {
+				latestIndex = j
+				break
+			}
+		}
+		if latestIndex < 0 || !reflect.DeepEqual(latest.Roots[latestIndex], previous) {
+			s.mu.Unlock()
+			writeError(w, http.StatusConflict, "root_changed", "root changed while this update was waiting; reload and retry")
+			return
+		}
+		latest.Roots[latestIndex] = updated
+		if err := latest.Validate(); err != nil {
+			s.mu.Unlock()
+			writeError(w, http.StatusBadRequest, "invalid_root", err.Error())
+			return
+		}
+		if err := s.saveConfigLocked(latest); err != nil {
+			s.mu.Unlock()
 			s.log.Error("root rules config save failed", "root", rootID, "error", err)
 			writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 			return
 		}
+		s.mu.Unlock()
 		var documentsRemoved int64
 		var cleanupError string
 		if pruneExisting {
 			var err error
 			documentsRemoved, err = s.cat.PruneDocuments(r.Context(), rootID, func(path, extension string, isFolder bool) bool {
-				return crawler.PathAllowed(candidate.Roots[i], path, extension, isFolder)
+				return crawler.PathAllowed(updated, path, extension, isFolder)
 			})
 			if err != nil {
 				cleanupError = err.Error()
 				s.log.Error("root rules cleanup failed", "root", rootID, "error", err)
 			}
 		}
-		s.log.Info("root rules update completed", "root", rootID, "old_path", previousPath, "new_path", candidate.Roots[i].Path, "aliases", len(candidate.Roots[i].PathAliases), "repair_required", repairRequired, "documents_removed", documentsRemoved, "cleanup_error", cleanupError)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "root": candidate.Roots[i], "repair_required": repairRequired, "documents_removed": documentsRemoved, "cleanup_error": cleanupError})
+		s.log.Info("root rules update completed", "root", rootID, "old_path", previousPath, "new_path", updated.Path, "aliases", len(updated.PathAliases), "repair_required", repairRequired, "documents_removed", documentsRemoved, "cleanup_error", cleanupError)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "root": updated, "repair_required": repairRequired, "documents_removed": documentsRemoved, "cleanup_error": cleanupError})
 		return
 	}
 	s.log.Warn("root rules update failed; root not found", "root", rootID)

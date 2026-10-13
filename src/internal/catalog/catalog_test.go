@@ -140,6 +140,37 @@ func TestPruneDocumentsRemovesExcludedRecordsRegardlessOfStatus(t *testing.T) {
 	}
 }
 
+func TestResetQueuedBackgroundForRootIsScoped(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, rootID := range []string{"root-a", "root-b"} {
+		doc := Document{ID: rootID, RootID: rootID, Path: rootID + ".pdf", NormalizedPath: NormalizePath(rootID + ".pdf"), Name: rootID + ".pdf", Extension: "pdf", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET content_status = 'queued', ocr_status = 'queued', hash_status = 'queued' WHERE id = ?`, rootID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cat.ResetQueuedBackgroundForRoot(ctx, "root-a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct{ rootID, want string }{{"root-a", "not_indexed"}, {"root-b", "queued"}} {
+		var content string
+		if err := cat.db.QueryRowContext(ctx, `SELECT content_status FROM documents WHERE root_id = ?`, check.rootID).Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		if content != check.want {
+			t.Fatalf("%s content status = %q, want %q", check.rootID, content, check.want)
+		}
+	}
+}
+
 func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -38,10 +39,12 @@ type Stats struct {
 }
 
 type watchSet struct {
-	fsw    *fsnotify.Watcher
-	paths  map[string]string
-	pinned map[string]bool
-	limit  int
+	fsw       *fsnotify.Watcher
+	paths     map[string]string
+	pinned    map[string]bool
+	limit     int
+	failures  int
+	lastError string
 }
 
 type dirtyPath struct {
@@ -50,6 +53,7 @@ type dirtyPath struct {
 }
 
 const hotFolderLookupTimeout = 2 * time.Second
+const watchRootLookupTimeout = 5 * time.Second
 
 func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
 	return &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1)}
@@ -132,7 +136,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 	defer fsw.Close()
 
 	set := &watchSet{fsw: fsw, paths: map[string]string{}, pinned: map[string]bool{}, limit: cfg.Watcher.MaxWatchedDirectories}
-	w.seedWatches(set, cfg)
+	w.seedWatches(ctx, set, cfg)
 	w.updateStats(set, cfg)
 	w.log.Info("filesystem watcher started", "directories", len(set.paths), "limit", set.limit, "strategy", "hot_folders")
 	// The native watcher is useful immediately. Do not make its availability
@@ -185,7 +189,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 			}
 			removed := event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)
 			if event.Has(fsnotify.Create) {
-				_ = w.tryWatchCreatedDirectory(set, event.Name, rootID)
+				_ = w.tryWatchCreatedDirectory(ctx, set, event.Name, rootID)
 			}
 			w.recordEvent()
 			mu.Lock()
@@ -209,7 +213,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 	}
 }
 
-func (w *Watcher) seedWatches(set *watchSet, cfg *config.Config) {
+func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Config) {
 	topLevel := map[string][]string{}
 	rootIDs := make([]string, 0)
 	for _, root := range cfg.Roots {
@@ -217,17 +221,23 @@ func (w *Watcher) seedWatches(set *watchSet, cfg *config.Config) {
 			continue
 		}
 		rootIDs = append(rootIDs, root.ID)
-		paths, err := crawler.ExpandRootPaths(root.Path)
+		paths, err := expandRootPathsWithTimeout(ctx, root.Path)
 		if err != nil {
+			set.noteFailure(err)
 			w.log.Warn("watch root unavailable", "root", root.ID, "path", root.Path, "error", err)
 			continue
 		}
 		for _, path := range paths {
-			if !set.add(path, root.ID, true) {
+			if !set.add(ctx, path, root.ID, true) {
+				if set.lastError != "" {
+					w.log.Warn("watch root unavailable", "root", root.ID, "path", path, "error", set.lastError)
+				}
 				continue
 			}
-			entries, err := os.ReadDir(path)
+			entries, err := readDirWithTimeout(ctx, path)
 			if err != nil {
+				set.noteFailure(err)
+				w.log.Warn("watch root enumeration deferred", "root", root.ID, "path", path, "error", err)
 				continue
 			}
 			for _, entry := range entries {
@@ -240,7 +250,7 @@ func (w *Watcher) seedWatches(set *watchSet, cfg *config.Config) {
 			}
 		}
 	}
-	w.addRoundRobin(set, topLevel, rootIDs, true)
+	w.addRoundRobin(ctx, set, topLevel, rootIDs, true)
 }
 
 func (w *Watcher) addHotWatches(ctx context.Context, set *watchSet, cfg *config.Config) {
@@ -258,7 +268,7 @@ func (w *Watcher) addHotWatches(ctx context.Context, set *watchSet, cfg *config.
 	for _, item := range hot {
 		candidates[item.RootID] = append(candidates[item.RootID], item.Path)
 	}
-	w.addRoundRobin(set, candidates, enabledRootIDs(cfg), false)
+	w.addRoundRobin(ctx, set, candidates, enabledRootIDs(cfg), false)
 }
 
 func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Config) {
@@ -269,6 +279,10 @@ func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Conf
 		_ = set.fsw.Remove(path)
 		delete(set.paths, path)
 	}
+	set.clearFailures()
+	// Revisit configured roots as part of normal rebalancing. This lets a
+	// temporarily disconnected share become watched again without a restart.
+	w.seedWatches(ctx, set, cfg)
 	w.addHotWatches(ctx, set, cfg)
 	w.statsMu.Lock()
 	w.stats.LastRebalanceUnix = time.Now().Unix()
@@ -276,7 +290,7 @@ func (w *Watcher) rebalance(ctx context.Context, set *watchSet, cfg *config.Conf
 	w.log.Debug("filesystem watcher rebalanced", "directories", len(set.paths), "limit", set.limit)
 }
 
-func (w *Watcher) addRoundRobin(set *watchSet, candidates map[string][]string, rootIDs []string, pinned bool) {
+func (w *Watcher) addRoundRobin(ctx context.Context, set *watchSet, candidates map[string][]string, rootIDs []string, pinned bool) {
 	for {
 		added := false
 		for _, rootID := range rootIDs {
@@ -285,7 +299,7 @@ func (w *Watcher) addRoundRobin(set *watchSet, candidates map[string][]string, r
 				continue
 			}
 			candidates[rootID] = paths[1:]
-			if set.add(paths[0], rootID, pinned) {
+			if set.add(ctx, paths[0], rootID, pinned) {
 				added = true
 			}
 			if len(set.paths) >= set.limit {
@@ -301,7 +315,7 @@ func (w *Watcher) addRoundRobin(set *watchSet, candidates map[string][]string, r
 	}
 }
 
-func (s *watchSet) add(path, rootID string, pinned bool) bool {
+func (s *watchSet) add(ctx context.Context, path, rootID string, pinned bool) bool {
 	path = filepath.Clean(path)
 	if s.paths[path] != "" {
 		if pinned {
@@ -312,11 +326,17 @@ func (s *watchSet) add(path, rootID string, pinned bool) bool {
 	if len(s.paths) >= s.limit {
 		return false
 	}
-	info, err := os.Stat(path)
+	info, err := statDirectoryWithTimeout(ctx, path)
 	if err != nil || !info.IsDir() {
+		if err != nil {
+			s.noteFailure(err)
+		} else {
+			s.noteFailure(errors.New("path is not a directory"))
+		}
 		return false
 	}
 	if err := s.fsw.Add(path); err != nil {
+		s.noteFailure(err)
 		return false
 	}
 	s.paths[path] = rootID
@@ -324,6 +344,79 @@ func (s *watchSet) add(path, rootID string, pinned bool) bool {
 		s.pinned[path] = true
 	}
 	return true
+}
+
+func (s *watchSet) noteFailure(err error) {
+	if err == nil {
+		return
+	}
+	s.failures++
+	s.lastError = err.Error()
+}
+
+func (s *watchSet) clearFailures() {
+	s.failures = 0
+	s.lastError = ""
+}
+
+func readDirWithTimeout(parent context.Context, path string) ([]os.DirEntry, error) {
+	ctx, cancel := context.WithTimeout(parent, watchRootLookupTimeout)
+	defer cancel()
+	type result struct {
+		entries []os.DirEntry
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		entries, err := os.ReadDir(path)
+		resultCh <- result{entries: entries, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.entries, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func expandRootPathsWithTimeout(parent context.Context, path string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(parent, watchRootLookupTimeout)
+	defer cancel()
+	type result struct {
+		paths []string
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		paths, err := crawler.ExpandRootPaths(path)
+		resultCh <- result{paths: paths, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.paths, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func statDirectoryWithTimeout(parent context.Context, path string) (os.FileInfo, error) {
+	ctx, cancel := context.WithTimeout(parent, watchRootLookupTimeout)
+	defer cancel()
+	type result struct {
+		info os.FileInfo
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		info, err := os.Stat(path)
+		resultCh <- result{info: info, err: err}
+	}()
+	select {
+	case result := <-resultCh:
+		return result.info, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func enabledRootIDs(cfg *config.Config) []string {
@@ -348,7 +441,11 @@ func allCandidatesEmpty(candidates map[string][]string) bool {
 func (w *Watcher) updateStats(set *watchSet, cfg *config.Config) {
 	w.statsMu.Lock()
 	lastEvent, lastRebalance := w.stats.LastEventUnix, w.stats.LastRebalanceUnix
-	w.stats = Stats{Enabled: cfg.Watcher.Enabled, Running: true, WatchedDirectories: len(set.paths), MaxDirectories: set.limit, LastEventUnix: lastEvent, LastRebalanceUnix: lastRebalance}
+	errText := ""
+	if set.failures > 0 {
+		errText = fmt.Sprintf("%d watch path(s) unavailable; last error: %s", set.failures, set.lastError)
+	}
+	w.stats = Stats{Enabled: cfg.Watcher.Enabled, Running: true, Error: errText, WatchedDirectories: len(set.paths), MaxDirectories: set.limit, LastEventUnix: lastEvent, LastRebalanceUnix: lastRebalance}
 	w.statsMu.Unlock()
 }
 
@@ -378,11 +475,11 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (w *Watcher) tryWatchCreatedDirectory(set *watchSet, path string, rootID string) error {
+func (w *Watcher) tryWatchCreatedDirectory(ctx context.Context, set *watchSet, path string, rootID string) error {
 	if w.shouldIgnore(path) {
 		return nil
 	}
-	set.add(path, rootID, false)
+	set.add(ctx, path, rootID, false)
 	return nil
 }
 

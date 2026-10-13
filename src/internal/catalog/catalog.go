@@ -26,6 +26,8 @@ type Catalog struct {
 	stats     indexStatsCache
 	backlogMu sync.Mutex
 	backlog   backgroundBacklogCache
+	storageMu sync.Mutex
+	storage   storageStatsCache
 }
 
 type indexStatsCache struct {
@@ -47,6 +49,14 @@ type backgroundBacklogCache struct {
 }
 
 const backgroundBacklogCacheTTL = 15 * time.Second
+
+type storageStatsCache struct {
+	at           time.Time
+	maxTextBytes int64
+	value        StorageStats
+}
+
+const storageStatsCacheTTL = 30 * time.Second
 
 // FolderActivity is a compact, persisted signal used to allocate a bounded
 // filesystem-watch budget. It is deliberately separate from documents.
@@ -303,8 +313,17 @@ func (c *Catalog) Checkpoint(ctx context.Context) error {
 }
 
 func (c *Catalog) StorageStats(ctx context.Context, maxTextBytes int64) (StorageStats, error) {
+	return c.storageStats(ctx, maxTextBytes, false)
+}
+
+func (c *Catalog) storageStats(ctx context.Context, maxTextBytes int64, force bool) (StorageStats, error) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
+	}
+	c.storageMu.Lock()
+	defer c.storageMu.Unlock()
+	if !force && c.storage.maxTextBytes == maxTextBytes && time.Since(c.storage.at) < storageStatsCacheTTL {
+		return c.storage.value, nil
 	}
 	var stats StorageStats
 	var pageCount, freePages, pageSize int64
@@ -323,6 +342,7 @@ func (c *Catalog) StorageStats(ctx context.Context, maxTextBytes int64) (Storage
 	stats.DatabaseBytes = pageCount * pageSize
 	stats.FreeBytes = freePages * pageSize
 	stats.MaxTextBytes = maxTextBytes
+	c.storage = storageStatsCache{at: time.Now(), maxTextBytes: maxTextBytes, value: stats}
 	return stats, nil
 }
 
@@ -332,7 +352,7 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
 	}
-	before, err := c.StorageStats(ctx, maxTextBytes)
+	before, err := c.storageStats(ctx, maxTextBytes, true)
 	if err != nil {
 		return CompactResult{}, err
 	}
@@ -386,7 +406,7 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 	if _, err := c.db.ExecContext(ctx, `VACUUM`); err != nil {
 		return result, err
 	}
-	result.After, err = c.StorageStats(ctx, maxTextBytes)
+	result.After, err = c.storageStats(ctx, maxTextBytes, true)
 	return result, err
 }
 
@@ -1878,6 +1898,28 @@ func (c *Catalog) ResetQueuedBackground(ctx context.Context) error {
 		`UPDATE documents SET hash_status = 'not_hashed' WHERE hash_status = 'queued'`,
 	} {
 		if _, err := tx.ExecContext(ctx, update); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ResetQueuedBackgroundForRoot releases only work belonging to one root. Root
+// maintenance must not discard enrichment claims belonging to other roots.
+func (c *Catalog) ResetQueuedBackgroundForRoot(ctx context.Context, rootID string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, update := range []string{
+		`UPDATE documents SET content_status = 'not_indexed' WHERE root_id = ? AND content_status = 'queued'`,
+		`UPDATE documents SET ocr_status = 'pending' WHERE root_id = ? AND ocr_status = 'queued'`,
+		`UPDATE documents SET hash_status = 'not_hashed' WHERE root_id = ? AND hash_status = 'queued'`,
+	} {
+		if _, err := tx.ExecContext(ctx, update, rootID); err != nil {
 			return err
 		}
 	}
