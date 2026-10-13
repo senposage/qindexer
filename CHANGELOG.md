@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.6 - 2026-10-13
+
+- Reconcile built-in operational exclusions consistently for folders and their
+  descendants. Historical entries below excluded paths are removed instead of
+  being mislabeled as missing after a successful crawl.
+- Preserve files that become temporarily unreadable as active records with an
+  `inaccessible` access status, rather than treating an access error as proof
+  that the file was deleted.
+
 ## 1.2.5 - 2026-10-13
 
 - Keep root maintenance isolated: deleting, clearing, or changing one root no
