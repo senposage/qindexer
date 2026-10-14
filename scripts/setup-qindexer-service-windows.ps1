@@ -5,10 +5,24 @@ param(
   [string]$NssmPath = "",
   [string]$ServiceName = "QIndexer",
   [switch]$SkipDatabase,
-  [switch]$InstallSidecars
+  [switch]$InstallSidecars,
+  [string]$ProgressPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "install-progress-windows.ps1")
+
+function Write-InstallProgress {
+  param([string]$Status, [string]$Stage, [int]$Percent, [string]$Message)
+  Write-QIndexerInstallProgress -ProgressPath $ProgressPath -Status $Status -Stage $Stage -Percent $Percent -Message $Message
+}
+
+trap {
+  Write-InstallProgress "failed" "service_install" 100 $_.Exception.Message
+  throw $_
+}
+
+Write-InstallProgress "running" "service_prepare" 5 "Preparing the QIndexer service installation."
 
 function Require-Administrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -94,6 +108,7 @@ $logsDir = Join-Path $dataDir "logs"
 $scriptsDir = Join-Path $InstallDir "scripts"
 New-Item -ItemType Directory -Force -Path $binDir, $configDir, $dataDir, $logsDir, $scriptsDir | Out-Null
 
+Write-InstallProgress "running" "service_files" 20 "Installing QIndexer service files."
 $installedBinary = Join-Path $binDir "qindexer.exe"
 $configPath = Join-Path $configDir "qindexer.yaml"
 Copy-Item -LiteralPath $sourceBinary -Destination $installedBinary -Force
@@ -105,11 +120,15 @@ $postgresSource = Join-Path $PSScriptRoot "setup-postgres-windows.ps1"
 if (Test-Path -LiteralPath $postgresSource) {
   Copy-Item -LiteralPath $postgresSource -Destination (Join-Path $scriptsDir "setup-postgres-windows.ps1") -Force
 }
+$progressSource = Join-Path $PSScriptRoot "install-progress-windows.ps1"
+if (Test-Path -LiteralPath $progressSource) {
+  Copy-Item -LiteralPath $progressSource -Destination (Join-Path $scriptsDir "install-progress-windows.ps1") -Force
+}
 if (-not (Test-Path -LiteralPath $configPath)) {
   if ($SkipDatabase) { throw "-SkipDatabase requires an existing configuration with an explicit database backend." }
   $postgresScript = Join-Path $scriptsDir "setup-postgres-windows.ps1"
   if (-not (Test-Path -LiteralPath $postgresScript)) { throw "The packaged PostgreSQL setup script is missing: $postgresScript" }
-  $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+  $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir -ProgressPath $ProgressPath | ConvertFrom-Json
   if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
   Write-EmptyConfig -Path $configPath -DataDir $dataDir -DatabaseDSN $database.dsn
   Write-Host "Created an empty configuration. Add roots and set the first admin token in the web UI."
@@ -118,7 +137,7 @@ if ((Get-Content -LiteralPath $configPath -Raw) -match '(?m)^\s*dsn:\s*["'']?pos
   if ($SkipDatabase) { throw "The existing configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
   $postgresScript = Join-Path $scriptsDir "setup-postgres-windows.ps1"
   if (-not (Test-Path -LiteralPath $postgresScript)) { throw "The packaged PostgreSQL setup script is missing: $postgresScript" }
-  $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+  $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir -ProgressPath $ProgressPath | ConvertFrom-Json
   if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
   $configText = Get-Content -LiteralPath $configPath -Raw
   $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
@@ -133,6 +152,7 @@ if (-not $PSBoundParameters.ContainsKey("InstallSidecars") -and [Environment]::U
   $installSidecars = (Read-Host "Install optional OCR/extraction sidecars now? [y/N]") -match '^(?i:y|yes)$'
 }
 if ($installSidecars) {
+  Write-InstallProgress "running" "service_sidecars" 85 "Installing optional extraction sidecars."
   $sidecarScript = Join-Path $scriptsDir "setup-sidecars-windows.ps1"
   if (-not (Test-Path -LiteralPath $sidecarScript)) {
     throw "The packaged Windows sidecar installer is missing: $sidecarScript"
@@ -140,6 +160,7 @@ if ($installSidecars) {
   & $sidecarScript -InstallDir $InstallDir -LogPath (Join-Path $logsDir "sidecar-install.log")
 }
 
+Write-InstallProgress "running" "service_register" 92 "Registering the QIndexer service."
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
   if ($existing.Status -ne "Stopped") {
@@ -168,6 +189,7 @@ if ($service.Status -ne "Running") {
   throw "The service was installed but did not start. Check $logsDir\service-stderr.log and $logsDir\qindexer.log."
 }
 
+Write-InstallProgress "completed" "service_ready" 100 "QIndexer service is running."
 Write-Host "QIndexer service is running."
 Write-Host "  Service: $ServiceName"
 Write-Host "  Admin UI: http://127.0.0.1:41974/"

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.11 - 2026-10-14
+
+- Fix the Windows private PostgreSQL bootstrap on Windows PowerShell 5.1: the
+  port probe is now null-safe and fresh role/database existence checks handle
+  empty `psql` output correctly.
+- Add optional atomic installer progress files for package and service setup on
+  Windows and Linux. An updater can poll the JSON file while QIndexer is
+  intentionally stopped.
+
 ## 1.2.10 - 2026-10-14
 
 - Fix private PostgreSQL credential generation in the packaged Windows setup

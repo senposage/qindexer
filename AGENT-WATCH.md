@@ -890,6 +890,32 @@ installer from Windows PowerShell 5.1 as well as PowerShell 7. This blocks
 QSurfer's explicit SQLite-to-PostgreSQL switch; QSurfer correctly leaves the
 existing SQLite service and catalog untouched when the helper fails.
 
+### Follow-up validation (same day)
+
+After the RNG compatibility update, the installer progresses to downloading
+PostgreSQL 18.6 from the official PostgreSQL Windows distributor, then fails
+in `scripts/setup-postgres-windows.ps1` at line 45 with:
+
+```
+You cannot call a method on a null-valued expression.
+```
+
+The caller is `release/scripts/install-qindexer.ps1` line 79. Please inspect
+the download/response handling around setup script line 45: the expected
+download object, URL, or response header is null under this Windows test
+environment. Validate that the package bootstrap can download, install, and
+start its private PostgreSQL service end to end from a clean Windows PowerShell
+5.1 session. The QSurfer action correctly leaves the legacy SQLite service
+running when this fails.
+
+Correction after inspecting the installed helper: line 45 is in `Test-PortFree`.
+Its `finally` calls `$listener.Stop()` unconditionally. If construction of the
+`TcpListener` failed, that dereferences null and masks the probe failure. Make
+the cleanup null-safe and preferably construct via
+`[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Candidate)` for
+Windows PowerShell 5.1 compatibility. This is the immediate cause of the
+current failure, not the download response.
+
 ## 2026-10-14 Resolved: Windows PowerShell 5.1 PostgreSQL Setup
 
 QIndexer `v1.2.10` replaces the unsupported static RNG call with
@@ -898,3 +924,20 @@ use. The password-generation path was validated under stock Windows PowerShell
 5.1.26100.9444 as well as parsed by PowerShell 7. QSurfer can retry the
 explicit SQLite-to-PostgreSQL switch with `v1.2.10`; first-run admin-token
 bootstrap behavior remains unchanged.
+
+## 2026-10-14: Installer Bootstrap Follow-up
+
+QIndexer `v1.2.11` fixes two additional Windows bootstrap faults: its private
+PostgreSQL port probe no longer calls `Stop()` on a null listener, and empty
+`psql` output from a fresh role/database existence query is handled as an
+empty string rather than dereferenced. This is a package-side fix; QSurfer
+does not need to change its database ownership behavior.
+
+All package and service setup scripts now accept an optional progress location:
+`-ProgressPath PATH` on Windows and `--progress-file PATH` on Linux. During an
+offline upgrade they atomically write a compact JSON status document with
+`schema_version`, `status`, `stage`, `percent`, `message`, and `updated_at`.
+QSurfer can create a known path, pass it to the script, and poll it while the
+QIndexer service is intentionally stopped. This is the only supported setup
+progress channel during that interval; the HTTP API cannot exist until the
+service has restarted.

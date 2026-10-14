@@ -6,10 +6,16 @@ param(
   [switch]$InstallSidecars,
   [switch]$InstallService,
   [switch]$StartService,
-  [string]$ServiceName = "QIndexer"
+  [string]$ServiceName = "QIndexer",
+  [string]$ProgressPath = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+function Write-InstallProgress {
+  param([string]$Status, [string]$Stage, [int]$Percent, [string]$Message)
+  Write-QIndexerInstallProgress -ProgressPath $ProgressPath -Status $Status -Stage $Stage -Percent $Percent -Message $Message
+}
 
 function Resolve-RepoRoot {
   $scriptDir = Split-Path -Parent $PSCommandPath
@@ -44,6 +50,12 @@ function Set-PrivateAcl {
 }
 
 $repoRoot = Resolve-RepoRoot
+. (Join-Path $repoRoot "scripts\install-progress-windows.ps1")
+trap {
+  Write-InstallProgress "failed" "install" 100 $_.Exception.Message
+  throw $_
+}
+Write-InstallProgress "running" "install_prepare" 5 "Preparing the QIndexer installation."
 if (-not $BinaryPath) {
   $candidates = @(
     (Join-Path $repoRoot "qindexer.exe"),
@@ -64,10 +76,12 @@ $dataDir = Join-Path $InstallDir "data"
 $logDir = Join-Path $dataDir "logs"
 New-Item -ItemType Directory -Force -Path $binDir, $scriptDir, $configDir, $dataDir, $logDir | Out-Null
 
+Write-InstallProgress "running" "install_files" 20 "Installing QIndexer files."
 $installedBinary = Join-Path $binDir "qindexer.exe"
 Copy-Item -LiteralPath $BinaryPath -Destination $installedBinary -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-sidecars-windows.ps1") -Destination (Join-Path $scriptDir "setup-sidecars-windows.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-postgres-windows.ps1") -Destination (Join-Path $scriptDir "setup-postgres-windows.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\install-progress-windows.ps1") -Destination (Join-Path $scriptDir "install-progress-windows.ps1") -Force
 
 if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
   Copy-Item -LiteralPath $ConfigPath -Destination (Join-Path $configDir "qindexer.yaml") -Force
@@ -76,7 +90,7 @@ if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
     throw "-SkipDatabase requires -ConfigPath when no existing QIndexer configuration is installed."
   }
   Require-Admin
-  $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+  $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ProgressPath $ProgressPath | ConvertFrom-Json
   if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
   $sampleConfig = @(
     (Join-Path $repoRoot "configs\example.yaml"),
@@ -100,7 +114,7 @@ if (Test-Path -LiteralPath $installedConfig) {
   if ($needsProvisionedDatabase) {
     if ($SkipDatabase) { throw "The supplied configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
     Require-Admin
-    $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+    $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ProgressPath $ProgressPath | ConvertFrom-Json
     if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
     $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
         param($match)
@@ -120,11 +134,13 @@ if (Test-Path -LiteralPath $installedConfig) {
 
 if ($InstallSidecars) {
   Require-Admin
+  Write-InstallProgress "running" "install_sidecars" 88 "Installing optional extraction sidecars."
   & (Join-Path $scriptDir "setup-sidecars-windows.ps1") -InstallDir $InstallDir
 }
 
 if ($InstallService) {
   Require-Admin
+  Write-InstallProgress "running" "install_service" 92 "Installing the QIndexer service."
   $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
   if ($existing) {
     if ($existing.Status -ne "Stopped") {
@@ -142,6 +158,7 @@ if ($InstallService) {
   }
 }
 
+Write-InstallProgress "completed" "install_ready" 100 "QIndexer installation is complete."
 Write-Host "QIndexer installed"
 Write-Host "  Binary: $installedBinary"
 Write-Host "  Config: $installedConfig"

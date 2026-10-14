@@ -318,6 +318,24 @@ DSN or `database.driver: sqlite` to override that default. `-SkipDatabase` and
 `--skip-database` reject a placeholder config rather than creating an unusable
 service.
 
+### Installer Progress
+
+Package and service setup scripts accept an optional progress file path:
+
+```powershell
+.\scripts\install-qindexer.ps1 -ProgressPath "C:\ProgramData\QSurfer\QIndexer\install-progress.json"
+```
+
+```bash
+./scripts/install-qindexer-linux.sh --progress-file /var/lib/qindexer/install-progress.json
+```
+
+The scripts atomically replace that file with compact JSON containing
+`schema_version`, `status`, `stage`, `percent`, `message`, and `updated_at`.
+`status` is `running`, `completed`, or `failed`. This is intentionally
+file-based so an updater can report progress while QIndexer is stopped for a
+binary replacement or PostgreSQL setup.
+
 On Windows, `-InstallSidecars` is self-contained. It downloads the current
 upstream Tesseract installer, a private 7-Zip extraction runtime, the official
 Ghostscript payload, and the supported all-users Python runtime. Ghostscript is
