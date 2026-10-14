@@ -90,7 +90,7 @@ if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
     throw "-SkipDatabase requires -ConfigPath when no existing QIndexer configuration is installed."
   }
   Require-Admin
-  $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ProgressPath $ProgressPath | ConvertFrom-Json
+  $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ResetIncomplete -ProgressPath $ProgressPath | ConvertFrom-Json
   if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
   $sampleConfig = @(
     (Join-Path $repoRoot "configs\example.yaml"),
@@ -114,7 +114,7 @@ if (Test-Path -LiteralPath $installedConfig) {
   if ($needsProvisionedDatabase) {
     if ($SkipDatabase) { throw "The supplied configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
     Require-Admin
-    $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ProgressPath $ProgressPath | ConvertFrom-Json
+    $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ResetIncomplete -ProgressPath $ProgressPath | ConvertFrom-Json
     if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
     $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
         param($match)

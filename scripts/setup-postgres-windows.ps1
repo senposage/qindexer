@@ -5,6 +5,7 @@ param(
   [string]$DatabaseName = "qindexer",
   [string]$RoleName = "qindexer",
   [int]$Port = 0,
+  [switch]$ResetIncomplete,
   [string]$ProgressPath = ""
 )
 
@@ -96,6 +97,22 @@ $createdb = Join-Path $postgresRoot "bin\createdb.exe"
 $installer = Join-Path $env:TEMP "qindexer-postgresql-18.6-windows-x64.exe"
 $superPassword = New-Secret
 $appPassword = New-Secret
+
+if ($ResetIncomplete -and (Test-Path -LiteralPath $psql)) {
+  Report-Progress "running" "postgres_recover" 15 "Resetting an incomplete private PostgreSQL setup."
+  Write-Host "Resetting incomplete private PostgreSQL setup for QIndexer..."
+  $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+  if ($existingService -and $existingService.Status -ne "Stopped") {
+    Stop-Service -Name $serviceName -Force
+    $existingService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+  }
+  if ($existingService) {
+    sc.exe delete $serviceName | Out-Null
+    Start-Sleep -Seconds 1
+  }
+  if (Test-Path -LiteralPath $postgresRoot) { Remove-Item -LiteralPath $postgresRoot -Recurse -Force }
+  if (Test-Path -LiteralPath $clusterDir) { Remove-Item -LiteralPath $clusterDir -Recurse -Force }
+}
 
 if (Test-Path -LiteralPath $psql) {
   $selectedPort = $Port

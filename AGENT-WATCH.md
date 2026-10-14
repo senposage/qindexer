@@ -941,3 +941,13 @@ QSurfer can create a known path, pass it to the script, and poll it while the
 QIndexer service is intentionally stopped. This is the only supported setup
 progress channel during that interval; the HTTP API cannot exist until the
 service has restarted.
+
+## 2026-10-14: Incomplete PostgreSQL Recovery
+
+QIndexer `v1.2.12` also handles the failed-bootstrap state created by older
+packages: when the package/service installer has no QIndexer configuration or
+only the generated placeholder PostgreSQL DSN, it may reset and reprovision
+the dedicated `qindexer-postgresql` service. This exists solely to recover a
+private PostgreSQL installation that failed before QIndexer received its DSN.
+It does not run for an established configuration and must not be used as a
+catalog reset mechanism by QSurfer.

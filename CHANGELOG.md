@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.12 - 2026-10-14
+
+- Recover only an incomplete private Windows PostgreSQL setup when a package
+  installer still has no usable QIndexer configuration or has the generated
+  placeholder DSN. The recovery replaces that isolated bootstrap service; it
+  does not run for established QIndexer configurations.
+
 ## 1.2.11 - 2026-10-14
 
 - Fix the Windows private PostgreSQL bootstrap on Windows PowerShell 5.1: the
