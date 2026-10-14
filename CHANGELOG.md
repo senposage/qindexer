@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.8 - 2026-10-14
+
+- Keep the authenticated admin shell responsive on large SQLite catalogs by
+  serving cached dashboard aggregates while a single low-priority refresh
+  samples file types, enrichment backlog, and stored text size.
+- Avoid overlapping dashboard analytics scans, add an aggregate-friendly index
+  for active file-type counts, and show clear loading states until the first
+  snapshot is available.
+
 ## 1.2.7 - 2026-10-13
 
 - Bound hot-folder watcher registration so slow, unavailable, or stale
