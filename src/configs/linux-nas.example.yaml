@@ -20,6 +20,11 @@ management:
 
 index:
   data_dir: "/var/lib/qsurfer-search"
+  database:
+    driver: "postgres"
+    dsn: "postgres://qindexer:change-me@127.0.0.1:5432/qindexer?sslmode=disable"
+    max_open_conns: 32
+    max_idle_conns: 8
   commit_interval_seconds: 5
   max_results: 200
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.9 - 2026-10-14
+
+- Make PostgreSQL the default QIndexer catalog, with pooled client access,
+  native full-text search, catalog-size metrics, and SQLite retained as an
+  explicit portable option.
+- Add self-contained PostgreSQL setup helpers to Windows and Linux packages.
+  A fresh package install provisions a loopback-only local database and writes
+  its generated DSN into the protected QIndexer configuration.
+- Redact database DSNs from configuration/export responses and document the
+  QSurfer integration contract for PostgreSQL-backed installs.
+
 ## 1.2.8 - 2026-10-14
 
 - Keep the authenticated admin shell responsive on large SQLite catalogs by

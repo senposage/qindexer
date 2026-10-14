@@ -4,6 +4,7 @@ set -euo pipefail
 INSTALL_DIR="/opt/qindexer"
 CONFIG_PATH=""
 BINARY_PATH=""
+SKIP_DATABASE=0
 INSTALL_SIDECARS=0
 INSTALL_SERVICE=0
 START_SERVICE=0
@@ -14,6 +15,7 @@ while [[ $# -gt 0 ]]; do
     --install-dir) INSTALL_DIR="$2"; shift 2 ;;
     --config) CONFIG_PATH="$2"; shift 2 ;;
     --binary) BINARY_PATH="$2"; shift 2 ;;
+    --skip-database) SKIP_DATABASE=1; shift ;;
     --install-sidecars) INSTALL_SIDECARS=1; shift ;;
     --install-service) INSTALL_SERVICE=1; shift ;;
     --start-service) START_SERVICE=1; shift ;;
@@ -26,6 +28,7 @@ Options:
   --install-dir PATH       Install directory, default /opt/qindexer
   --config PATH            Config file to install as configs/qindexer.yaml
   --binary PATH            qindexer Linux binary, default outputs/bin/qindexer_linux_amd64
+  --skip-database          Require --config; do not provision local PostgreSQL
   --install-sidecars       Install tesseract, ocrmypdf, ghostscript, poppler-utils when possible
   --install-service        Install a systemd service
   --start-service          Start the systemd service after install
@@ -40,7 +43,7 @@ done
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 if [[ -z "$BINARY_PATH" ]]; then
-  for candidate in "$REPO_ROOT/qindexer_linux_amd64" "$REPO_ROOT/outputs/bin/qindexer_linux_amd64" "$REPO_ROOT/src/dist/qindexer_linux_amd64"; do
+  for candidate in "$REPO_ROOT/qindexer" "$REPO_ROOT/qindexer_linux_amd64" "$REPO_ROOT/outputs/bin/qindexer_linux_amd64" "$REPO_ROOT/src/dist/qindexer_linux_amd64"; do
     if [[ -f "$candidate" ]]; then BINARY_PATH="$candidate"; break; fi
   done
 fi
@@ -59,10 +62,15 @@ $SUDO install -d -m 0755 "$INSTALL_DIR/scripts"
 $SUDO install -d -m 0700 "$INSTALL_DIR/configs" "$INSTALL_DIR/data" "$INSTALL_DIR/data/logs"
 $SUDO install -m 0755 "$BINARY_PATH" "$INSTALL_DIR/bin/qindexer"
 $SUDO install -m 0755 "$REPO_ROOT/scripts/setup-sidecars-linux.sh" "$INSTALL_DIR/scripts/setup-sidecars-linux.sh"
+$SUDO install -m 0755 "$REPO_ROOT/scripts/setup-postgres-linux.sh" "$INSTALL_DIR/scripts/setup-postgres-linux.sh"
 
 if [[ -n "$CONFIG_PATH" && -f "$CONFIG_PATH" ]]; then
   $SUDO install -m 0600 "$CONFIG_PATH" "$INSTALL_DIR/configs/qindexer.yaml"
 elif [[ ! -f "$INSTALL_DIR/configs/qindexer.yaml" ]]; then
+  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "--skip-database requires --config when no QIndexer configuration exists." >&2; exit 2; }
+  DATABASE_JSON="$($SUDO "$INSTALL_DIR/scripts/setup-postgres-linux.sh" --install-dir "$INSTALL_DIR" --data-dir "$INSTALL_DIR/data")"
+  DATABASE_DSN="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"dsn":"\([^"]*\)".*/\1/p')"
+  [[ -n "$DATABASE_DSN" ]] || { echo "PostgreSQL setup did not return a QIndexer DSN." >&2; exit 1; }
   for candidate in "$REPO_ROOT/configs/linux-nas.example.yaml" "$REPO_ROOT/src/configs/linux-nas.example.yaml"; do
     if [[ -f "$candidate" ]]; then
       $SUDO install -m 0600 "$candidate" "$INSTALL_DIR/configs/qindexer.yaml"
@@ -70,6 +78,16 @@ elif [[ ! -f "$INSTALL_DIR/configs/qindexer.yaml" ]]; then
     fi
   done
   [[ -f "$INSTALL_DIR/configs/qindexer.yaml" ]] || { echo "No Linux example config found in the release bundle or repository." >&2; exit 1; }
+  $SUDO sed -i "s|^    dsn:.*|    dsn: \"$DATABASE_DSN\"|" "$INSTALL_DIR/configs/qindexer.yaml"
+fi
+
+INSTALLED_CONFIG="$INSTALL_DIR/configs/qindexer.yaml"
+if $SUDO grep -Fq 'postgres://qindexer:change-me@' "$INSTALLED_CONFIG"; then
+  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "The supplied configuration contains the PostgreSQL placeholder DSN, but --skip-database was requested." >&2; exit 2; }
+  DATABASE_JSON="$($SUDO "$INSTALL_DIR/scripts/setup-postgres-linux.sh" --install-dir "$INSTALL_DIR" --data-dir "$INSTALL_DIR/data")"
+  DATABASE_DSN="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"dsn":"\([^"]*\)".*/\1/p')"
+  [[ -n "$DATABASE_DSN" ]] || { echo "PostgreSQL setup did not return a QIndexer DSN." >&2; exit 1; }
+  $SUDO sed -i "s|^    dsn:.*|    dsn: \"$DATABASE_DSN\"|" "$INSTALLED_CONFIG"
 fi
 
 if [[ "$INSTALL_SIDECARS" -eq 1 ]]; then

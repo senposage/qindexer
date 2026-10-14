@@ -55,7 +55,7 @@ func (a App) Run(ctx context.Context) error {
 		log.Warn("access logging unavailable; using operational log", "path", accessLogPath, "error", accessLogErr)
 	}
 	api.PrepareSidecarEnvironment(log, cfg.Crawler.OCR)
-	cat, err := catalog.Open(ctx, dataDir)
+	cat, err := openCatalog(ctx, cfg, a.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -166,10 +166,20 @@ func checkpointCatalog(ctx context.Context, cat *catalog.Catalog, log *slog.Logg
 			err := cat.Checkpoint(checkpointCtx)
 			cancel()
 			if err != nil && ctx.Err() == nil {
-				log.Warn("periodic SQLite checkpoint failed", "error", err)
+				log.Warn("periodic catalog maintenance failed", "error", err)
 			}
 		}
 	}
+}
+
+func openCatalog(ctx context.Context, cfg *config.Config, configPath string) (*catalog.Catalog, error) {
+	return catalog.OpenWithOptions(ctx, catalog.OpenOptions{
+		DataDir:      config.ResolveDataDir(configPath, cfg.Index.DataDir),
+		Driver:       cfg.Index.Database.Driver,
+		DSN:          cfg.Index.Database.DSN,
+		MaxOpenConns: cfg.Index.Database.MaxOpenConns,
+		MaxIdleConns: cfg.Index.Database.MaxIdleConns,
+	})
 }
 
 func openLogFile(dataDir string) (*os.File, string, error) {
@@ -233,7 +243,7 @@ func (a App) CrawlOnce(ctx context.Context, rootID string) error {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
-	cat, err := catalog.Open(ctx, config.ResolveDataDir(a.ConfigPath, cfg.Index.DataDir))
+	cat, err := openCatalog(ctx, cfg, a.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -252,7 +262,7 @@ func (a App) Status(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cat, err := catalog.Open(ctx, config.ResolveDataDir(a.ConfigPath, cfg.Index.DataDir))
+	cat, err := openCatalog(ctx, cfg, a.ConfigPath)
 	if err != nil {
 		return err
 	}

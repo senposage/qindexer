@@ -116,24 +116,27 @@ Source files are never deleted.
 ## Shutdown
 
 Use `Stop service` in the UI or send an OS signal. QIndexer cancels active
-crawls, waits for completed directory sets/checkpoints, flushes SQLite, and
-closes the DB.
+crawls, waits for completed directory sets/checkpoints, flushes the active
+catalog, and closes database connections.
 
-## SQLite Checkpoints And Storage
+## Catalog Storage
 
-QIndexer uses WAL mode for concurrent reads and writes. Automatic checkpoints
-run at 1,000 WAL pages, and the service performs an additional non-blocking
-checkpoint every 30 seconds. When no client is holding an older read snapshot,
-the service truncates the WAL sidecar.
+PostgreSQL is the default catalog. Its database service owns durability and
+checkpointing; QIndexer uses a bounded connection pool and reports the active
+database size through the admin metrics endpoint.
 
-The admin size metric counts only the active `qsurfer-search.db` database and
-its live `-wal` and `-shm` sidecars. Timestamped pre-maintenance backups kept
-in the same directory are intentionally excluded.
+SQLite remains available with `database.driver: sqlite`. It uses WAL mode for
+concurrent reads and writes. Automatic checkpoints run at 1,000 WAL pages, and
+the service performs an additional non-blocking checkpoint every 30 seconds.
+When no client is holding an older read snapshot, the service truncates the WAL
+sidecar. SQLite metrics count only `qsurfer-search.db` and its live `-wal` and
+`-shm` sidecars; timestamped maintenance backups are excluded.
 
 Use **Optimize index storage** in the administration UI, or
 `qindexer db-compact --database /path/to/qsurfer-search.db`, to reclaim
-already-unused pages. Compaction pauses crawls and can require temporary free
-space while SQLite rewrites the database.
+already-unused SQLite pages. Compaction pauses crawls. PostgreSQL maintenance
+runs `ANALYZE`; SQLite can require temporary free space while it rewrites the
+database.
 
 ## Crawler Scheduling
 
@@ -202,8 +205,9 @@ Use:
 - `GET /admin/v1/config/export`
 - `POST /admin/v1/config/import`
 
-Exports exclude secrets. Back up the SQLite files only when the service is
-stopped or after a clean SQLite checkpoint.
+Exports exclude secrets. PostgreSQL should be backed up with the normal
+database backup tooling. Back up SQLite files only when the service is stopped
+or after a clean SQLite checkpoint.
 
 ## Diagnostics
 
@@ -280,7 +284,7 @@ Wrong display path:
 Use the installer script from the repository root:
 
 ```powershell
-.\scripts\install-qindexer.ps1 -InstallDir "C:\Program Files\QIndexer" -ConfigPath .\src\configs\windows-nas.example.yaml -InstallSidecars -InstallService -StartService
+.\scripts\install-qindexer.ps1 -InstallDir "C:\Program Files\QIndexer" -InstallSidecars -InstallService -StartService
 ```
 
 The binary also supports direct service wrappers:
@@ -296,7 +300,7 @@ Run as an account with read access to every root.
 Use the Linux installer script from the repository root:
 
 ```bash
-./scripts/install-qindexer-linux.sh --install-dir /opt/qindexer --config ./src/configs/linux-nas.example.yaml --install-sidecars --install-service --start-service
+./scripts/install-qindexer-linux.sh --install-dir /opt/qindexer --install-sidecars --install-service --start-service
 ```
 
 `--install-sidecars` downloads/installs the OCR runtime with the available
@@ -304,6 +308,15 @@ package manager and verifies `tesseract`, `ocrmypdf`, `gs`, and `pdftotext`.
 The sidecars are installed in the system PATH, so QIndexer uses its normal
 default command names. Installing sidecars alone does not enable OCR or create
 an enrichment backlog.
+
+On a fresh installation, both package installers provision a private,
+loopback-only PostgreSQL service, a `qindexer` database, and an application
+login before writing the local configuration. QSurfer should treat this as an
+internal QIndexer dependency: it must not create a SQLite file or manage the
+generated database DSN. Provide an existing config with an external PostgreSQL
+DSN or `database.driver: sqlite` to override that default. `-SkipDatabase` and
+`--skip-database` reject a placeholder config rather than creating an unusable
+service.
 
 On Windows, `-InstallSidecars` is self-contained. It downloads the current
 upstream Tesseract installer, a private 7-Zip extraction runtime, the official

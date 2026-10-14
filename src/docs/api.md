@@ -336,8 +336,10 @@ Validates the active config.
 ### GET /admin/v1/metrics
 
 Returns crawler rates, I/O rate, active state, pause/throttle state, and
-`index_size_bytes`. The size includes only the active SQLite database and its
-live WAL/SHM sidecars; timestamped maintenance backups are excluded.
+`index_size_bytes`. The size includes only the active catalog. For PostgreSQL,
+it is the active server database size; for SQLite, it includes the active
+database and live WAL/SHM sidecars. Timestamped maintenance backups are
+excluded.
 
 ### GET /admin/v1/diagnostics
 
@@ -405,11 +407,11 @@ Updates global crawler resource and enrichment settings:
 ### POST /admin/v1/index/compact
 
 Runs a storage-maintenance pass. QIndexer checkpoints and pauses active crawls,
-trims legacy document text above `max_stored_text_kb`, optimizes FTS, and runs
-SQLite `VACUUM` to return unused pages to the filesystem. Crawls that were
-active before maintenance are scheduled again afterward.
+trims legacy document text above `max_stored_text_kb`, then optimizes the active
+catalog. SQLite uses `VACUUM`; PostgreSQL uses `ANALYZE`. Crawls that were active
+before maintenance are scheduled again afterward.
 
-The operation can take time and SQLite may need temporary free disk space while
+The operation can take time. SQLite may need temporary free disk space while
 rewriting the database. It does not read, change, or delete source files.
 
 Response:

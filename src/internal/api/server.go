@@ -1370,10 +1370,33 @@ func (s *Server) configView(w http.ResponseWriter, r *http.Request) {
 		TokenSet  bool   `json:"token_set"`
 		TokenFile string `json:"token_file,omitempty"`
 	}
+	type databaseView struct {
+		Driver       string `json:"driver"`
+		DSNSet       bool   `json:"dsn_set"`
+		MaxOpenConns int    `json:"max_open_conns"`
+		MaxIdleConns int    `json:"max_idle_conns"`
+	}
+	type indexView struct {
+		DataDir               string       `json:"data_dir"`
+		Database              databaseView `json:"database"`
+		CommitIntervalSeconds int          `json:"commit_interval_seconds"`
+		MaxResults            int          `json:"max_results"`
+	}
+	index := indexView{
+		DataDir: s.cfg.Index.DataDir,
+		Database: databaseView{
+			Driver:       s.cfg.Index.Database.Driver,
+			DSNSet:       strings.TrimSpace(s.cfg.Index.Database.DSN) != "",
+			MaxOpenConns: s.cfg.Index.Database.MaxOpenConns,
+			MaxIdleConns: s.cfg.Index.Database.MaxIdleConns,
+		},
+		CommitIntervalSeconds: s.cfg.Index.CommitIntervalSeconds,
+		MaxResults:            s.cfg.Index.MaxResults,
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"server":     map[string]any{"bind": s.cfg.Server.Bind, "bind_addresses": s.cfg.Server.BindAddresses, "public_base_url": s.cfg.Server.PublicBaseURL, "auth": redactedAuth{Mode: s.cfg.Server.Auth.Mode, TokenSet: s.searchToken != "", TokenFile: s.cfg.Server.Auth.TokenFile}},
 		"management": map[string]any{"enabled": s.cfg.Management.Enabled, "bind": s.cfg.Management.Bind, "bind_addresses": s.cfg.Management.BindAddresses, "auth": redactedAuth{Mode: s.cfg.Management.Auth.Mode, TokenSet: s.adminToken != "", TokenFile: s.cfg.Management.Auth.TokenFile}},
-		"index":      s.cfg.Index,
+		"index":      index,
 		"crawler":    s.cfg.Crawler,
 		"watcher":    s.cfg.Watcher,
 		"roots":      s.cfg.Roots,
@@ -1392,8 +1415,10 @@ type configBackup struct {
 func (s *Server) redactedConfigBackup() configBackup {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	index := s.cfg.Index
+	index.Database.DSN = ""
 	return configBackup{
-		FormatVersion: "1", ExportedAt: time.Now().UTC(), Index: s.cfg.Index,
+		FormatVersion: "1", ExportedAt: time.Now().UTC(), Index: index,
 		Crawler: s.cfg.Crawler, Watcher: s.cfg.Watcher,
 		Roots: append([]config.RootConfig(nil), s.cfg.Roots...),
 	}
@@ -1543,6 +1568,9 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	// authenticating administrators never wait behind catalog analytics.
 	indexStats, indexStatsReady := s.cat.CachedIndexStats()
 	storage, storageReady := s.cat.CachedStorageStats(maxStoredTextBytes)
+	if storageReady {
+		size = storage.DatabaseBytes
+	}
 	_, backgroundReady := s.cat.CachedBackgroundBacklog()
 	s.cat.WarmAdminStats(maxStoredTextBytes)
 	watcherStats := watcher.Stats{}
@@ -1561,9 +1589,9 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, IndexStatsReady: indexStatsReady, Storage: storage, StorageReady: storageReady, BackgroundReady: backgroundReady, Watcher: watcherStats})
 }
 
-// compactIndex is intentionally a global maintenance operation. VACUUM needs
-// exclusive write access and may require temporary free disk space, so crawls
-// are checkpointed before it begins and resumed only after it completes.
+// compactIndex is intentionally a global maintenance operation. SQLite needs
+// exclusive write access for VACUUM, while PostgreSQL refreshes statistics after
+// text trimming. Crawls are checkpointed before either backend proceeds.
 func (s *Server) compactIndex(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024

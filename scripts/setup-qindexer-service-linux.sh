@@ -7,6 +7,7 @@ DATA_DIR="/var/lib/qindexer"
 SERVICE_NAME="qindexer"
 BINARY_PATH=""
 SIDECAR_MODE="prompt"
+SKIP_DATABASE=0
 
 usage() {
   cat <<'USAGE'
@@ -23,6 +24,7 @@ Options:
   --binary PATH         Source qindexer Linux binary
   --with-sidecars       Install OCR/extraction sidecars without prompting
   --without-sidecars    Do not install OCR/extraction sidecars
+  --skip-database       Require an existing configuration; do not provision PostgreSQL
   -h, --help            Show this help
 USAGE
 }
@@ -36,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --binary) BINARY_PATH="$2"; shift 2 ;;
     --with-sidecars) SIDECAR_MODE="yes"; shift ;;
     --without-sidecars) SIDECAR_MODE="no"; shift ;;
+    --skip-database) SKIP_DATABASE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -56,6 +59,7 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then SUDO="sudo"; fi
 CONFIG_PATH="$CONFIG_DIR/qindexer.yaml"
 LOG_DIR="$DATA_DIR/logs"
 SIDECAR_SCRIPT="$INSTALL_DIR/scripts/setup-sidecars-linux.sh"
+POSTGRES_SCRIPT="$INSTALL_DIR/scripts/setup-postgres-linux.sh"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
 $SUDO install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/scripts"
@@ -64,8 +68,16 @@ $SUDO install -m 0755 "$BINARY_PATH" "$INSTALL_DIR/qindexer"
 if [[ -f "$SCRIPT_DIR/setup-sidecars-linux.sh" ]]; then
   $SUDO install -m 0755 "$SCRIPT_DIR/setup-sidecars-linux.sh" "$SIDECAR_SCRIPT"
 fi
+if [[ -f "$SCRIPT_DIR/setup-postgres-linux.sh" ]]; then
+  $SUDO install -m 0755 "$SCRIPT_DIR/setup-postgres-linux.sh" "$POSTGRES_SCRIPT"
+fi
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
+  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "--skip-database requires an existing configuration with an explicit database backend." >&2; exit 2; }
+  [[ -x "$POSTGRES_SCRIPT" ]] || { echo "Packaged PostgreSQL setup script is missing: $POSTGRES_SCRIPT" >&2; exit 1; }
+  DATABASE_JSON="$($SUDO "$POSTGRES_SCRIPT" --install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR")"
+  DATABASE_DSN="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"dsn":"\([^"]*\)".*/\1/p')"
+  [[ -n "$DATABASE_DSN" ]] || { echo "PostgreSQL setup did not return a QIndexer DSN." >&2; exit 1; }
   $SUDO tee "$CONFIG_PATH" >/dev/null <<CONFIG
 server:
   bind: "127.0.0.1:41973"
@@ -85,11 +97,24 @@ management:
 
 index:
   data_dir: "$DATA_DIR"
+  database:
+    driver: "postgres"
+    dsn: "$DATABASE_DSN"
+    max_open_conns: 32
+    max_idle_conns: 8
 
 roots: []
 CONFIG
   $SUDO chmod 0600 "$CONFIG_PATH"
   echo "Created an empty configuration. Add roots and set the first admin token in the web UI."
+fi
+if $SUDO grep -Fq 'postgres://qindexer:change-me@' "$CONFIG_PATH"; then
+  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "The existing configuration contains the PostgreSQL placeholder DSN, but --skip-database was requested." >&2; exit 2; }
+  [[ -x "$POSTGRES_SCRIPT" ]] || { echo "Packaged PostgreSQL setup script is missing: $POSTGRES_SCRIPT" >&2; exit 1; }
+  DATABASE_JSON="$($SUDO "$POSTGRES_SCRIPT" --install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR")"
+  DATABASE_DSN="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"dsn":"\([^"]*\)".*/\1/p')"
+  [[ -n "$DATABASE_DSN" ]] || { echo "PostgreSQL setup did not return a QIndexer DSN." >&2; exit 1; }
+  $SUDO sed -i "s|^    dsn:.*|    dsn: \"$DATABASE_DSN\"|" "$CONFIG_PATH"
 fi
 
 if [[ "$SIDECAR_MODE" == "prompt" && -t 0 ]]; then

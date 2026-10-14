@@ -2,6 +2,7 @@ param(
   [string]$InstallDir = "C:\Program Files\QIndexer",
   [string]$ConfigPath = "",
   [string]$BinaryPath = "",
+  [switch]$SkipDatabase,
   [switch]$InstallSidecars,
   [switch]$InstallService,
   [switch]$StartService,
@@ -45,6 +46,7 @@ function Set-PrivateAcl {
 $repoRoot = Resolve-RepoRoot
 if (-not $BinaryPath) {
   $candidates = @(
+    (Join-Path $repoRoot "qindexer.exe"),
     (Join-Path $repoRoot "qindexer_windows_amd64.exe"),
     (Join-Path $repoRoot "outputs\bin\qindexer_windows_amd64.exe"),
     (Join-Path $repoRoot "src\dist\qindexer_windows_amd64.exe")
@@ -65,23 +67,53 @@ New-Item -ItemType Directory -Force -Path $binDir, $scriptDir, $configDir, $data
 $installedBinary = Join-Path $binDir "qindexer.exe"
 Copy-Item -LiteralPath $BinaryPath -Destination $installedBinary -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-sidecars-windows.ps1") -Destination (Join-Path $scriptDir "setup-sidecars-windows.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-postgres-windows.ps1") -Destination (Join-Path $scriptDir "setup-postgres-windows.ps1") -Force
 
 if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
   Copy-Item -LiteralPath $ConfigPath -Destination (Join-Path $configDir "qindexer.yaml") -Force
 } elseif (-not (Test-Path -LiteralPath (Join-Path $configDir "qindexer.yaml"))) {
+  if ($SkipDatabase) {
+    throw "-SkipDatabase requires -ConfigPath when no existing QIndexer configuration is installed."
+  }
+  Require-Admin
+  $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+  if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
   $sampleConfig = @(
     (Join-Path $repoRoot "configs\example.yaml"),
     (Join-Path $repoRoot "src\configs\example.yaml")
   ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
   if (-not $sampleConfig) { throw "No example config found in the release bundle or repository." }
   Copy-Item -LiteralPath $sampleConfig -Destination (Join-Path $configDir "qindexer.yaml") -Force
+  $installedConfig = Join-Path $configDir "qindexer.yaml"
+  $configText = Get-Content -LiteralPath $installedConfig -Raw
+  $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
+      param($match)
+      return $match.Groups[1].Value + '"' + $database.dsn + '"'
+    })
+  Set-Content -LiteralPath $installedConfig -Value $configText -Encoding utf8
+}
+
+$installedConfig = Join-Path $configDir "qindexer.yaml"
+if (Test-Path -LiteralPath $installedConfig) {
+  $configText = Get-Content -LiteralPath $installedConfig -Raw
+  $needsProvisionedDatabase = $configText -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:change-me@'
+  if ($needsProvisionedDatabase) {
+    if ($SkipDatabase) { throw "The supplied configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
+    Require-Admin
+    $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+    if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
+    $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
+        param($match)
+        return $match.Groups[1].Value + '"' + $database.dsn + '"'
+      })
+    Set-Content -LiteralPath $installedConfig -Value $configText -Encoding utf8
+  }
 }
 
 Set-PrivateAcl -Path $configDir
 Set-PrivateAcl -Path $dataDir
 Set-PrivateAcl -Path $logDir
 Set-PrivateAcl -Path $scriptDir
-$installedConfig = Join-Path $configDir "qindexer.yaml"
 if (Test-Path -LiteralPath $installedConfig) {
   Set-PrivateAcl -Path $installedConfig
 }

@@ -50,11 +50,26 @@ func TestEmptyRootFirstRunConfigurationIsValid(t *testing.T) {
 	cfg := Config{
 		Server:     ServerConfig{Bind: "127.0.0.1:41973", Auth: AuthConfig{Mode: "static-token"}},
 		Management: ManagementConfig{Enabled: true, Bind: "127.0.0.1:41974", Auth: AuthConfig{Mode: "admin-token"}},
-		Index:      IndexConfig{DataDir: "data"},
+		Index:      IndexConfig{DataDir: "data", Database: DatabaseConfig{Driver: "sqlite"}},
 		Roots:      []RootConfig{},
 	}
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("empty first-run configuration should validate: %v", err)
+	}
+}
+
+func TestDatabaseDefaultsToPostgresAndRequiresDSN(t *testing.T) {
+	cfg := Config{Server: ServerConfig{Bind: "127.0.0.1:41973"}, Management: ManagementConfig{Bind: "127.0.0.1:41974"}}
+	cfg.ApplyDefaults()
+	if cfg.Index.Database.Driver != "postgres" {
+		t.Fatalf("database driver = %q, want postgres", cfg.Index.Database.Driver)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected default postgres configuration without a DSN to fail validation")
+	}
+	cfg.Index.Database.DSN = "postgres://qindexer:secret@127.0.0.1:5432/qindexer?sslmode=disable"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected postgres configuration with a DSN to validate: %v", err)
 	}
 }

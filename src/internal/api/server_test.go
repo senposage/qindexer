@@ -18,6 +18,10 @@ import (
 	"qindexer/internal/crawler"
 )
 
+func sqliteTestIndex() config.IndexConfig {
+	return config.IndexConfig{Database: config.DatabaseConfig{Driver: "sqlite"}}
+}
+
 func TestAdminBootstrapLocksManagementUntilTokenIsSet(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
@@ -27,7 +31,7 @@ func TestAdminBootstrapLocksManagementUntilTokenIsSet(t *testing.T) {
 	defer cat.Close()
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &config.Config{}
+	cfg := &config.Config{Index: sqliteTestIndex()}
 	if err := config.Save(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +118,7 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cat.Close()
-	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	cfg := &config.Config{Index: sqliteTestIndex(), Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
 	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "sixteen-character-token", "sixteen-character-token")
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/metrics", nil)
 	req.Header.Set("Authorization", "Bearer sixteen-character-token")
@@ -122,6 +126,33 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 	server.AdminHandler().ServeHTTP(result, req)
 	if result.Code != http.StatusOK || !bytes.Contains(result.Body.Bytes(), []byte(`"index_size_bytes"`)) {
 		t.Fatalf("expected index size metric, got %d: %s", result.Code, result.Body.String())
+	}
+}
+
+func TestConfigViewAndExportRedactDatabaseDSN(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	secretDSN := "postgres://qindexer:private-password@db.example/qindexer"
+	cfg := &config.Config{
+		Index:      config.IndexConfig{Database: config.DatabaseConfig{Driver: "postgres", DSN: secretDSN, MaxOpenConns: 8, MaxIdleConns: 4}},
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+	}
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	for _, endpoint := range []string{"/admin/v1/config", "/admin/v1/config/export"} {
+		request := httptest.NewRequest(http.MethodGet, endpoint, nil)
+		request.Header.Set("Authorization", "Bearer sixteen-character-token")
+		result := httptest.NewRecorder()
+		server.AdminHandler().ServeHTTP(result, request)
+		if result.Code != http.StatusOK {
+			t.Fatalf("%s returned %d: %s", endpoint, result.Code, result.Body.String())
+		}
+		if bytes.Contains(result.Body.Bytes(), []byte(secretDSN)) {
+			t.Fatalf("%s leaked database DSN: %s", endpoint, result.Body.String())
+		}
 	}
 }
 
@@ -227,7 +258,7 @@ func TestUpdateCrawlerSettingsSavesAdaptiveThrottle(t *testing.T) {
 	}
 	defer cat.Close()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	cfg := &config.Config{Index: sqliteTestIndex(), Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
 	if err := config.Save(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +332,7 @@ func TestUpdateNetworkSettingsSavesMultipleBindAddresses(t *testing.T) {
 	}
 	defer cat.Close()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &config.Config{Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	cfg := &config.Config{Index: sqliteTestIndex(), Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
 	if err := config.Save(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -348,6 +379,7 @@ func TestUpdateRootRulesPreservesPreviousRootPathAsAlias(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
+		Index:      sqliteTestIndex(),
 		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
 		Roots:      []config.RootConfig{{ID: "shared", Path: `X:\`, Enabled: true}},
 	}
@@ -382,6 +414,7 @@ func TestUpdateRootRulesSavesPathWithoutBlockingOnRepair(t *testing.T) {
 	defer cat.Close()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
+		Index:      sqliteTestIndex(),
 		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
 		Roots:      []config.RootConfig{{ID: "shared", Path: `X:\`, Enabled: true}},
 	}
@@ -428,6 +461,7 @@ func TestUpdateRootRulesPrunesNowExcludedIndexedRecords(t *testing.T) {
 	defer cat.Close()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
+		Index:      sqliteTestIndex(),
 		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
 		Roots:      []config.RootConfig{{ID: "shared", Path: `X:\`, Enabled: true}},
 	}
@@ -481,6 +515,7 @@ func TestRepairRootIndexRewritesAliasPaths(t *testing.T) {
 	defer cat.Close()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
+		Index:      sqliteTestIndex(),
 		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
 		Roots: []config.RootConfig{{
 			ID:      "shared",
@@ -543,6 +578,7 @@ func TestRepairRootIndexMergesSubfolderAliasUnderBroadMountRoot(t *testing.T) {
 	defer cat.Close()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
+		Index:      sqliteTestIndex(),
 		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
 		Roots: []config.RootConfig{{
 			ID:      "legal",

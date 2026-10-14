@@ -45,7 +45,8 @@ http://127.0.0.1:41973/v1
 
 - `cmd/qindexer`: CLI entry point.
 - `internal/api`: search/admin HTTP API.
-- `internal/catalog`: SQLite catalog and FTS search.
+- `internal/catalog`: PostgreSQL catalog and full-text search, with an
+  optional SQLite backend for portable deployments.
 - `internal/config`: YAML config model and validation.
 - `internal/crawler`: root crawling, rules, throttling, and background work.
 - `internal/extract`: content/OCR/hash extraction helpers.

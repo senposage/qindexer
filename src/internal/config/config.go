@@ -42,9 +42,19 @@ type AuthConfig struct {
 }
 
 type IndexConfig struct {
-	DataDir               string `yaml:"data_dir" json:"data_dir"`
-	CommitIntervalSeconds int    `yaml:"commit_interval_seconds" json:"commit_interval_seconds"`
-	MaxResults            int    `yaml:"max_results" json:"max_results"`
+	DataDir               string         `yaml:"data_dir" json:"data_dir"`
+	Database              DatabaseConfig `yaml:"database" json:"database"`
+	CommitIntervalSeconds int            `yaml:"commit_interval_seconds" json:"commit_interval_seconds"`
+	MaxResults            int            `yaml:"max_results" json:"max_results"`
+}
+
+// DatabaseConfig selects the catalog backend. PostgreSQL is the default for
+// durable multi-root indexes; SQLite remains available for portable installs.
+type DatabaseConfig struct {
+	Driver       string `yaml:"driver" json:"driver"`
+	DSN          string `yaml:"dsn" json:"dsn,omitempty"`
+	MaxOpenConns int    `yaml:"max_open_conns" json:"max_open_conns"`
+	MaxIdleConns int    `yaml:"max_idle_conns" json:"max_idle_conns"`
 }
 
 type CrawlerConfig struct {
@@ -210,6 +220,23 @@ func (c *Config) applyDefaults() {
 	if c.Index.DataDir == "" {
 		c.Index.DataDir = "data"
 	}
+	if c.Index.Database.Driver == "" {
+		c.Index.Database.Driver = "postgres"
+	}
+	if c.Index.Database.MaxOpenConns <= 0 {
+		if strings.EqualFold(c.Index.Database.Driver, "sqlite") {
+			c.Index.Database.MaxOpenConns = 8
+		} else {
+			c.Index.Database.MaxOpenConns = 32
+		}
+	}
+	if c.Index.Database.MaxIdleConns <= 0 {
+		if strings.EqualFold(c.Index.Database.Driver, "sqlite") {
+			c.Index.Database.MaxIdleConns = 4
+		} else {
+			c.Index.Database.MaxIdleConns = 8
+		}
+	}
 	if c.Index.CommitIntervalSeconds <= 0 {
 		c.Index.CommitIntervalSeconds = 5
 	}
@@ -315,6 +342,19 @@ func (c *Config) applyDefaults() {
 func (c *Config) ApplyDefaults() { c.applyDefaults() }
 
 func (c *Config) Validate() error {
+	driver := strings.ToLower(strings.TrimSpace(c.Index.Database.Driver))
+	if driver != "sqlite" && driver != "postgres" && driver != "postgresql" {
+		return fmt.Errorf("index database driver must be postgres or sqlite")
+	}
+	if (driver == "postgres" || driver == "postgresql") && strings.TrimSpace(c.Index.Database.DSN) == "" {
+		return errors.New("index database dsn is required for postgres")
+	}
+	if c.Index.Database.MaxOpenConns < 1 || c.Index.Database.MaxOpenConns > 256 {
+		return fmt.Errorf("index database max_open_conns must be between 1 and 256")
+	}
+	if c.Index.Database.MaxIdleConns < 0 || c.Index.Database.MaxIdleConns > c.Index.Database.MaxOpenConns {
+		return fmt.Errorf("index database max_idle_conns must be between 0 and max_open_conns")
+	}
 	if err := validateBindAddresses("server", c.Server.BindAddresses); err != nil {
 		return err
 	}

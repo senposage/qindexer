@@ -4,6 +4,7 @@ param(
   [string]$BinaryPath = "",
   [string]$NssmPath = "",
   [string]$ServiceName = "QIndexer",
+  [switch]$SkipDatabase,
   [switch]$InstallSidecars
 )
 
@@ -42,7 +43,11 @@ function Find-Binary {
 }
 
 function Write-EmptyConfig {
-  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$DataDir)
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$DataDir,
+    [Parameter(Mandatory = $true)][string]$DatabaseDSN
+  )
   @"
 server:
   bind: "127.0.0.1:41973"
@@ -62,6 +67,11 @@ management:
 
 index:
   data_dir: "$DataDir"
+  database:
+    driver: "postgres"
+    dsn: "$DatabaseDSN"
+    max_open_conns: 32
+    max_idle_conns: 8
 
 roots: []
 "@ | Set-Content -LiteralPath $Path -Encoding utf8
@@ -91,9 +101,31 @@ $sidecarSource = Join-Path $PSScriptRoot "setup-sidecars-windows.ps1"
 if (Test-Path -LiteralPath $sidecarSource) {
   Copy-Item -LiteralPath $sidecarSource -Destination (Join-Path $scriptsDir "setup-sidecars-windows.ps1") -Force
 }
+$postgresSource = Join-Path $PSScriptRoot "setup-postgres-windows.ps1"
+if (Test-Path -LiteralPath $postgresSource) {
+  Copy-Item -LiteralPath $postgresSource -Destination (Join-Path $scriptsDir "setup-postgres-windows.ps1") -Force
+}
 if (-not (Test-Path -LiteralPath $configPath)) {
-  Write-EmptyConfig -Path $configPath -DataDir $dataDir
+  if ($SkipDatabase) { throw "-SkipDatabase requires an existing configuration with an explicit database backend." }
+  $postgresScript = Join-Path $scriptsDir "setup-postgres-windows.ps1"
+  if (-not (Test-Path -LiteralPath $postgresScript)) { throw "The packaged PostgreSQL setup script is missing: $postgresScript" }
+  $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+  if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
+  Write-EmptyConfig -Path $configPath -DataDir $dataDir -DatabaseDSN $database.dsn
   Write-Host "Created an empty configuration. Add roots and set the first admin token in the web UI."
+}
+if ((Get-Content -LiteralPath $configPath -Raw) -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:change-me@') {
+  if ($SkipDatabase) { throw "The existing configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
+  $postgresScript = Join-Path $scriptsDir "setup-postgres-windows.ps1"
+  if (-not (Test-Path -LiteralPath $postgresScript)) { throw "The packaged PostgreSQL setup script is missing: $postgresScript" }
+  $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir | ConvertFrom-Json
+  if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
+  $configText = Get-Content -LiteralPath $configPath -Raw
+  $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
+      param($match)
+      return $match.Groups[1].Value + '"' + $database.dsn + '"'
+    })
+  Set-Content -LiteralPath $configPath -Value $configText -Encoding utf8
 }
 
 $installSidecars = $InstallSidecars

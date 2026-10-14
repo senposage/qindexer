@@ -798,3 +798,74 @@ the ordinary `query`, match modes, scopes, sorts, and pagination. QSurfer can
 discover this through `features.structured_boolean: true` and the `boolean`
 entry in `supported_filters`. An empty term or a `not`-only filter returns a
 structured `400 invalid_boolean_filter`.
+
+## 2026-09-13 Requested: Field-Scoped Boolean Terms
+
+QSurfer needs an explicit cross-field AND mode: a normal file-name/path query
+must be able to require a separate phrase inside indexed document content.
+Example: query `divorce` matches name/path while required Boolean `settlement`
+matches `content`; a returned file must satisfy both. This must not use the
+current shared `match_fields` behavior, which applies the same fields to the
+main query and every Boolean term.
+
+Please extend the request contract compatibly so the primary query fields and
+Boolean fields can be selected independently. A natural shape is
+`filters.boolean.match_fields: ["content"]`, with `filters.match_fields`
+continuing to apply only to the primary `query`; an equivalent documented
+schema is fine. `all`, `any`, and `not` must each evaluate in the Boolean field
+set, while still combining with the primary query as an AND. Preserve the
+existing field-agnostic behavior when the new field selector is absent.
+
+Requirements: advertise the capability/filter; support prefix and exact modes;
+retain literal escaping; preserve scopes, pagination, sorting, and highlights;
+and add tests proving a filename/path match alone is rejected when its required
+content phrase is absent, and vice versa. QSurfer will only emit the new field
+selector after the capability is available.
+
+## Later: Login Feedback
+
+The management UI now redirects to `/roots` after a successful Connect, but
+remote instances can take a moment to load the authenticated dashboard. Add a
+compact spinner/progress state to the Connect button while the request is in
+flight, then clear it on success or authentication failure.
+
+## Later: Thumbnail Generation
+
+Add opt-in, low-priority thumbnail generation after structural indexing. Keep
+thumbnail cache files outside SQLite, keyed by the indexed file signature plus
+page/frame and requested dimensions; do not store image BLOBs in the search
+database.
+
+- Images: use native Go decoders/resizing for common raster formats.
+- PDFs: use the existing Ghostscript dependency to render page one.
+- Office documents: later add LibreOffice headless conversion to a temporary
+  PDF, then render page one through the PDF path.
+- Video containers (MPEG, MKV, AVI, MOV, MP4): add optional FFmpeg and
+  ffprobe sidecars. ffprobe records container/stream metadata; ffmpeg renders
+  one representative frame into a small JPEG or WebP thumbnail.
+
+Video work needs its own disabled-by-default, low-concurrency worker pool with
+strict file-size, duration, seek, and execution-time limits. It must remain
+behind namespace indexing and ordinary content extraction/OCR, especially for
+SMB and VPN roots.
+
+## 2026-10-14: PostgreSQL Default
+
+QIndexer now uses PostgreSQL as the default catalog backend. SQLite remains an
+explicit portable opt-in through `index.database.driver: sqlite`.
+
+- Fresh QIndexer package installs provision a private loopback PostgreSQL
+  service, `qindexer` database, and local application login when creating the
+  first config. QSurfer must not create or manage this DSN; config and export
+  responses redact it.
+- Do not assume `qsurfer-search.db` exists or derive size from `data_dir`.
+  Read `/admin/v1/metrics.index_size_bytes` (and storage metrics when present)
+  for the active catalog size. It reports the PostgreSQL database size for the
+  default backend and the SQLite file plus live sidecars only when SQLite is
+  explicitly selected.
+- QSurfer-managed installs should invoke the packaged QIndexer installer
+  without a placeholder database config, then let the admin UI collect the
+  first token and roots. A supplied external PostgreSQL DSN or explicit SQLite
+  config remains supported.
+- Existing SQLite catalogs are intentionally not migrated. A PostgreSQL switch
+  starts with a fresh index.

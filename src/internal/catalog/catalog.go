@@ -16,11 +16,12 @@ import (
 
 	"qindexer/internal/extract"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
 type Catalog struct {
-	db          *sql.DB
+	db          *catalogDB
 	writeMu     sync.Mutex
 	statsMu     sync.Mutex
 	stats       indexStatsCache
@@ -82,8 +83,8 @@ type IndexStats struct {
 }
 
 // StorageStats makes index growth observable without exposing document text.
-// DatabaseBytes includes allocated SQLite pages; FreeBytes is reclaimable by a
-// deliberate compact operation.
+// DatabaseBytes is the allocated catalog size. FreeBytes is reported for
+// SQLite; PostgreSQL space reclamation is managed by its autovacuum process.
 type StorageStats struct {
 	DatabaseBytes      int64 `json:"database_bytes"`
 	FreeBytes          int64 `json:"free_bytes"`
@@ -255,7 +256,59 @@ type RequestError struct {
 
 func (e *RequestError) Error() string { return e.Message }
 
+type OpenOptions struct {
+	DataDir      string
+	Driver       string
+	DSN          string
+	MaxOpenConns int
+	MaxIdleConns int
+}
+
 func Open(ctx context.Context, dataDir string) (*Catalog, error) {
+	return OpenWithOptions(ctx, OpenOptions{DataDir: dataDir, Driver: string(backendSQLite), MaxOpenConns: 8, MaxIdleConns: 4})
+}
+
+func OpenWithOptions(ctx context.Context, options OpenOptions) (*Catalog, error) {
+	driver := backend(strings.ToLower(strings.TrimSpace(options.Driver)))
+	if driver == "postgresql" {
+		driver = backendPostgres
+	}
+	if driver == "" {
+		driver = backendSQLite
+	}
+	if driver != backendSQLite && driver != backendPostgres {
+		return nil, fmt.Errorf("unsupported catalog driver %q", options.Driver)
+	}
+	if options.MaxOpenConns <= 0 {
+		options.MaxOpenConns = 8
+	}
+	if options.MaxIdleConns < 0 || options.MaxIdleConns > options.MaxOpenConns {
+		options.MaxIdleConns = min(4, options.MaxOpenConns)
+	}
+	if driver == backendPostgres {
+		if strings.TrimSpace(options.DSN) == "" {
+			return nil, errors.New("postgres catalog requires a DSN")
+		}
+		raw, err := sql.Open("pgx", options.DSN)
+		if err != nil {
+			return nil, err
+		}
+		raw.SetMaxOpenConns(options.MaxOpenConns)
+		raw.SetMaxIdleConns(options.MaxIdleConns)
+		raw.SetConnMaxIdleTime(5 * time.Minute)
+		raw.SetConnMaxLifetime(45 * time.Minute)
+		c := &Catalog{db: &catalogDB{raw: raw, backend: driver}}
+		if err := raw.PingContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, fmt.Errorf("connect postgres catalog: %w", err)
+		}
+		if err := c.migratePostgres(ctx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		return c, nil
+	}
+	dataDir := options.DataDir
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, err
 	}
@@ -267,16 +320,16 @@ func Open(ctx context.Context, dataDir string) (*Catalog, error) {
 	// migration leaves later reader/writer connections with SQLite's zero busy
 	// timeout, which turns ordinary writer contention into SQLITE_BUSY errors.
 	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(ON)&_pragma=wal_autocheckpoint(1000)"
-	db, err := sql.Open("sqlite", dsn)
+	raw, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	// WAL supports concurrent readers; a bounded pool prevents one slow client from serializing every search.
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
-	c := &Catalog{db: db}
+	raw.SetMaxOpenConns(options.MaxOpenConns)
+	raw.SetMaxIdleConns(options.MaxIdleConns)
+	c := &Catalog{db: &catalogDB{raw: raw, backend: driver}}
 	if err := c.migrate(ctx); err != nil {
-		_ = db.Close()
+		_ = raw.Close()
 		return nil, err
 	}
 	return c, nil
@@ -285,6 +338,9 @@ func Open(ctx context.Context, dataDir string) (*Catalog, error) {
 func (c *Catalog) Close() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.db.backend == backendPostgres {
+		return c.db.Close()
+	}
 	_, _ = c.db.Exec(`PRAGMA optimize;`)
 	// A passive checkpoint never blocks shutdown behind an active reader. WAL
 	// recovery is automatic on the next open, so do not force a truncate while
@@ -299,6 +355,10 @@ func (c *Catalog) Close() error {
 // prevents every maintenance cycle from doing any work. Truncation still waits
 // for a quiet write window because it needs a stronger SQLite lock.
 func (c *Catalog) Checkpoint(ctx context.Context) error {
+	if c.db.backend == backendPostgres {
+		_, err := c.db.ExecContext(ctx, `ANALYZE documents`)
+		return err
+	}
 	var busy, frames, checkpointed int64
 	if err := c.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &checkpointed); err != nil {
 		return err
@@ -330,6 +390,19 @@ func (c *Catalog) storageStats(ctx context.Context, maxTextBytes int64, force bo
 	}
 	c.storageMu.Unlock()
 	var stats StorageStats
+	if c.db.backend == backendPostgres {
+		if err := c.db.QueryRowContext(ctx, `SELECT pg_database_size(current_database())`).Scan(&stats.DatabaseBytes); err != nil {
+			return stats, err
+		}
+		if err := c.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(content_text)), 0), COALESCE(SUM(CASE WHEN length(content_text) > ? THEN 1 ELSE 0 END), 0) FROM documents`, maxTextBytes).Scan(&stats.DocumentTextBytes, &stats.OversizedDocuments); err != nil {
+			return stats, err
+		}
+		stats.MaxTextBytes = maxTextBytes
+		c.storageMu.Lock()
+		c.storage = storageStatsCache{at: time.Now(), maxTextBytes: maxTextBytes, value: stats}
+		c.storageMu.Unlock()
+		return stats, nil
+	}
 	var pageCount, freePages, pageSize int64
 	if err := c.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
 		return stats, err
@@ -418,14 +491,23 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 			return result, err
 		}
 	}
-	if _, err := c.db.ExecContext(ctx, `PRAGMA optimize`); err != nil {
-		return result, err
-	}
-	if _, err := c.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return result, err
-	}
-	if _, err := c.db.ExecContext(ctx, `VACUUM`); err != nil {
-		return result, err
+	if c.db.backend == backendPostgres {
+		// PostgreSQL's autovacuum owns physical-space reclamation. A manual
+		// VACUUM is both disruptive on a busy catalog and does not shrink the
+		// database file; refresh planner statistics instead.
+		if _, err := c.db.ExecContext(ctx, `ANALYZE documents`); err != nil {
+			return result, err
+		}
+	} else {
+		if _, err := c.db.ExecContext(ctx, `PRAGMA optimize`); err != nil {
+			return result, err
+		}
+		if _, err := c.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			return result, err
+		}
+		if _, err := c.db.ExecContext(ctx, `VACUUM`); err != nil {
+			return result, err
+		}
 	}
 	result.After, err = c.storageStats(ctx, maxTextBytes, true)
 	return result, err
@@ -519,7 +601,8 @@ func (c *Catalog) PruneDocuments(ctx context.Context, rootID string, keep func(p
 		return 0, errors.New("document prune rule is required")
 	}
 	const batchSize = 500
-	var afterRowID, removed int64
+	var afterID string
+	var removed int64
 	for {
 		c.writeMu.Lock()
 		tx, err := c.db.BeginTx(ctx, nil)
@@ -527,17 +610,17 @@ func (c *Catalog) PruneDocuments(ctx context.Context, rootID string, keep func(p
 			c.writeMu.Unlock()
 			return removed, err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT rowid, path, extension, is_folder FROM documents
-			WHERE root_id = ? AND rowid > ? ORDER BY rowid LIMIT ?`, rootID, afterRowID, batchSize)
+		rows, err := tx.QueryContext(ctx, `SELECT id, path, extension, is_folder FROM documents
+			WHERE root_id = ? AND id > ? ORDER BY id LIMIT ?`, rootID, afterID, batchSize)
 		if err != nil {
 			_ = tx.Rollback()
 			c.writeMu.Unlock()
 			return removed, err
 		}
-		rowIDs := make([]int64, 0, batchSize)
+		rowIDs := make([]string, 0, batchSize)
 		count := 0
 		for rows.Next() {
-			var rowID int64
+			var rowID string
 			var path, extension string
 			var isFolder bool
 			if err := rows.Scan(&rowID, &path, &extension, &isFolder); err != nil {
@@ -546,7 +629,7 @@ func (c *Catalog) PruneDocuments(ctx context.Context, rootID string, keep func(p
 				c.writeMu.Unlock()
 				return removed, err
 			}
-			afterRowID = rowID
+			afterID = rowID
 			count++
 			if !keep(path, extension, isFolder) {
 				rowIDs = append(rowIDs, rowID)
@@ -563,7 +646,7 @@ func (c *Catalog) PruneDocuments(ctx context.Context, rootID string, keep func(p
 			for i, rowID := range rowIDs {
 				args[i] = rowID
 			}
-			result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE rowid IN (`+placeholders+`)`, args...)
+			result, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id IN (`+placeholders+`)`, args...)
 			if err != nil {
 				_ = tx.Rollback()
 				c.writeMu.Unlock()
@@ -591,7 +674,7 @@ func (c *Catalog) DeactivateRoot(ctx context.Context, rootID string) (int64, err
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO deleted_roots(root_id, deleted_at) VALUES (?, ?)`, rootID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, c.deletedRootUpsertSQL(), rootID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM folder_activity WHERE root_id = ?`, rootID); err != nil {
@@ -830,7 +913,7 @@ func (c *Catalog) rewriteRootPathLegacy(ctx context.Context, rootID, oldRootPath
 		if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ? AND normalized_path = ?`, rootID, NormalizePath(path)); err != nil {
 			return 0, 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO crawl_checkpoints(root_id, normalized_path, path, completed_at) VALUES (?, ?, ?, ?)`,
+		if _, err := tx.ExecContext(ctx, c.checkpointUpsertSQL(),
 			rootID, NormalizePath(newPath), newPath, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return 0, 0, err
 		}
@@ -934,7 +1017,7 @@ func (c *Catalog) RepairEmbeddedRootPath(ctx context.Context, rootID, canonicalR
 		if _, err := tx.ExecContext(ctx, `DELETE FROM crawl_checkpoints WHERE root_id = ? AND normalized_path = ?`, rootID, NormalizePath(path)); err != nil {
 			return 0, 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO crawl_checkpoints(root_id, normalized_path, path, completed_at) VALUES (?, ?, ?, ?)`,
+		if _, err := tx.ExecContext(ctx, c.checkpointUpsertSQL(),
 			rootID, NormalizePath(newPath), newPath, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return 0, 0, err
 		}
@@ -1145,8 +1228,8 @@ func (c *Catalog) CachedBackgroundBacklog() (BackgroundBacklog, bool) {
 }
 
 // WarmAdminStats refreshes expensive dashboard aggregates in one low-priority
-// sequence. SQLite permits concurrent WAL readers, but running these table
-// scans together causes needless I/O contention on large catalogs.
+// sequence. Running full-table scans together creates needless I/O contention
+// on large catalogs, regardless of backend.
 func (c *Catalog) WarmAdminStats(maxTextBytes int64) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
@@ -1185,6 +1268,27 @@ func stringsToAny(values []string) []any {
 		args[i] = values[i]
 	}
 	return args
+}
+
+func (c *Catalog) deletedRootUpsertSQL() string {
+	if c.db.backend == backendPostgres {
+		return `INSERT INTO deleted_roots(root_id, deleted_at) VALUES (?, ?) ON CONFLICT(root_id) DO UPDATE SET deleted_at = EXCLUDED.deleted_at`
+	}
+	return `INSERT OR REPLACE INTO deleted_roots(root_id, deleted_at) VALUES (?, ?)`
+}
+
+func (c *Catalog) checkpointUpsertSQL() string {
+	if c.db.backend == backendPostgres {
+		return `INSERT INTO crawl_checkpoints(root_id, normalized_path, path, completed_at) VALUES (?, ?, ?, ?) ON CONFLICT(root_id, normalized_path) DO UPDATE SET path = EXCLUDED.path, completed_at = EXCLUDED.completed_at`
+	}
+	return `INSERT OR REPLACE INTO crawl_checkpoints(root_id, normalized_path, path, completed_at) VALUES (?, ?, ?, ?)`
+}
+
+func (c *Catalog) rootStateInsertSQL() string {
+	if c.db.backend == backendPostgres {
+		return `INSERT INTO root_states(root_id) VALUES (?) ON CONFLICT(root_id) DO NOTHING`
+	}
+	return `INSERT OR IGNORE INTO root_states(root_id) VALUES (?)`
 }
 
 func (c *Catalog) migrate(ctx context.Context) error {
@@ -1406,7 +1510,7 @@ func (c *Catalog) ensureFTSTriggers(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func createFTSTriggers(ctx context.Context, tx *sql.Tx) error {
+func createFTSTriggers(ctx context.Context, tx *catalogTx) error {
 	statements := []string{
 		`CREATE TRIGGER IF NOT EXISTS documents_fts_ai AFTER INSERT ON documents BEGIN
 			INSERT INTO documents_fts(rowid, id, root_id, name, path, extension, content_text)
@@ -1547,7 +1651,7 @@ func Signature(size int64, modifiedAt time.Time) string {
 func (c *Catalog) NextGeneration(ctx context.Context, rootID string) (int64, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err := c.db.ExecContext(ctx, `INSERT OR IGNORE INTO root_states(root_id) VALUES (?)`, rootID)
+	_, err := c.db.ExecContext(ctx, c.rootStateInsertSQL(), rootID)
 	if err != nil {
 		return 0, err
 	}
@@ -1632,11 +1736,11 @@ func (c *Catalog) MarkOpenCrawlsInterrupted(ctx context.Context) (int64, error) 
 func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResult, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	var deleted int
+	var deleted bool
 	if err := c.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM deleted_roots WHERE root_id = ?)`, doc.RootID).Scan(&deleted); err != nil {
 		return UpsertResult{}, err
 	}
-	if deleted != 0 {
+	if deleted {
 		return UpsertResult{Unchanged: true}, nil
 	}
 	if doc.AccessStatus == "" {
@@ -1732,12 +1836,12 @@ func (c *Catalog) UpsertDocuments(ctx context.Context, docs []Document) ([]Upser
 	return results, nil
 }
 
-func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc Document) (UpsertResult, error) {
-	var deleted int
+func upsertDocumentTx(ctx context.Context, tx *catalogTx, doc Document) (UpsertResult, error) {
+	var deleted bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM deleted_roots WHERE root_id = ?)`, doc.RootID).Scan(&deleted); err != nil {
 		return UpsertResult{}, err
 	}
-	if deleted != 0 {
+	if deleted {
 		return UpsertResult{Unchanged: true}, nil
 	}
 	if doc.AccessStatus == "" {
@@ -1792,7 +1896,7 @@ func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc Document) (UpsertResu
 	return UpsertResult{Updated: true}, nil
 }
 
-func upsertFTS(ctx context.Context, tx *sql.Tx, id, rootID, name, path, extension, content string) error {
+func upsertFTS(ctx context.Context, tx *catalogTx, id, rootID, name, path, extension, content string) error {
 	// documents_fts is an external-content FTS table maintained by SQLite
 	// triggers. Keeping this compatibility helper avoids scattering storage
 	// details through callers while ensuring document text is stored only once.
@@ -2284,6 +2388,9 @@ func descendantPathLike(normalized string) string {
 }
 
 func (c *Catalog) Search(ctx context.Context, req SearchRequest, maxResults int) (SearchResponse, error) {
+	if c.db.backend == backendPostgres {
+		return c.searchPostgres(ctx, req, maxResults)
+	}
 	start := time.Now()
 	if req.Offset < 0 {
 		return SearchResponse{}, &RequestError{Code: "invalid_offset", Message: "offset must be zero or greater"}

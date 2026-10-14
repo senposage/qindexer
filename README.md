@@ -2,11 +2,11 @@
 
 QIndexer is a portable filesystem indexer and HTTP search service for QSurfer.
 It crawls local disks, mapped drives, UNC shares, Linux mounts, and NAS trees
-into a SQLite-backed catalog, then exposes QSurfer-compatible metadata,
+into a PostgreSQL-backed catalog by default (or SQLite when explicitly selected), then exposes QSurfer-compatible metadata,
 folder, content, and autocomplete search.
 
 QIndexer is built for large office storage: bounded worker pools, checkpointed
-crawls, one serialized SQLite writer, concurrent search reads, incremental
+crawls, a pooled catalog connection layer, concurrent search reads, incremental
 filesystem hints, periodic reconciliation, repair tools, and adaptive CPU/disk
 throttling are included.
 

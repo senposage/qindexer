@@ -50,17 +50,41 @@ management:
 ```yaml
 index:
   data_dir: "data"
+  database:
+    driver: "postgres"
+    dsn: "postgres://qindexer:change-me@127.0.0.1:5432/qindexer?sslmode=disable"
+    max_open_conns: 32
+    max_idle_conns: 8
   commit_interval_seconds: 5
   max_results: 200
 ```
 
-- `data_dir`: SQLite database directory.
+- `data_dir`: local data directory for logs, diagnostics, and temporary service files.
+- `database.driver`: `postgres` (the default) or `sqlite` for a compact,
+  single-host installation.
+- `database.dsn`: required for `postgres`, for example
+  `postgres://qindexer:password@db.example:5432/qindexer?sslmode=require`.
+- `database.max_open_conns` and `database.max_idle_conns`: catalog connection
+  pool limits. PostgreSQL defaults to `32` open and `8` idle connections so
+  search clients are not held behind crawler reads. Lower these if the database
+  server has a smaller connection budget.
 - `commit_interval_seconds`: reserved for future catalog batching; it does not
   alter current write behavior.
 - `max_results`: server-side maximum page size.
 
-QIndexer stores `qsurfer-search.db`, `qsurfer-search.db-wal`, and
-`qsurfer-search.db-shm` in `data_dir`.
+PostgreSQL uses the database named by `database.dsn`; `data_dir` does not hold
+an index copy. Set `database.driver: sqlite` to use `qsurfer-search.db` and
+its WAL sidecars in `data_dir` instead.
+
+The packaged QIndexer installers provision a private loopback PostgreSQL
+instance, database, and least-privilege login when they create the first
+configuration. They write the generated DSN into the protected local config;
+QSurfer does not need to create or manage it. For manual or remote-database
+deployments, create the database and login before first start. The service
+creates its own tables and indexes, then performs a fresh crawl; it does not
+migrate an existing SQLite catalog into PostgreSQL. Keep the DSN out of config
+exports and source control. A TLS-enabled deployment should use an appropriate
+`sslmode` rather than the local-only `sslmode=disable` example.
 
 ## Crawler
 
@@ -151,7 +175,7 @@ extractor implementation.
 `max_stored_text_kb` caps normalized text retained for each document. The
 default is 1024 KiB and the accepted range is 64-1024 KiB. This limit applies
 to ordinary extraction and OCR; it keeps a pathological or unusually verbose
-document from inflating the SQLite index.
+document from inflating the index.
 
 Content extraction has an independent process-wide worker pool. It runs after
 structural indexing is idle, alongside the OCR and hashing pools.
