@@ -13,7 +13,12 @@ function New-Secret {
   param([int]$Length = 32)
   $alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
   $bytes = New-Object byte[] ($Length * 2)
-  [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $rng.GetBytes($bytes)
+  } finally {
+    $rng.Dispose()
+  }
   $out = New-Object Text.StringBuilder
   foreach ($byte in $bytes) {
     if ($out.Length -ge $Length) { break }

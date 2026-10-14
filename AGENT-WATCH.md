@@ -869,3 +869,32 @@ explicit portable opt-in through `index.database.driver: sqlite`.
   config remains supported.
 - Existing SQLite catalogs are intentionally not migrated. A PostgreSQL switch
   starts with a fresh index.
+
+## 2026-10-14: Blocking Windows PowerShell Compatibility Bug
+
+QSurfer's tested PostgreSQL opt-in reaches the packaged installer correctly,
+but `scripts/setup-postgres-windows.ps1` fails under stock Windows PowerShell
+5.1 before it provisions anything:
+
+```
+Method invocation failed because [System.Security.Cryptography.RandomNumberGenerator]
+does not contain a method named 'Fill'.
+```
+
+The failure occurs while generating the database password in
+`setup-postgres-windows.ps1`. Replace the .NET Core-only static
+`RandomNumberGenerator.Fill(...)` use with a PowerShell 5.1-compatible secure
+random-byte implementation (for example, create `RandomNumberGenerator`, call
+`GetBytes(byte[])`, then dispose it). Please validate the full packaged Windows
+installer from Windows PowerShell 5.1 as well as PowerShell 7. This blocks
+QSurfer's explicit SQLite-to-PostgreSQL switch; QSurfer correctly leaves the
+existing SQLite service and catalog untouched when the helper fails.
+
+## 2026-10-14 Resolved: Windows PowerShell 5.1 PostgreSQL Setup
+
+QIndexer `v1.2.10` replaces the unsupported static RNG call with
+`RandomNumberGenerator.Create().GetBytes(...)` and disposes the generator after
+use. The password-generation path was validated under stock Windows PowerShell
+5.1.26100.9444 as well as parsed by PowerShell 7. QSurfer can retry the
+explicit SQLite-to-PostgreSQL switch with `v1.2.10`; first-run admin-token
+bootstrap behavior remains unchanged.

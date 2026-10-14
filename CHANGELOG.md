@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.10 - 2026-10-14
+
+- Fix private PostgreSQL credential generation in the packaged Windows setup
+  helper on stock Windows PowerShell 5.1.
+
 ## 1.2.9 - 2026-10-14
 
 - Make PostgreSQL the default QIndexer catalog, with pooled client access,
