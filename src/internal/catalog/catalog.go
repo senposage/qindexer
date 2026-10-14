@@ -20,14 +20,16 @@ import (
 )
 
 type Catalog struct {
-	db        *sql.DB
-	writeMu   sync.Mutex
-	statsMu   sync.Mutex
-	stats     indexStatsCache
-	backlogMu sync.Mutex
-	backlog   backgroundBacklogCache
-	storageMu sync.Mutex
-	storage   storageStatsCache
+	db          *sql.DB
+	writeMu     sync.Mutex
+	statsMu     sync.Mutex
+	stats       indexStatsCache
+	backlogMu   sync.Mutex
+	backlog     backgroundBacklogCache
+	storageMu   sync.Mutex
+	storage     storageStatsCache
+	metricsMu   sync.Mutex
+	metricsBusy bool
 }
 
 type indexStatsCache struct {
@@ -35,7 +37,7 @@ type indexStatsCache struct {
 	value IndexStats
 }
 
-const indexStatsCacheTTL = 30 * time.Second
+const indexStatsCacheTTL = 2 * time.Minute
 
 type BackgroundBacklog struct {
 	Content int64
@@ -48,7 +50,7 @@ type backgroundBacklogCache struct {
 	value BackgroundBacklog
 }
 
-const backgroundBacklogCacheTTL = 15 * time.Second
+const backgroundBacklogCacheTTL = time.Minute
 
 type storageStatsCache struct {
 	at           time.Time
@@ -56,7 +58,7 @@ type storageStatsCache struct {
 	value        StorageStats
 }
 
-const storageStatsCacheTTL = 30 * time.Second
+const storageStatsCacheTTL = 10 * time.Minute
 
 // FolderActivity is a compact, persisted signal used to allocate a bounded
 // filesystem-watch budget. It is deliberately separate from documents.
@@ -321,10 +323,12 @@ func (c *Catalog) storageStats(ctx context.Context, maxTextBytes int64, force bo
 		maxTextBytes = 1 << 20
 	}
 	c.storageMu.Lock()
-	defer c.storageMu.Unlock()
 	if !force && c.storage.maxTextBytes == maxTextBytes && time.Since(c.storage.at) < storageStatsCacheTTL {
-		return c.storage.value, nil
+		value := c.storage.value
+		c.storageMu.Unlock()
+		return value, nil
 	}
+	c.storageMu.Unlock()
 	var stats StorageStats
 	var pageCount, freePages, pageSize int64
 	if err := c.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
@@ -342,8 +346,25 @@ func (c *Catalog) storageStats(ctx context.Context, maxTextBytes int64, force bo
 	stats.DatabaseBytes = pageCount * pageSize
 	stats.FreeBytes = freePages * pageSize
 	stats.MaxTextBytes = maxTextBytes
+	c.storageMu.Lock()
 	c.storage = storageStatsCache{at: time.Now(), maxTextBytes: maxTextBytes, value: stats}
+	c.storageMu.Unlock()
 	return stats, nil
+}
+
+// CachedStorageStats returns the last complete storage snapshot without
+// starting a database scan. The admin API uses it to stay responsive while a
+// large catalog is being sampled in the background.
+func (c *Catalog) CachedStorageStats(maxTextBytes int64) (StorageStats, bool) {
+	if maxTextBytes <= 0 {
+		maxTextBytes = 1 << 20
+	}
+	c.storageMu.Lock()
+	defer c.storageMu.Unlock()
+	if c.storage.at.IsZero() || c.storage.maxTextBytes != maxTextBytes {
+		return StorageStats{}, false
+	}
+	return c.storage.value, true
 }
 
 // Compact trims legacy over-limit content and rewrites SQLite to return unused
@@ -1033,10 +1054,12 @@ func (c *Catalog) HotFolders(ctx context.Context, rootIDs []string, halfLife tim
 
 func (c *Catalog) IndexStats(ctx context.Context) (IndexStats, error) {
 	c.statsMu.Lock()
-	defer c.statsMu.Unlock()
 	if time.Since(c.stats.at) < indexStatsCacheTTL {
-		return c.stats.value, nil
+		value := c.stats.value
+		c.statsMu.Unlock()
+		return value, nil
 	}
+	c.statsMu.Unlock()
 	var stats IndexStats
 	rows, err := c.db.QueryContext(ctx, `SELECT is_folder, extension, COUNT(*) FROM documents WHERE status = 'active' GROUP BY is_folder, extension`)
 	if err != nil {
@@ -1069,18 +1092,31 @@ func (c *Catalog) IndexStats(ctx context.Context) (IndexStats, error) {
 	if len(stats.Extensions) > 8 {
 		stats.Extensions = stats.Extensions[:8]
 	}
+	c.statsMu.Lock()
 	c.stats = indexStatsCache{at: time.Now(), value: stats}
+	c.statsMu.Unlock()
 	return stats, nil
+}
+
+func (c *Catalog) CachedIndexStats() (IndexStats, bool) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+	if c.stats.at.IsZero() {
+		return IndexStats{}, false
+	}
+	return c.stats.value, true
 }
 
 // BackgroundBacklog reports every eligible document still waiting for content,
 // OCR, or hashing. Unlike worker-channel depth it is not capped by queue size.
 func (c *Catalog) BackgroundBacklog(ctx context.Context) (BackgroundBacklog, error) {
 	c.backlogMu.Lock()
-	defer c.backlogMu.Unlock()
 	if time.Since(c.backlog.at) < backgroundBacklogCacheTTL {
-		return c.backlog.value, nil
+		value := c.backlog.value
+		c.backlogMu.Unlock()
+		return value, nil
 	}
+	c.backlogMu.Unlock()
 	extensions := extract.IndexableExtensions()
 	placeholders := placeholders(len(extensions))
 	args := stringsToAny(extensions)
@@ -1093,8 +1129,47 @@ func (c *Catalog) BackgroundBacklog(ctx context.Context) (BackgroundBacklog, err
 	if err := c.db.QueryRowContext(ctx, query, args...).Scan(&backlog.Content, &backlog.OCR, &backlog.Hash); err != nil {
 		return BackgroundBacklog{}, err
 	}
+	c.backlogMu.Lock()
 	c.backlog = backgroundBacklogCache{at: time.Now(), value: backlog}
+	c.backlogMu.Unlock()
 	return backlog, nil
+}
+
+func (c *Catalog) CachedBackgroundBacklog() (BackgroundBacklog, bool) {
+	c.backlogMu.Lock()
+	defer c.backlogMu.Unlock()
+	if c.backlog.at.IsZero() {
+		return BackgroundBacklog{}, false
+	}
+	return c.backlog.value, true
+}
+
+// WarmAdminStats refreshes expensive dashboard aggregates in one low-priority
+// sequence. SQLite permits concurrent WAL readers, but running these table
+// scans together causes needless I/O contention on large catalogs.
+func (c *Catalog) WarmAdminStats(maxTextBytes int64) {
+	if maxTextBytes <= 0 {
+		maxTextBytes = 1 << 20
+	}
+	c.metricsMu.Lock()
+	if c.metricsBusy {
+		c.metricsMu.Unlock()
+		return
+	}
+	c.metricsBusy = true
+	c.metricsMu.Unlock()
+	go func() {
+		defer func() {
+			c.metricsMu.Lock()
+			c.metricsBusy = false
+			c.metricsMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		_, _ = c.IndexStats(ctx)
+		_, _ = c.BackgroundBacklog(ctx)
+		_, _ = c.StorageStats(ctx, maxTextBytes)
+	}()
 }
 
 func decayActivity(score float64, elapsed, halfLife time.Duration) float64 {
@@ -1152,6 +1227,7 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_documents_root_status ON documents(root_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_extension ON documents(extension);`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_modified ON documents(modified_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_documents_status_kind_extension ON documents(status, is_folder, extension);`,
 		`CREATE TABLE IF NOT EXISTS root_states (
 			root_id TEXT PRIMARY KEY,
 			last_generation INTEGER NOT NULL DEFAULT 0,

@@ -301,10 +301,7 @@ func (c *Crawler) Stats() Stats {
 	initialCrawls := atomic.LoadInt64(&c.initialCrawls)
 	pausedReason := ""
 	pressure := c.adaptiveStatus()
-	backlog, err := c.cat.BackgroundBacklog(context.Background())
-	if err != nil {
-		c.log.Debug("background backlog query failed", "error", err)
-	}
+	backlog, _ := c.cat.CachedBackgroundBacklog()
 	if scheduledUntil, active := c.scheduledPauseUntil(time.Now()); active && scheduledUntil.Unix() > pausedUntil {
 		pausedUntil = scheduledUntil.Unix()
 		pausedReason = "schedule"

@@ -1538,25 +1538,27 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.log.Debug("could not read index size", "error", err)
 	}
-	indexStats, statsErr := s.cat.IndexStats(r.Context())
-	if statsErr != nil && !errors.Is(statsErr, context.Canceled) && !errors.Is(statsErr, context.DeadlineExceeded) {
-		s.log.Debug("could not read index type stats", "error", statsErr)
-	}
-	storage, storageErr := s.cat.StorageStats(r.Context(), maxStoredTextBytes)
-	if storageErr != nil && !errors.Is(storageErr, context.Canceled) && !errors.Is(storageErr, context.DeadlineExceeded) {
-		s.log.Debug("could not read index storage stats", "error", storageErr)
-	}
+	// These aggregates require scanning a large documents table. Return the
+	// most recent complete snapshot immediately and refresh it independently so
+	// authenticating administrators never wait behind catalog analytics.
+	indexStats, indexStatsReady := s.cat.CachedIndexStats()
+	storage, storageReady := s.cat.CachedStorageStats(maxStoredTextBytes)
+	_, backgroundReady := s.cat.CachedBackgroundBacklog()
+	s.cat.WarmAdminStats(maxStoredTextBytes)
 	watcherStats := watcher.Stats{}
 	if watch != nil {
 		watcherStats = watch.Stats()
 	}
 	writeJSON(w, http.StatusOK, struct {
 		crawler.Stats
-		IndexSizeBytes int64                `json:"index_size_bytes"`
-		IndexStats     catalog.IndexStats   `json:"index_stats"`
-		Storage        catalog.StorageStats `json:"storage"`
-		Watcher        watcher.Stats        `json:"watcher"`
-	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, Storage: storage, Watcher: watcherStats})
+		IndexSizeBytes  int64                `json:"index_size_bytes"`
+		IndexStats      catalog.IndexStats   `json:"index_stats"`
+		IndexStatsReady bool                 `json:"index_stats_ready"`
+		Storage         catalog.StorageStats `json:"storage"`
+		StorageReady    bool                 `json:"storage_ready"`
+		BackgroundReady bool                 `json:"background_ready"`
+		Watcher         watcher.Stats        `json:"watcher"`
+	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, IndexStatsReady: indexStatsReady, Storage: storage, StorageReady: storageReady, BackgroundReady: backgroundReady, Watcher: watcherStats})
 }
 
 // compactIndex is intentionally a global maintenance operation. VACUUM needs

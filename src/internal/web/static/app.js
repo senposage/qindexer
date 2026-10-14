@@ -26,6 +26,7 @@ const state = {
 let liveMetricsTimer = null;
 let liveDashboardTimer = null;
 let liveDashboardRefreshing = false;
+let liveMetricsRefreshing = false;
 
 tokenInput.value = state.token;
 endpoint.textContent = `${location.origin}/admin/v1`;
@@ -227,20 +228,20 @@ async function refresh(options = {}) {
       showLockedStatus(publicStatus, options.message || "Enter an admin token to manage this service");
       return;
     }
+    showMetricsLoading();
+    void refreshMetrics();
     const results = await Promise.allSettled([
       api("/admin/v1/service", { timeoutMs: 8000 }),
       api("/admin/v1/roots", { timeoutMs: 10000 }),
       api("/admin/v1/crawls", { timeoutMs: 8000 }),
       api("/admin/v1/config", { timeoutMs: 8000 }),
-      api("/admin/v1/metrics", { timeoutMs: 10000 }),
       api("/admin/v1/logs?limit=160", { timeoutMs: 8000 }),
     ]);
     const authenticationFailure = results.find((item) => item.status === "rejected" && (item.reason?.code === "unauthorized" || item.reason?.code === "admin_setup_required"));
     if (authenticationFailure) throw authenticationFailure.reason;
     const value = (index) => results[index].status === "fulfilled" ? results[index].value : null;
-    const [service, roots, crawls, config, metrics, logs] = [value(0), value(1), value(2), value(3), value(4), value(5)];
+    const [service, roots, crawls, config, logs] = [value(0), value(1), value(2), value(3), value(4)];
     if (service) renderService(service);
-    if (metrics) renderMetrics(metrics);
     if (roots) {
       renderRoots(roots.roots || []);
       renderRootErrors(roots.roots || []);
@@ -281,31 +282,34 @@ async function refresh(options = {}) {
 
 function startLiveMetrics() {
   if (liveMetricsTimer) return;
-  liveMetricsTimer = setInterval(async () => {
-    if (document.hidden || !state.token) return;
-    try {
-      renderMetrics(await api("/admin/v1/metrics"));
-    } catch {
-      // The next full refresh will present any authentication or service error.
-    }
-  }, 2000);
+  liveMetricsTimer = setInterval(() => { void refreshMetrics(); }, 5000);
 
   liveDashboardTimer = setInterval(refreshLiveDashboard, 5000);
+}
+
+async function refreshMetrics() {
+  if (document.hidden || !state.token || liveMetricsRefreshing) return;
+  liveMetricsRefreshing = true;
+  try {
+    renderMetrics(await api("/admin/v1/metrics", { timeoutMs: 8000 }));
+  } catch {
+    // The core dashboard stays usable when a transient metric refresh is slow.
+  } finally {
+    liveMetricsRefreshing = false;
+  }
 }
 
 async function refreshLiveDashboard() {
   if (document.hidden || !state.token || liveDashboardRefreshing) return;
   liveDashboardRefreshing = true;
   try {
-    const [service, roots, crawls, metrics, logs] = await Promise.all([
+    const [service, roots, crawls, logs] = await Promise.all([
       api("/admin/v1/service"),
       api("/admin/v1/roots"),
       api("/admin/v1/crawls"),
-      api("/admin/v1/metrics"),
       api("/admin/v1/logs?limit=160").catch((err) => ({ error: err.message, lines: [] })),
     ]);
     renderService(service);
-    renderMetrics(metrics);
     renderRoots(roots.roots || []);
     renderCrawls(crawls.crawls || []);
     renderRootErrors(roots.roots || []);
@@ -382,20 +386,29 @@ function resetPrivateDashboard() {
   document.querySelector("#validation-panel").classList.add("hidden");
 }
 
-function renderMetrics(metrics) {
+function showMetricsLoading() {
+  for (const selector of ["#file-count", "#folder-count", "#type-count", "#content-queue", "#ocr-queue", "#hash-queue"]) {
+    document.querySelector(selector).textContent = "Loading";
+  }
+  document.querySelector("#type-summary").textContent = "Loading index statistics...";
+}
 
+function renderMetrics(metrics) {
   const indexStats = metrics.index_stats || {};
-  document.querySelector("#file-count").textContent = Number(indexStats.files || 0).toLocaleString();
-  document.querySelector("#folder-count").textContent = Number(indexStats.folders || 0).toLocaleString();
+  const indexStatsReady = metrics.index_stats_ready !== false;
+  document.querySelector("#file-count").textContent = indexStatsReady ? Number(indexStats.files || 0).toLocaleString() : "Loading";
+  document.querySelector("#folder-count").textContent = indexStatsReady ? Number(indexStats.folders || 0).toLocaleString() : "Loading";
   const typeCount = Number(indexStats.types || 0);
   const extensions = array(indexStats.extensions);
   const typeSummary = extensions.map((item) => `${item.extension || "no extension"}: ${Number(item.count || 0).toLocaleString()} files`).join(", ");
   const typeMetric = document.querySelector("#type-count");
-  typeMetric.textContent = typeCount.toLocaleString();
+  typeMetric.textContent = indexStatsReady ? typeCount.toLocaleString() : "Loading";
   typeMetric.closest(".metric").title = typeSummary || "No indexed file types yet";
   const typeList = document.querySelector("#type-summary");
   typeList.replaceChildren();
-  if (!extensions.length) {
+  if (!indexStatsReady) {
+    typeList.textContent = "Loading index statistics...";
+  } else if (!extensions.length) {
     typeList.textContent = "-";
   } else {
     for (const item of extensions) {
@@ -413,7 +426,7 @@ function renderMetrics(metrics) {
   document.querySelector("#io-rate").textContent = `${formatBytes(metrics.bytes_per_second || 0)}/s`;
   document.querySelector("#index-size").textContent = formatBytes(metrics.index_size_bytes || 0);
 	const storage = metrics.storage || {};
-	document.querySelector("#index-size").closest(".metric").title = [
+	document.querySelector("#index-size").closest(".metric").title = metrics.storage_ready === false ? "Storage details loading..." : [
 	  `SQLite pages: ${formatBytes(storage.database_bytes || 0)}`,
 	  `Reclaimable after compact: ${formatBytes(storage.free_bytes || 0)}`,
 	  `Stored document text: ${formatBytes(storage.document_text_bytes || 0)}`,
@@ -421,9 +434,10 @@ function renderMetrics(metrics) {
 	].join("\n");
   const active = metrics.active_crawls || 0;
   const progress = array(metrics.active_progress);
-  document.querySelector("#content-queue").textContent = Number(metrics.content_queue_depth || 0).toLocaleString();
-  document.querySelector("#ocr-queue").textContent = Number(metrics.ocr_queue_depth || 0).toLocaleString();
-  document.querySelector("#hash-queue").textContent = Number(metrics.hash_queue_depth || 0).toLocaleString();
+  const backgroundReady = metrics.background_ready !== false;
+  document.querySelector("#content-queue").textContent = backgroundReady ? Number(metrics.content_queue_depth || 0).toLocaleString() : "Loading";
+  document.querySelector("#ocr-queue").textContent = backgroundReady ? Number(metrics.ocr_queue_depth || 0).toLocaleString() : "Loading";
+  document.querySelector("#hash-queue").textContent = backgroundReady ? Number(metrics.hash_queue_depth || 0).toLocaleString() : "Loading";
   document.querySelector("#next-crawl").textContent = formatFuture(metrics.next_full_crawl_unix);
   renderOpsSummary(metrics, progress);
   if (metrics.adaptive_paused) {
