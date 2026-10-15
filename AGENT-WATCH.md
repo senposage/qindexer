@@ -983,3 +983,14 @@ Windows service command lines now include
 `--stop-private-postgres-on-exit`, so a graceful QIndexer service stop also
 stops its managed private database. The installer ACL helper is compatible
 with stock Windows PowerShell 5.1 for both directory and single-file targets.
+
+## 2026-10-14: Detailed PostgreSQL Download Progress
+
+QIndexer `v1.2.14` adds `bytes_downloaded`, `bytes_total`, and
+`bytes_per_second` to the atomic installer progress JSON. QSurfer should use
+these optional numeric fields when `stage` is `postgres_download` and fall
+back to `percent` and `message` when a total is not available. The Windows
+helper updates them about once per second while streaming the PostgreSQL
+installer. It retains the exact versioned installer in QIndexer's local cache
+and reuses it for repair/retry attempts; a future QIndexer package version
+will use a different filename and download the new PostgreSQL installer.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.14 - 2026-10-14
+
+- Stream the Windows PostgreSQL installer download and publish downloaded
+  bytes, total bytes, and transfer rate in the installer progress document.
+- Cache the exact upstream PostgreSQL installer under the QIndexer install
+  directory and reuse it on subsequent repair attempts. A future bundled
+  PostgreSQL version uses a different cache filename and downloads once.
+
 ## 1.2.13 - 2026-10-14
 
 - Make Windows maintenance deterministic: wait for QIndexer to stop before

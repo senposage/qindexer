@@ -13,8 +13,16 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "install-progress-windows.ps1")
 
 function Report-Progress {
-  param([string]$Status, [string]$Stage, [int]$Percent, [string]$Message)
-  Write-QIndexerInstallProgress -ProgressPath $ProgressPath -Status $Status -Stage $Stage -Percent $Percent -Message $Message
+  param(
+    [string]$Status,
+    [string]$Stage,
+    [int]$Percent,
+    [string]$Message,
+    [long]$BytesDownloaded = 0,
+    [long]$BytesTotal = 0,
+    [long]$BytesPerSecond = 0
+  )
+  Write-QIndexerInstallProgress -ProgressPath $ProgressPath -Status $Status -Stage $Stage -Percent $Percent -Message $Message -BytesDownloaded $BytesDownloaded -BytesTotal $BytesTotal -BytesPerSecond $BytesPerSecond
 }
 
 trap {
@@ -71,6 +79,66 @@ function Get-PostgresScalar {
     throw "Could not $Operation."
   }
   return (($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine).Trim()
+}
+
+function Format-ByteSize {
+  param([long]$Bytes)
+  if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+  if ($Bytes -ge 1MB) { return ("{0:N1} MB" -f ($Bytes / 1MB)) }
+  if ($Bytes -ge 1KB) { return ("{0:N1} KB" -f ($Bytes / 1KB)) }
+  return "$Bytes bytes"
+}
+
+function Download-PostgresInstaller {
+  param(
+    [Parameter(Mandatory = $true)][string]$Uri,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $request = [Net.HttpWebRequest]::Create($Uri)
+  $request.AllowAutoRedirect = $true
+  $request.UserAgent = "QIndexer PostgreSQL setup"
+  $request.Timeout = 30000
+  $request.ReadWriteTimeout = 300000
+  $response = $null
+  $input = $null
+  $output = $null
+  try {
+    $response = $request.GetResponse()
+    $total = [int64]$response.ContentLength
+    $input = $response.GetResponseStream()
+    $output = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $buffer = New-Object byte[] (1MB)
+    $downloaded = [int64]0
+    $startedAt = [DateTime]::UtcNow
+    $lastReportedAt = $startedAt.AddSeconds(-1)
+    while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+      $output.Write($buffer, 0, $read)
+      $downloaded += $read
+      $now = [DateTime]::UtcNow
+      if (($now - $lastReportedAt).TotalSeconds -lt 1) { continue }
+      $elapsed = [Math]::Max(0.001, ($now - $startedAt).TotalSeconds)
+      $rate = [int64]($downloaded / $elapsed)
+      if ($total -gt 0) {
+        $ratio = [Math]::Min(1.0, $downloaded / [double]$total)
+        $percent = 25 + [int][Math]::Floor(29 * $ratio)
+        $message = "Downloading PostgreSQL: $(Format-ByteSize $downloaded) of $(Format-ByteSize $total) ($([int][Math]::Floor(100 * $ratio))%) at $(Format-ByteSize $rate)/s."
+      } else {
+        $percent = 25
+        $message = "Downloading PostgreSQL: $(Format-ByteSize $downloaded) at $(Format-ByteSize $rate)/s."
+      }
+      Report-Progress "running" "postgres_download" $percent $message $downloaded $total $rate
+      $lastReportedAt = $now
+    }
+    $elapsed = [Math]::Max(0.001, ([DateTime]::UtcNow - $startedAt).TotalSeconds)
+    $rate = [int64]($downloaded / $elapsed)
+    $message = "Downloaded PostgreSQL: $(Format-ByteSize $downloaded) at $(Format-ByteSize $rate)/s."
+    Report-Progress "running" "postgres_download" 54 $message $downloaded $total $rate
+  } finally {
+    if ($output) { $output.Dispose() }
+    if ($input) { $input.Dispose() }
+    if ($response) { $response.Dispose() }
+  }
 }
 
 function Select-Port {
@@ -150,7 +218,9 @@ $clusterDir = Join-Path $DataDir "postgresql"
 $serviceName = "qindexer-postgresql"
 $psql = Join-Path $postgresRoot "bin\psql.exe"
 $createdb = Join-Path $postgresRoot "bin\createdb.exe"
-$installer = Join-Path $env:TEMP "qindexer-postgresql-18.6-windows-x64.exe"
+$installerVersion = "18.6-1"
+$installerCacheDir = Join-Path $InstallDir "cache"
+$installer = Join-Path $installerCacheDir "postgresql-$installerVersion-windows-x64.exe"
 $superPassword = New-Secret
 $appPassword = New-Secret
 
@@ -179,30 +249,35 @@ if (Test-Path -LiteralPath $psql) {
 Report-Progress "running" "postgres_discover" 15 "Checking the private PostgreSQL installation."
 
 if (-not (Test-Path -LiteralPath $psql)) {
-  try {
-    Report-Progress "running" "postgres_download" 25 "Downloading PostgreSQL."
-    Write-Host "Downloading PostgreSQL 18.6 from the official PostgreSQL Windows distributor..."
-    Invoke-WebRequest -Uri "https://get.enterprisedb.com/postgresql/postgresql-18.6-1-windows-x64.exe" -OutFile $installer -UseBasicParsing
-    if ((Get-Item -LiteralPath $installer).Length -lt 50MB) { throw "The PostgreSQL installer download is unexpectedly small." }
-    New-Item -ItemType Directory -Force -Path $clusterDir | Out-Null
-    Report-Progress "running" "postgres_install" 55 "Installing private PostgreSQL."
-    Write-Host "Installing private PostgreSQL server for QIndexer..."
-    $arguments = @(
-      "--mode", "unattended",
-      "--unattendedmodeui", "none",
-      "--prefix", $postgresRoot,
-      "--datadir", $clusterDir,
-      "--serverport", $selectedPort,
-      "--servicename", $serviceName,
-      "--superpassword", $superPassword,
-      "--enable-components", "server,commandlinetools",
-      "--disable-components", "pgAdmin,stackbuilder"
-    )
-    $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
-    if ($process.ExitCode -ne 0) { throw "PostgreSQL installer failed with exit code $($process.ExitCode)." }
-  } finally {
+  New-Item -ItemType Directory -Force -Path $installerCacheDir | Out-Null
+  $useCachedInstaller = (Test-Path -LiteralPath $installer) -and ((Get-Item -LiteralPath $installer).Length -ge 50MB)
+  if (-not $useCachedInstaller) {
     if (Test-Path -LiteralPath $installer) { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
+    Report-Progress "running" "postgres_download" 25 "Connecting to the PostgreSQL download."
+    Write-Host "Downloading PostgreSQL 18.6 from the official PostgreSQL Windows distributor..."
+    Download-PostgresInstaller -Uri "https://get.enterprisedb.com/postgresql/postgresql-18.6-1-windows-x64.exe" -Destination $installer
+  } else {
+    $cachedBytes = (Get-Item -LiteralPath $installer).Length
+    Report-Progress "running" "postgres_download" 54 "Using cached PostgreSQL $installerVersion installer ($(Format-ByteSize $cachedBytes))." $cachedBytes $cachedBytes 0
+    Write-Host "Using cached PostgreSQL $installerVersion installer."
   }
+  if ((Get-Item -LiteralPath $installer).Length -lt 50MB) { throw "The PostgreSQL installer download is unexpectedly small." }
+  New-Item -ItemType Directory -Force -Path $clusterDir | Out-Null
+  Report-Progress "running" "postgres_install" 55 "Installing private PostgreSQL."
+  Write-Host "Installing private PostgreSQL server for QIndexer..."
+  $arguments = @(
+    "--mode", "unattended",
+    "--unattendedmodeui", "none",
+    "--prefix", $postgresRoot,
+    "--datadir", $clusterDir,
+    "--serverport", $selectedPort,
+    "--servicename", $serviceName,
+    "--superpassword", $superPassword,
+    "--enable-components", "server,commandlinetools",
+    "--disable-components", "pgAdmin,stackbuilder"
+  )
+  $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+  if ($process.ExitCode -ne 0) { throw "PostgreSQL installer failed with exit code $($process.ExitCode)." }
 }
 
 if (-not (Test-Path -LiteralPath $psql) -or -not (Test-Path -LiteralPath $createdb)) {
