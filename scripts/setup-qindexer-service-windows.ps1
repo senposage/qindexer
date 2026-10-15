@@ -56,6 +56,45 @@ function Find-Binary {
   return $candidates | Select-Object -First 1
 }
 
+function Stop-ServiceAndWait {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)][string]$NssmExecutable
+  )
+  $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+  if (-not $service) { return $false }
+  $wasRunning = $service.Status -ne "Stopped"
+  if (-not $wasRunning) { return $false }
+  & $NssmExecutable stop $Name | Out-Null
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -eq "Stopped") { return $true }
+    Start-Sleep -Milliseconds 500
+  }
+  throw "QIndexer service $Name did not stop within 30 seconds; setup aborted before replacing files."
+}
+
+function Set-QIndexerPrivatePostgresState {
+  param([Parameter(Mandatory = $true)][bool]$Running)
+  $service = Get-Service -Name "qindexer-postgresql" -ErrorAction SilentlyContinue
+  if (-not $service) { return $false }
+  $wasRunning = $service.Status -ne "Stopped"
+  if ($Running -and -not $wasRunning) {
+    Start-Service -Name "qindexer-postgresql"
+  } elseif (-not $Running -and $wasRunning) {
+    Stop-Service -Name "qindexer-postgresql" -Force
+  }
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $service = Get-Service -Name "qindexer-postgresql" -ErrorAction SilentlyContinue
+    if (-not $service -or (($Running -and $service.Status -eq "Running") -or (-not $Running -and $service.Status -eq "Stopped"))) {
+      return $wasRunning
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  $desiredState = if ($Running) { "start" } else { "stop" }
+  throw "QIndexer's private PostgreSQL service did not $desiredState within 30 seconds."
+}
+
 function Write-EmptyConfig {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -99,6 +138,12 @@ if (-not $nssm) {
 $sourceBinary = Find-Binary $BinaryPath
 if (-not $sourceBinary) {
   throw "QIndexer Windows binary was not found. Pass -BinaryPath C:\path\to\qindexer.exe."
+}
+
+$restartExistingService = Stop-ServiceAndWait -Name $ServiceName -NssmExecutable $nssm
+$restartPrivatePostgres = $false
+if ($restartExistingService) {
+  $restartPrivatePostgres = Set-QIndexerPrivatePostgresState -Running $false
 }
 
 $binDir = Join-Path $InstallDir "bin"
@@ -163,16 +208,12 @@ if ($installSidecars) {
 Write-InstallProgress "running" "service_register" 92 "Registering the QIndexer service."
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
-  if ($existing.Status -ne "Stopped") {
-    & $nssm stop $ServiceName | Out-Null
-    Start-Sleep -Seconds 1
-  }
   & $nssm remove $ServiceName confirm | Out-Null
-	Start-Sleep -Seconds 1
+  Start-Sleep -Seconds 1
 }
 
 & $nssm install $ServiceName $installedBinary | Out-Null
-& $nssm set $ServiceName AppParameters "run --config `"$configPath`"" | Out-Null
+& $nssm set $ServiceName AppParameters "run --config `"$configPath`" --stop-private-postgres-on-exit" | Out-Null
 & $nssm set $ServiceName AppDirectory $InstallDir | Out-Null
 & $nssm set $ServiceName DisplayName "QIndexer" | Out-Null
 & $nssm set $ServiceName Description "QIndexer filesystem indexing and search service." | Out-Null
@@ -182,6 +223,7 @@ if ($existing) {
 & $nssm set $ServiceName AppRotateFiles 1 | Out-Null
 & $nssm set $ServiceName AppRotateOnline 1 | Out-Null
 & $nssm set $ServiceName AppRotateBytes 10485760 | Out-Null
+if ($restartPrivatePostgres) { Set-QIndexerPrivatePostgresState -Running $true | Out-Null }
 & $nssm start $ServiceName | Out-Null
 
 $service = Get-Service -Name $ServiceName

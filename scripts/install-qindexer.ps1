@@ -32,6 +32,7 @@ function Require-Admin {
 
 function Set-PrivateAcl {
   param([Parameter(Mandatory = $true)][string]$Path)
+  $item = Get-Item -LiteralPath $Path
   $acl = Get-Acl -LiteralPath $Path
   $acl.SetAccessRuleProtection($true, $false)
   foreach ($rule in @($acl.Access)) {
@@ -43,10 +44,50 @@ function Set-PrivateAcl {
     "NT AUTHORITY\SYSTEM"
   ) | Select-Object -Unique
   foreach ($identity in $identities) {
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    if ($item.PSIsContainer) {
+      $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+      $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+    } else {
+      $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
+    }
     $acl.AddAccessRule($rule)
   }
   Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Stop-QIndexerService {
+  param([Parameter(Mandatory = $true)][string]$Name)
+  $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+  if (-not $service) { return $false }
+  $wasRunning = $service.Status -ne "Stopped"
+  if ($wasRunning) { Stop-Service -Name $Name -Force }
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -eq "Stopped") { return $wasRunning }
+    Start-Sleep -Milliseconds 500
+  }
+  throw "QIndexer service $Name did not stop within 30 seconds; update aborted before replacing files."
+}
+
+function Set-QIndexerPrivatePostgresState {
+  param([Parameter(Mandatory = $true)][bool]$Running)
+  $service = Get-Service -Name "qindexer-postgresql" -ErrorAction SilentlyContinue
+  if (-not $service) { return $false }
+  $wasRunning = $service.Status -ne "Stopped"
+  if ($Running -and -not $wasRunning) {
+    Start-Service -Name "qindexer-postgresql"
+  } elseif (-not $Running -and $wasRunning) {
+    Stop-Service -Name "qindexer-postgresql" -Force
+  }
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $service = Get-Service -Name "qindexer-postgresql" -ErrorAction SilentlyContinue
+    if (-not $service -or (($Running -and $service.Status -eq "Running") -or (-not $Running -and $service.Status -eq "Stopped"))) {
+      return $wasRunning
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  $desiredState = if ($Running) { "start" } else { "stop" }
+  throw "QIndexer's private PostgreSQL service did not $desiredState within 30 seconds."
 }
 
 $repoRoot = Resolve-RepoRoot
@@ -67,6 +108,12 @@ if (-not $BinaryPath) {
 }
 if (-not (Test-Path -LiteralPath $BinaryPath)) {
   throw "QIndexer binary not found: $BinaryPath"
+}
+
+$restartExistingService = Stop-QIndexerService -Name $ServiceName
+$restartPrivatePostgres = $false
+if ($restartExistingService) {
+  $restartPrivatePostgres = Set-QIndexerPrivatePostgresState -Running $false
 }
 
 $binDir = Join-Path $InstallDir "bin"
@@ -143,19 +190,19 @@ if ($InstallService) {
   Write-InstallProgress "running" "install_service" 92 "Installing the QIndexer service."
   $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
   if ($existing) {
-    if ($existing.Status -ne "Stopped") {
-      Stop-Service -Name $ServiceName -Force
-      $existing.WaitForStatus("Stopped", "00:00:20")
-    }
     sc.exe delete $ServiceName | Out-Null
     Start-Sleep -Seconds 1
   }
-  $binPath = "`"$installedBinary`" run --config `"$installedConfig`""
+  $binPath = "`"$installedBinary`" run --config `"$installedConfig`" --stop-private-postgres-on-exit"
   sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "QIndexer Search Service" | Out-Null
   sc.exe description $ServiceName "Portable filesystem search indexer for QSurfer." | Out-Null
-  if ($StartService) {
+  if ($StartService -or $restartExistingService) {
+    Set-QIndexerPrivatePostgresState -Running $true | Out-Null
     Start-Service -Name $ServiceName
   }
+} elseif ($restartExistingService) {
+  if ($restartPrivatePostgres) { Set-QIndexerPrivatePostgresState -Running $true | Out-Null }
+  Start-Service -Name $ServiceName
 }
 
 Write-InstallProgress "completed" "install_ready" 100 "QIndexer installation is complete."

@@ -85,6 +85,62 @@ function Select-Port {
   throw "No free PostgreSQL port was found between 5432 and 5442."
 }
 
+function Stop-PrivatePostgres {
+  param(
+    [Parameter(Mandatory = $true)][string]$ServiceName,
+    [Parameter(Mandatory = $true)][string]$PostgresRoot
+  )
+
+  $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+  if ($service -and $service.Status -ne "Stopped") {
+    Stop-Service -Name $ServiceName -Force
+  }
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -eq "Stopped") { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if ($service -and $service.Status -ne "Stopped") {
+    throw "QIndexer's private PostgreSQL service did not stop within 30 seconds."
+  }
+
+  $rootPrefix = ([IO.Path]::GetFullPath($PostgresRoot)).TrimEnd('\') + '\'
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'postgres.exe'" -ErrorAction Stop | Where-Object {
+      $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($processes.Count -eq 0) { break }
+    foreach ($process in $processes) {
+      Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  $remaining = @(Get-CimInstance Win32_Process -Filter "Name = 'postgres.exe'" -ErrorAction Stop | Where-Object {
+    $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+  })
+  if ($remaining.Count -gt 0) {
+    throw "QIndexer's private PostgreSQL processes did not exit. Refusing to touch unrelated PostgreSQL services."
+  }
+  if ($service) {
+    sc.exe delete $ServiceName | Out-Null
+    Start-Sleep -Seconds 1
+  }
+}
+
+function Remove-DirectoryWithRetry {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try {
+      Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+      return
+    } catch {
+      if ($attempt -eq 9) { throw }
+      Start-Sleep -Seconds 1
+    }
+  }
+}
+
 if ($DatabaseName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or $RoleName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
   throw "Database and role names must contain only letters, digits, and underscores."
 }
@@ -101,17 +157,9 @@ $appPassword = New-Secret
 if ($ResetIncomplete -and (Test-Path -LiteralPath $psql)) {
   Report-Progress "running" "postgres_recover" 15 "Resetting an incomplete private PostgreSQL setup."
   Write-Host "Resetting incomplete private PostgreSQL setup for QIndexer..."
-  $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-  if ($existingService -and $existingService.Status -ne "Stopped") {
-    Stop-Service -Name $serviceName -Force
-    $existingService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
-  }
-  if ($existingService) {
-    sc.exe delete $serviceName | Out-Null
-    Start-Sleep -Seconds 1
-  }
-  if (Test-Path -LiteralPath $postgresRoot) { Remove-Item -LiteralPath $postgresRoot -Recurse -Force }
-  if (Test-Path -LiteralPath $clusterDir) { Remove-Item -LiteralPath $clusterDir -Recurse -Force }
+  Stop-PrivatePostgres -ServiceName $serviceName -PostgresRoot $postgresRoot
+  Remove-DirectoryWithRetry -Path $postgresRoot
+  Remove-DirectoryWithRetry -Path $clusterDir
 }
 
 if (Test-Path -LiteralPath $psql) {

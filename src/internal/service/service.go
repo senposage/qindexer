@@ -22,8 +22,9 @@ import (
 )
 
 type App struct {
-	ConfigPath string
-	Logger     *slog.Logger
+	ConfigPath                string
+	Logger                    *slog.Logger
+	StopPrivatePostgresOnExit bool
 }
 
 func (a App) Run(ctx context.Context) error {
@@ -59,7 +60,14 @@ func (a App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer cat.Close()
+	defer func() {
+		cat.Close()
+		if a.StopPrivatePostgresOnExit {
+			if err := stopPrivatePostgres(a.ConfigPath, cfg); err != nil {
+				log.Warn("private PostgreSQL stop failed during service shutdown", "error", err)
+			}
+		}
+	}()
 	if interrupted, err := cat.MarkOpenCrawlsInterrupted(ctx); err != nil {
 		log.Warn("stale crawl recovery failed", "error", err)
 	} else if interrupted > 0 {

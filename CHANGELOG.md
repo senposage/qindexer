@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.13 - 2026-10-14
+
+- Make Windows maintenance deterministic: wait for QIndexer to stop before
+  replacing files, stop its dedicated PostgreSQL service during that window,
+  and restore both services in dependency order.
+- Make incomplete private PostgreSQL cleanup wait for only its own process
+  tree before retrying file removal; unrelated PostgreSQL services are never
+  terminated.
+- Fix the Windows installer ACL helper for both files and directories under
+  stock Windows PowerShell 5.1.
+
 ## 1.2.12 - 2026-10-14
 
 - Recover only an incomplete private Windows PostgreSQL setup when a package

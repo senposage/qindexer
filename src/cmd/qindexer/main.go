@@ -29,8 +29,9 @@ func run(log *slog.Logger) error {
 	case "run":
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
 		configPath := fs.String("config", "configs/example.yaml", "path to config file")
+		stopPrivatePostgres := fs.Bool("stop-private-postgres-on-exit", false, "stop the QIndexer-managed private PostgreSQL service during a graceful Windows service shutdown")
 		_ = fs.Parse(os.Args[2:])
-		return service.App{ConfigPath: *configPath}.Run(service.SignalContext())
+		return service.App{ConfigPath: *configPath, StopPrivatePostgresOnExit: *stopPrivatePostgres}.Run(service.SignalContext())
 	case "crawl":
 		fs := flag.NewFlagSet("crawl", flag.ExitOnError)
 		configPath := fs.String("config", "configs/example.yaml", "path to config file")

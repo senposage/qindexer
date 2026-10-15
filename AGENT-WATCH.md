@@ -916,6 +916,24 @@ the cleanup null-safe and preferably construct via
 Windows PowerShell 5.1 compatibility. This is the immediate cause of the
 current failure, not the download response.
 
+## 2026-10-14: PostgreSQL Bootstrap Cleanup Lock
+
+The next QSurfer retry reaches the newer bootstrap, but QIndexer fails while
+resetting an incomplete private PostgreSQL setup:
+
+```
+Remove-Item : Cannot remove item
+C:\ProgramData\QSurfer\QIndexer\postgresql\bin\libcrypto-3-x64.dll:
+Access to the path is denied.
+```
+
+This occurs in `setup-postgres-windows.ps1` line 47 during the reset of the
+private `postgresql` directory. The cleanup must first stop the QIndexer-owned
+PostgreSQL service/process, wait for its process tree and DLL handles to exit,
+then remove/retry the directory. It must never broadly terminate unrelated
+PostgreSQL services. If the private process cannot stop, return a clear
+actionable error rather than leaving the bootstrap in a loop.
+
 ## 2026-10-14 Resolved: Windows PowerShell 5.1 PostgreSQL Setup
 
 QIndexer `v1.2.10` replaces the unsupported static RNG call with
@@ -951,3 +969,17 @@ the dedicated `qindexer-postgresql` service. This exists solely to recover a
 private PostgreSQL installation that failed before QIndexer received its DSN.
 It does not run for an established configuration and must not be used as a
 catalog reset mechanism by QSurfer.
+
+## 2026-10-14: Windows Maintenance Lifecycle
+
+QIndexer `v1.2.13` makes the update lifecycle explicit. The Windows package
+and NSSM service installers stop QIndexer and wait before replacing files,
+then stop only the dedicated `qindexer-postgresql` service. They start that
+service before restoring QIndexer. Private PostgreSQL cleanup also enumerates
+only `postgres.exe` processes under QIndexer's own `postgresql` directory and
+waits before removing files; it never terminates another PostgreSQL instance.
+
+Windows service command lines now include
+`--stop-private-postgres-on-exit`, so a graceful QIndexer service stop also
+stops its managed private database. The installer ACL helper is compatible
+with stock Windows PowerShell 5.1 for both directory and single-file targets.

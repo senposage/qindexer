@@ -336,6 +336,13 @@ The scripts atomically replace that file with compact JSON containing
 file-based so an updater can report progress while QIndexer is stopped for a
 binary replacement or PostgreSQL setup.
 
+On Windows, package and NSSM service updates stop QIndexer, wait for it to
+exit, then stop the dedicated `qindexer-postgresql` service before replacing
+files. They restart PostgreSQL before QIndexer. A service installed by the
+current Windows scripts also asks QIndexer to stop that dedicated private
+database on a graceful service exit. This never targets unrelated PostgreSQL
+services.
+
 On Windows, `-InstallSidecars` is self-contained. It downloads the current
 upstream Tesseract installer, a private 7-Zip extraction runtime, the official
 Ghostscript payload, and the supported all-users Python runtime. Ghostscript is

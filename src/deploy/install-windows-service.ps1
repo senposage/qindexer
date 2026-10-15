@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$quotedBinary = '"' + $BinaryPath + '" run --config "' + $ConfigPath + '"'
+$quotedBinary = '"' + $BinaryPath + '" run --config "' + $ConfigPath + '" --stop-private-postgres-on-exit'
 
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
   Write-Host "Service already exists: $ServiceName"
