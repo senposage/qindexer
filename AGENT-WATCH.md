@@ -994,3 +994,19 @@ helper updates them about once per second while streaming the PostgreSQL
 installer. It retains the exact versioned installer in QIndexer's local cache
 and reuses it for repair/retry attempts; a future QIndexer package version
 will use a different filename and download the new PostgreSQL installer.
+
+## 2026-10-14: Windows Service Discovery
+
+QIndexer `v1.2.15` no longer assumes a Windows service is named `QIndexer`
+during package or NSSM-service upgrades. It first checks the supplied service
+name, then discovers an existing NSSM service whose registry
+`Parameters\\Application` points to the installed `bin\\qindexer.exe`. That
+keeps a QSurfer-managed service such as `QSurferQIndexer` intact: the helper
+stops it only immediately before replacing the executable, restores the
+dedicated private PostgreSQL service as needed, and starts the same service
+again.
+
+QSurfer may still pass `-ServiceName` when it has an exact name, but it no
+longer needs to depend on the generic `QIndexer` default for an upgrade. The
+installer remains the authority for its own lifecycle; QSurfer should poll the
+existing progress JSON while the service is intentionally offline.

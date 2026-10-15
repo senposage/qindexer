@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.15 - 2026-10-14
+
+- Detect an existing Windows QIndexer service by the NSSM `Application`
+  registration for the installed `qindexer.exe`, rather than assuming the
+  service is named `QIndexer`. This preserves QSurfer-managed names such as
+  `QSurferQIndexer` during upgrades.
+- Defer stopping the discovered service until immediately before replacing the
+  executable. An upgrade now stops the actual service, restarts its dedicated
+  PostgreSQL dependency in order, and starts the same service name when
+  maintenance completes.
+
 ## 1.2.14 - 2026-10-14
 
 - Stream the Windows PostgreSQL installer download and publish downloaded

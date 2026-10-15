@@ -69,6 +69,50 @@ function Stop-QIndexerService {
   throw "QIndexer service $Name did not stop within 30 seconds; update aborted before replacing files."
 }
 
+function Normalize-ServicePath {
+  param([string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+  $value = $Path.Trim().Trim('"')
+  try {
+    return [IO.Path]::GetFullPath($value).TrimEnd('\\').ToLowerInvariant()
+  } catch {
+    return $value.TrimEnd('\\').ToLowerInvariant()
+  }
+}
+
+function Resolve-QIndexerServiceName {
+  param(
+    [Parameter(Mandatory = $true)][string]$PreferredName,
+    [Parameter(Mandatory = $true)][string]$InstalledBinary
+  )
+  if (Get-Service -Name $PreferredName -ErrorAction SilentlyContinue) {
+    return $PreferredName
+  }
+
+  $targetPath = Normalize-ServicePath $InstalledBinary
+  $matches = @()
+  foreach ($candidate in @(Get-CimInstance Win32_Service)) {
+    $parametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($candidate.Name)\Parameters"
+    $appPath = (Get-ItemProperty -LiteralPath $parametersPath -Name Application -ErrorAction SilentlyContinue).Application
+    if ((Normalize-ServicePath $appPath) -eq $targetPath) {
+      $matches += $candidate.Name
+    }
+  }
+  if ($matches.Count -eq 1) { return $matches[0] }
+  if ($matches.Count -gt 1) {
+    throw "Multiple services reference ${InstalledBinary}: $($matches -join ', '). Pass -ServiceName explicitly."
+  }
+
+  $namedMatches = @(Get-CimInstance Win32_Service | Where-Object {
+    $_.Name -match '(?i)qindexer' -or $_.DisplayName -match '(?i)qindexer'
+  })
+  if ($namedMatches.Count -eq 1) { return $namedMatches[0].Name }
+  if ($namedMatches.Count -gt 1) {
+    throw "Multiple QIndexer-like services were found: $($namedMatches.Name -join ', '). Pass -ServiceName explicitly."
+  }
+  return $PreferredName
+}
+
 function Set-QIndexerPrivatePostgresState {
   param([Parameter(Mandatory = $true)][bool]$Running)
   $service = Get-Service -Name "qindexer-postgresql" -ErrorAction SilentlyContinue
@@ -110,12 +154,6 @@ if (-not (Test-Path -LiteralPath $BinaryPath)) {
   throw "QIndexer binary not found: $BinaryPath"
 }
 
-$restartExistingService = Stop-QIndexerService -Name $ServiceName
-$restartPrivatePostgres = $false
-if ($restartExistingService) {
-  $restartPrivatePostgres = Set-QIndexerPrivatePostgresState -Running $false
-}
-
 $binDir = Join-Path $InstallDir "bin"
 $scriptDir = Join-Path $InstallDir "scripts"
 $configDir = Join-Path $InstallDir "configs"
@@ -125,7 +163,7 @@ New-Item -ItemType Directory -Force -Path $binDir, $scriptDir, $configDir, $data
 
 Write-InstallProgress "running" "install_files" 20 "Installing QIndexer files."
 $installedBinary = Join-Path $binDir "qindexer.exe"
-Copy-Item -LiteralPath $BinaryPath -Destination $installedBinary -Force
+$ServiceName = Resolve-QIndexerServiceName -PreferredName $ServiceName -InstalledBinary $installedBinary
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-sidecars-windows.ps1") -Destination (Join-Path $scriptDir "setup-sidecars-windows.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\setup-postgres-windows.ps1") -Destination (Join-Path $scriptDir "setup-postgres-windows.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\install-progress-windows.ps1") -Destination (Join-Path $scriptDir "install-progress-windows.ps1") -Force
@@ -185,6 +223,13 @@ if ($InstallSidecars) {
   & (Join-Path $scriptDir "setup-sidecars-windows.ps1") -InstallDir $InstallDir
 }
 
+$restartExistingService = Stop-QIndexerService -Name $ServiceName
+$restartPrivatePostgres = $false
+if ($restartExistingService) {
+  $restartPrivatePostgres = Set-QIndexerPrivatePostgresState -Running $false
+}
+Copy-Item -LiteralPath $BinaryPath -Destination $installedBinary -Force
+
 if ($InstallService) {
   Require-Admin
   Write-InstallProgress "running" "install_service" 92 "Installing the QIndexer service."
@@ -200,9 +245,11 @@ if ($InstallService) {
     Set-QIndexerPrivatePostgresState -Running $true | Out-Null
     Start-Service -Name $ServiceName
   }
-} elseif ($restartExistingService) {
-  if ($restartPrivatePostgres) { Set-QIndexerPrivatePostgresState -Running $true | Out-Null }
-  Start-Service -Name $ServiceName
+} else {
+  if ($restartExistingService) {
+    if ($restartPrivatePostgres) { Set-QIndexerPrivatePostgresState -Running $true | Out-Null }
+    Start-Service -Name $ServiceName
+  }
 }
 
 Write-InstallProgress "completed" "install_ready" 100 "QIndexer installation is complete."

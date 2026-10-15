@@ -56,6 +56,50 @@ function Find-Binary {
   return $candidates | Select-Object -First 1
 }
 
+function Normalize-ServicePath {
+  param([string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+  $value = $Path.Trim().Trim('"')
+  try {
+    return [IO.Path]::GetFullPath($value).TrimEnd('\\').ToLowerInvariant()
+  } catch {
+    return $value.TrimEnd('\\').ToLowerInvariant()
+  }
+}
+
+function Resolve-QIndexerServiceName {
+  param(
+    [Parameter(Mandatory = $true)][string]$PreferredName,
+    [Parameter(Mandatory = $true)][string]$InstalledBinary
+  )
+  if (Get-Service -Name $PreferredName -ErrorAction SilentlyContinue) {
+    return $PreferredName
+  }
+
+  $targetPath = Normalize-ServicePath $InstalledBinary
+  $matches = @()
+  foreach ($candidate in @(Get-CimInstance Win32_Service)) {
+    $parametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($candidate.Name)\Parameters"
+    $appPath = (Get-ItemProperty -LiteralPath $parametersPath -Name Application -ErrorAction SilentlyContinue).Application
+    if ((Normalize-ServicePath $appPath) -eq $targetPath) {
+      $matches += $candidate.Name
+    }
+  }
+  if ($matches.Count -eq 1) { return $matches[0] }
+  if ($matches.Count -gt 1) {
+    throw "Multiple services reference ${InstalledBinary}: $($matches -join ', '). Pass -ServiceName explicitly."
+  }
+
+  $namedMatches = @(Get-CimInstance Win32_Service | Where-Object {
+    $_.Name -match '(?i)qindexer' -or $_.DisplayName -match '(?i)qindexer'
+  })
+  if ($namedMatches.Count -eq 1) { return $namedMatches[0].Name }
+  if ($namedMatches.Count -gt 1) {
+    throw "Multiple QIndexer-like services were found: $($namedMatches.Name -join ', '). Pass -ServiceName explicitly."
+  }
+  return $PreferredName
+}
+
 function Stop-ServiceAndWait {
   param(
     [Parameter(Mandatory = $true)][string]$Name,
@@ -140,12 +184,6 @@ if (-not $sourceBinary) {
   throw "QIndexer Windows binary was not found. Pass -BinaryPath C:\path\to\qindexer.exe."
 }
 
-$restartExistingService = Stop-ServiceAndWait -Name $ServiceName -NssmExecutable $nssm
-$restartPrivatePostgres = $false
-if ($restartExistingService) {
-  $restartPrivatePostgres = Set-QIndexerPrivatePostgresState -Running $false
-}
-
 $binDir = Join-Path $InstallDir "bin"
 $configDir = Join-Path $InstallDir "config"
 $dataDir = Join-Path $InstallDir "data"
@@ -156,7 +194,7 @@ New-Item -ItemType Directory -Force -Path $binDir, $configDir, $dataDir, $logsDi
 Write-InstallProgress "running" "service_files" 20 "Installing QIndexer service files."
 $installedBinary = Join-Path $binDir "qindexer.exe"
 $configPath = Join-Path $configDir "qindexer.yaml"
-Copy-Item -LiteralPath $sourceBinary -Destination $installedBinary -Force
+$ServiceName = Resolve-QIndexerServiceName -PreferredName $ServiceName -InstalledBinary $installedBinary
 $sidecarSource = Join-Path $PSScriptRoot "setup-sidecars-windows.ps1"
 if (Test-Path -LiteralPath $sidecarSource) {
   Copy-Item -LiteralPath $sidecarSource -Destination (Join-Path $scriptsDir "setup-sidecars-windows.ps1") -Force
@@ -206,6 +244,12 @@ if ($installSidecars) {
 }
 
 Write-InstallProgress "running" "service_register" 92 "Registering the QIndexer service."
+$restartExistingService = Stop-ServiceAndWait -Name $ServiceName -NssmExecutable $nssm
+$restartPrivatePostgres = $false
+if ($restartExistingService) {
+  $restartPrivatePostgres = Set-QIndexerPrivatePostgresState -Running $false
+}
+Copy-Item -LiteralPath $sourceBinary -Destination $installedBinary -Force
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
   & $nssm remove $ServiceName confirm | Out-Null
