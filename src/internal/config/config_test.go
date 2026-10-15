@@ -80,6 +80,23 @@ func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
 	if cfg.Crawler.RootParallelism < 1 || cfg.Crawler.DirectoryWorkerCount < 16 || cfg.Crawler.MetadataWorkerCount < 16 || cfg.Crawler.MetadataQueueSize < 10000 || cfg.Crawler.IndexBatchSize < 2000 {
 		t.Fatalf("unexpected crawler defaults: %#v", cfg.Crawler)
 	}
+	if len(cfg.Crawler.ContentExtraction.ExcludeExtensions) == 0 || len(cfg.Crawler.OCR.ExcludeExtensions) == 0 {
+		t.Fatalf("enrichment exclusions were not populated: %#v", cfg.Crawler)
+	}
+}
+
+func TestEnrichmentExclusionsNormalizeAsLineEntries(t *testing.T) {
+	cfg := Config{Crawler: CrawlerConfig{
+		ContentExtraction: ContentExtractionConfig{ExcludeExtensions: []string{" JPG ", ".png", "jpg"}},
+		OCR:               OCRConfig{ExcludeExtensions: []string{".PDF", " pdf "}},
+	}}
+	cfg.ApplyDefaults()
+	if got := cfg.Crawler.ContentExtraction.ExcludeExtensions; len(got) != 2 || got[0] != "jpg" || got[1] != "png" {
+		t.Fatalf("content exclusions = %#v", got)
+	}
+	if got := cfg.Crawler.OCR.ExcludeExtensions; len(got) != 1 || got[0] != "pdf" {
+		t.Fatalf("OCR exclusions = %#v", got)
+	}
 }
 
 func TestLegacyCrawlerDefaultProfileUpgradesToHostSizedValues(t *testing.T) {

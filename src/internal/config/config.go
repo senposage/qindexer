@@ -77,26 +77,31 @@ type CrawlerConfig struct {
 }
 
 type ContentExtractionConfig struct {
-	Enabled         bool  `yaml:"enabled" json:"enabled"`
-	WorkerCount     int   `yaml:"worker_count" json:"worker_count"`
-	QueueSize       int   `yaml:"queue_size" json:"queue_size"`
-	MaxFileSizeMB   int64 `yaml:"max_file_size_mb" json:"max_file_size_mb"`
-	MaxStoredTextKB int64 `yaml:"max_stored_text_kb" json:"max_stored_text_kb"`
+	Enabled           bool     `yaml:"enabled" json:"enabled"`
+	WorkerCount       int      `yaml:"worker_count" json:"worker_count"`
+	QueueSize         int      `yaml:"queue_size" json:"queue_size"`
+	MaxFileSizeMB     int64    `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+	MaxStoredTextKB   int64    `yaml:"max_stored_text_kb" json:"max_stored_text_kb"`
+	ExcludeExtensions []string `yaml:"exclude_extensions" json:"exclude_extensions"`
 }
 
 // OCRConfig describes an optional local OCR sidecar. Commands stay configurable
 // so a QIndexer build can run unchanged on Windows, Linux, and NAS hosts.
 type OCRConfig struct {
-	Enabled          bool   `yaml:"enabled" json:"enabled"`
-	Engine           string `yaml:"engine" json:"engine"`
-	TesseractCommand string `yaml:"tesseract_command" json:"tesseract_command"`
-	OCRmyPDFCommand  string `yaml:"ocrmypdf_command" json:"ocrmypdf_command"`
-	Languages        string `yaml:"languages" json:"languages"`
-	WorkerCount      int    `yaml:"worker_count" json:"worker_count"`
-	QueueSize        int    `yaml:"queue_size" json:"queue_size"`
-	MaxFileSizeMB    int64  `yaml:"max_file_size_mb" json:"max_file_size_mb"`
-	TimeoutSeconds   int    `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Enabled           bool     `yaml:"enabled" json:"enabled"`
+	Engine            string   `yaml:"engine" json:"engine"`
+	TesseractCommand  string   `yaml:"tesseract_command" json:"tesseract_command"`
+	OCRmyPDFCommand   string   `yaml:"ocrmypdf_command" json:"ocrmypdf_command"`
+	Languages         string   `yaml:"languages" json:"languages"`
+	WorkerCount       int      `yaml:"worker_count" json:"worker_count"`
+	QueueSize         int      `yaml:"queue_size" json:"queue_size"`
+	MaxFileSizeMB     int64    `yaml:"max_file_size_mb" json:"max_file_size_mb"`
+	TimeoutSeconds    int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	ExcludeExtensions []string `yaml:"exclude_extensions" json:"exclude_extensions"`
 }
+
+var defaultContentExcludeExtensions = []string{"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp", "tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"}
+var defaultOCRExcludeExtensions = []string{"tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"}
 
 type HashingConfig struct {
 	Enabled       bool  `yaml:"enabled" json:"enabled"`
@@ -296,6 +301,10 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.ContentExtraction.MaxStoredTextKB <= 0 {
 		c.Crawler.ContentExtraction.MaxStoredTextKB = 1024
 	}
+	if c.Crawler.ContentExtraction.ExcludeExtensions == nil {
+		c.Crawler.ContentExtraction.ExcludeExtensions = append([]string(nil), defaultContentExcludeExtensions...)
+	}
+	c.Crawler.ContentExtraction.ExcludeExtensions = normalizeExtensions(c.Crawler.ContentExtraction.ExcludeExtensions)
 	if c.Crawler.OCR.Engine == "" {
 		c.Crawler.OCR.Engine = "auto"
 	}
@@ -320,6 +329,10 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.OCR.TimeoutSeconds <= 0 {
 		c.Crawler.OCR.TimeoutSeconds = 180
 	}
+	if c.Crawler.OCR.ExcludeExtensions == nil {
+		c.Crawler.OCR.ExcludeExtensions = append([]string(nil), defaultOCRExcludeExtensions...)
+	}
+	c.Crawler.OCR.ExcludeExtensions = normalizeExtensions(c.Crawler.OCR.ExcludeExtensions)
 	if c.Crawler.Hashing.WorkerCount <= 0 {
 		c.Crawler.Hashing.WorkerCount = 3
 	}
@@ -401,6 +414,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Crawler.RootParallelism < 1 || c.Crawler.RootParallelism > 32 {
 		return fmt.Errorf("root crawl limit must be between 1 and 32")
+	}
+	if c.Crawler.ScanIntervalSeconds < 60 || c.Crawler.ScanIntervalSeconds > 30*24*60*60 {
+		return fmt.Errorf("full reconciliation interval must be between 60 seconds and 30 days")
 	}
 	if c.Crawler.MetadataQueueSize < 100 || c.Crawler.MetadataQueueSize > 1000000 {
 		return fmt.Errorf("metadata queue size must be between 100 and 1000000")
@@ -547,6 +563,8 @@ func Clone(source *Config) *Config {
 	for i, window := range source.Crawler.PauseWindows {
 		copyConfig.Crawler.PauseWindows[i] = PauseWindow{Start: window.Start, End: window.End, Days: append([]string(nil), window.Days...)}
 	}
+	copyConfig.Crawler.ContentExtraction.ExcludeExtensions = append([]string(nil), source.Crawler.ContentExtraction.ExcludeExtensions...)
+	copyConfig.Crawler.OCR.ExcludeExtensions = append([]string(nil), source.Crawler.OCR.ExcludeExtensions...)
 	copyConfig.Roots = make([]RootConfig, len(source.Roots))
 	for i, root := range source.Roots {
 		copyConfig.Roots[i] = root
@@ -561,6 +579,23 @@ func Clone(source *Config) *Config {
 		copyConfig.Roots[i].PathAliases = append([]PathAlias(nil), root.PathAliases...)
 	}
 	return &copyConfig
+}
+
+func normalizeExtensions(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	seen := make(map[string]bool, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), ".")
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		normalized = append(normalized, value)
+	}
+	return normalized
 }
 
 func (a AuthConfig) ResolveToken(baseDir string) (string, error) {

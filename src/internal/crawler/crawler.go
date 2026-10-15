@@ -49,6 +49,7 @@ type Crawler struct {
 	done                map[string]chan struct{}
 	progressMu          sync.RWMutex
 	progress            map[string]*crawlProgress
+	configChanged       chan struct{}
 	startedAt           time.Time
 	activeCrawls        int64
 	filesStatted        int64
@@ -241,7 +242,7 @@ type adaptivePressure struct {
 
 func New(cfg *config.Config, cat *catalog.Catalog, log *slog.Logger) *Crawler {
 	snapshot := config.Clone(cfg)
-	return &Crawler{cfg: snapshot, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, progress: map[string]*crawlProgress{}, retry: map[string]bool{}, logState: map[string]suppressedLog{}, background: map[string]*backgroundWork{}, backgroundEpoch: map[string]uint64{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, snapshot.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, snapshot.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, snapshot.Crawler.Hashing.QueueSize)}
+	return &Crawler{cfg: snapshot, cat: cat, log: log, run: map[string]context.CancelFunc{}, done: map[string]chan struct{}{}, progress: map[string]*crawlProgress{}, configChanged: make(chan struct{}, 1), retry: map[string]bool{}, logState: map[string]suppressedLog{}, background: map[string]*backgroundWork{}, backgroundEpoch: map[string]uint64{}, startedAt: time.Now().UTC(), contentJobs: make(chan backgroundJob, snapshot.Crawler.ContentExtraction.QueueSize), ocrJobs: make(chan backgroundJob, snapshot.Crawler.OCR.QueueSize), hashJobs: make(chan backgroundJob, snapshot.Crawler.Hashing.QueueSize)}
 }
 
 func (c *Crawler) snapshot() *config.Config {
@@ -257,6 +258,10 @@ func (c *Crawler) ApplyConfig(cfg *config.Config) {
 	c.cfgMu.Lock()
 	c.cfg = config.Clone(cfg)
 	c.cfgMu.Unlock()
+	select {
+	case c.configChanged <- struct{}{}:
+	default:
+	}
 }
 
 // RecordFolderActivity is intentionally best-effort: watcher optimization
@@ -1070,8 +1075,8 @@ func (c *Crawler) Loop(ctx context.Context) {
 	startCrawlerRoutine(ctx, &workers, c.log, c.refillBackgroundLoop)
 	scanInterval := c.snapshot().Crawler.ScanInterval()
 	c.log.Info("crawler loop started", "scan_interval", scanInterval)
-	ticker := time.NewTicker(scanInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(scanInterval)
+	defer timer.Stop()
 	atomic.StoreInt64(&c.nextFullCrawl, time.Now().Add(scanInterval).Unix())
 	if c.waitIfPaused(ctx, true) != nil {
 		c.log.Info("crawler loop stopped before initial crawl", "reason", "context_cancelled")
@@ -1085,8 +1090,15 @@ func (c *Crawler) Loop(ctx context.Context) {
 		case <-ctx.Done():
 			c.log.Info("crawler loop stopped", "reason", "context_cancelled")
 			return
-		case <-ticker.C:
-			atomic.StoreInt64(&c.nextFullCrawl, time.Now().Add(c.snapshot().Crawler.ScanInterval()).Unix())
+		case <-c.configChanged:
+			scanInterval = c.snapshot().Crawler.ScanInterval()
+			resetCrawlTimer(timer, scanInterval)
+			atomic.StoreInt64(&c.nextFullCrawl, time.Now().Add(scanInterval).Unix())
+			c.log.Info("crawler reconciliation interval updated", "scan_interval", scanInterval)
+		case <-timer.C:
+			scanInterval = c.snapshot().Crawler.ScanInterval()
+			atomic.StoreInt64(&c.nextFullCrawl, time.Now().Add(scanInterval).Unix())
+			timer.Reset(scanInterval)
 			if c.waitIfPaused(ctx, true) != nil {
 				c.log.Info("crawler loop stopped while waiting to run scheduled crawl", "reason", "context_cancelled")
 				return
@@ -1094,6 +1106,16 @@ func (c *Crawler) Loop(ctx context.Context) {
 			c.CrawlAll(ctx)
 		}
 	}
+}
+
+func resetCrawlTimer(timer *time.Timer, interval time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(interval)
 }
 
 func startCrawlerRoutine(ctx context.Context, workers *sync.WaitGroup, log *slog.Logger, fn func(context.Context)) {
@@ -1135,19 +1157,19 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled)
 	}); len(rootIDs) > 0 {
-		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content")
+		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content", content.ExcludeExtensions)
 	}
 	ocr := c.snapshot().Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
-		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR")
+		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR", ocr.ExcludeExtensions)
 	}
 	hashing := c.snapshot().Crawler.Hashing
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.HashingEnabled(hashing.Enabled)
 	}); len(rootIDs) > 0 {
-		c.fillBackground(ctx, rootIDs, c.hashJobs, hashing.MaxFileSizeMB<<20, c.cat.ClaimPendingHashes, "hash")
+		c.fillBackground(ctx, rootIDs, c.hashJobs, hashing.MaxFileSizeMB<<20, c.cat.ClaimPendingHashes, "hash", nil)
 	}
 }
 
@@ -1164,18 +1186,18 @@ func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) er
 	return c.waitIfPaused(ctx, true)
 }
 
-type backgroundClaim func(context.Context, []string, int, int64) ([]catalog.BackgroundCandidate, error)
+type backgroundClaim func(context.Context, []string, int, int64, []string) ([]catalog.BackgroundCandidate, error)
 
 // fillBackground shares capacity across roots so a sprawling root cannot starve
 // a smaller root's extraction, OCR, or hashing backlog.
-func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string) {
-	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, claim, kind, cap(jobs)-len(jobs))
+func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, excludedExtensions []string) {
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, claim, kind, cap(jobs)-len(jobs), excludedExtensions)
 }
 
 // fillBackgroundWithRetries reserves a small fraction of capacity for delayed
 // retries. Fresh work always gets the majority of the queue, so an unreadable
 // document cannot crowd out the ordinary indexing backlog.
-func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, primary, retry backgroundClaim, kind string) {
+func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, primary, retry backgroundClaim, kind string, excludedExtensions []string) {
 	available := cap(jobs) - len(jobs)
 	if available <= 0 {
 		return
@@ -1186,15 +1208,15 @@ func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []strin
 	}
 	primaryCapacity := available - retryCapacity
 	before := len(jobs)
-	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, primary, kind, primaryCapacity)
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, primary, kind, primaryCapacity, excludedExtensions)
 	// If there is no fresh work, do not leave workers idle simply because the
 	// retry lane was intentionally small. The lane remains reserved only while
 	// normal work can actually use the capacity.
 	unusedPrimary := primaryCapacity - (len(jobs) - before)
-	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, retry, kind+" retry", retryCapacity+max(0, unusedPrimary))
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, retry, kind+" retry", retryCapacity+max(0, unusedPrimary), excludedExtensions)
 }
 
-func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, limit int) {
+func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, limit int, excludedExtensions []string) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -1209,7 +1231,7 @@ func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, j
 			return
 		}
 		limit := min(perRoot, available)
-		items, err := claim(ctx, []string{rootID}, limit, maxSize)
+		items, err := claim(ctx, []string{rootID}, limit, maxSize, excludedExtensions)
 		if err != nil {
 			c.log.Debug(kind+" queue refill failed", "root", rootID, "error", err)
 			continue
@@ -2295,10 +2317,25 @@ func (c *Crawler) describePath(root config.RootConfig, path string, generation i
 		Signature:          catalog.Signature(info.Size(), info.ModTime()),
 		AccessStatus:       "metadata_readable",
 	}
+	settings := c.snapshot().Crawler
+	if !isFolder && root.ContentExtractionEnabled(settings.ContentExtraction.Enabled) && root.OCREnabled(settings.OCR.Enabled) && extract.OCREligible(path) && extensionExcluded(ext, settings.ContentExtraction.ExcludeExtensions) && !extensionExcluded(ext, settings.OCR.ExcludeExtensions) {
+		// Images are excluded from ordinary text extraction by default, but still
+		// need a direct OCR nomination rather than relying on an empty extraction.
+		doc.OCRStatus = "pending"
+	}
 	if root.OwnershipEnabled(c.snapshot().Crawler.CollectOwnership) {
 		doc.Owner = filemeta.Owner(path)
 	}
 	return doc, true, nil
+}
+
+func extensionExcluded(extension string, excluded []string) bool {
+	for _, value := range excluded {
+		if extension == value {
+			return true
+		}
+	}
+	return false
 }
 
 func isPermissionError(err error) bool {
@@ -2338,6 +2375,18 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			if !exists || !root.ContentExtractionEnabled(settings.Enabled) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
+				}
+				finish()
+				continue
+			}
+			extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
+			if extensionExcluded(extension, settings.ExcludeExtensions) {
+				if jobCtx.Err() == nil {
+					_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
+					ocr := c.snapshot().Crawler.OCR
+					if extract.OCREligible(job.path) && root.OCREnabled(ocr.Enabled) && !extensionExcluded(extension, ocr.ExcludeExtensions) {
+						_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
+					}
 				}
 				finish()
 				continue
@@ -2401,6 +2450,14 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 			settings := crawlerSettings.OCR
 			root, exists := c.rootByID(job.rootID)
 			if !exists || !root.ContentExtractionEnabled(crawlerSettings.ContentExtraction.Enabled) || !root.OCREnabled(settings.Enabled) {
+				if jobCtx.Err() == nil {
+					_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
+				}
+				finish()
+				continue
+			}
+			extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
+			if extensionExcluded(extension, settings.ExcludeExtensions) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
 				}

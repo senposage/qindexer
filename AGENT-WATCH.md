@@ -1097,3 +1097,22 @@ queue `5000`, batch `1000`) to the host-sized performance defaults during
 startup. Any profile that differs in any of those fields is treated as an
 administrator choice and is left untouched. QSurfer needs no protocol or UI
 change for this migration.
+
+## 2026-10-15: Enrichment Type Exclusions and Crawl Schedule
+
+QIndexer now accepts global `crawler.content_extraction.exclude_extensions`
+and `crawler.ocr.exclude_extensions` arrays. The admin settings UI renders
+each as a one-extension-per-line list; do not send a comma-delimited string.
+The queue claim itself excludes configured types, so excluded work is never
+placed in the content/OCR worker queues and the dashboard backlog excludes it.
+
+Ordinary content extraction excludes image formats by default. Newly indexed
+images are nominated directly for OCR when that root enables OCR, rather than
+being first run through the content parser. OCR itself only accepts PDFs and
+the supported image types. Existing queued jobs are checked again by workers
+and are released without extraction if their type becomes excluded.
+
+`scan_interval_seconds` is now editable in the QIndexer admin UI as minutes
+and takes effect on the running scheduler when saved. The default and example
+configuration use six hours (`21600` seconds); watcher and manual crawls are
+unaffected. QSurfer has no search-protocol change to make for either feature.

@@ -90,7 +90,7 @@ exports and source control. A TLS-enabled deployment should use an appropriate
 
 ```yaml
 crawler:
-  scan_interval_seconds: 300
+  scan_interval_seconds: 21600
   root_parallelism: 1
   directory_worker_count: 16
   metadata_worker_count: 32
@@ -102,7 +102,9 @@ crawler:
   missing_after_successful_crawls: 3
 ```
 
-- `scan_interval_seconds`: periodic reconciliation interval.
+- `scan_interval_seconds`: periodic reconciliation interval. The default is
+  21600 seconds (six hours); watcher and manual crawls still run immediately.
+  The management UI applies a changed interval to its next timer live.
 - `root_parallelism`: number of roots crawled at once.
 - `directory_worker_count`: maximum directory traversal concurrency per crawl.
 - `metadata_worker_count`: maximum file metadata concurrency per crawl.
@@ -165,6 +167,10 @@ content_extraction:
   queue_size: 1000
   max_file_size_mb: 64
   max_stored_text_kb: 1024
+  exclude_extensions:
+    - png
+    - jpg
+    - jpeg
 ```
 
 When enabled, supported document text is extracted into the index. Current
@@ -180,6 +186,10 @@ document from inflating the index.
 Content extraction has an independent process-wide worker pool. It runs after
 structural indexing is idle, alongside the OCR and hashing pools.
 
+`exclude_extensions` is a global line/list setting. Excluded supported types
+are never placed into the content queue. Image formats are excluded from
+ordinary content extraction by default so they can proceed directly to OCR.
+
 ## OCR
 
 ```yaml
@@ -193,6 +203,8 @@ ocr:
   queue_size: 100
   max_file_size_mb: 128
   timeout_seconds: 180
+  exclude_extensions:
+    - pdf
 ```
 
 - `engine`: `auto`, `tesseract`, or `ocrmypdf`.
@@ -204,7 +216,11 @@ ocr:
 - `timeout_seconds`: per-file OCR timeout.
 
 OCR never modifies source files. In `auto` mode, images use Tesseract and
-scanned PDFs use OCRmyPDF after ordinary text extraction finds no text.
+scanned PDFs use OCRmyPDF after ordinary text extraction finds no text. A type
+excluded from ordinary content extraction is nominated directly for OCR instead.
+Only PDFs and supported image formats are eligible for OCR. Its
+`exclude_extensions` list is also global and removes matching file types before
+they enter the OCR queue.
 
 ## Hashing
 

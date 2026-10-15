@@ -27,7 +27,7 @@ index:
   max_results: 200
 
 crawler:
-  scan_interval_seconds: 300
+  scan_interval_seconds: 21600
   # Independent roots run concurrently. Per-root latency probes reduce this
   # configuration ceiling for slow NAS and VPN paths.
   root_parallelism: 3
@@ -49,6 +49,8 @@ crawler:
     max_file_size_mb: 64
     # Text is stored once and capped per document to keep SQLite predictable.
     max_stored_text_kb: 1024
+    # One extension per list entry. Images stay available for OCR, not ordinary text extraction.
+    exclude_extensions: ["png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp", "tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"]
   # OCR is local-only and opt-in. In auto mode, images use Tesseract and scanned
   # PDFs use OCRmyPDF. Install those commands separately or supply full paths.
   ocr:
@@ -61,6 +63,8 @@ crawler:
     queue_size: 100
     max_file_size_mb: 128
     timeout_seconds: 180
+    # Keeps temporary and shell metadata files out of the OCR backlog.
+    exclude_extensions: ["tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"]
   hashing:
     enabled: false
     worker_count: 3

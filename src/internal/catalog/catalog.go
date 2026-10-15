@@ -1192,7 +1192,7 @@ func (c *Catalog) CachedIndexStats() (IndexStats, bool) {
 
 // BackgroundBacklog reports every eligible document still waiting for content,
 // OCR, or hashing. Unlike worker-channel depth it is not capped by queue size.
-func (c *Catalog) BackgroundBacklog(ctx context.Context) (BackgroundBacklog, error) {
+func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcluded, ocrExcluded []string) (BackgroundBacklog, error) {
 	c.backlogMu.Lock()
 	if time.Since(c.backlog.at) < backgroundBacklogCacheTTL {
 		value := c.backlog.value
@@ -1200,12 +1200,23 @@ func (c *Catalog) BackgroundBacklog(ctx context.Context) (BackgroundBacklog, err
 		return value, nil
 	}
 	c.backlogMu.Unlock()
-	extensions := extract.IndexableExtensions()
-	placeholders := placeholders(len(extensions))
-	args := stringsToAny(extensions)
+	contentExtensions := extract.IndexableExtensions()
+	ocrExtensions := extract.OCREligibleExtensions()
+	contentClause := " AND extension IN (" + placeholders(len(contentExtensions)) + ")"
+	args := stringsToAny(contentExtensions)
+	if len(contentExcluded) > 0 {
+		contentClause += " AND extension NOT IN (" + placeholders(len(contentExcluded)) + ")"
+		args = append(args, stringsToAny(contentExcluded)...)
+	}
+	ocrClause := " AND extension IN (" + placeholders(len(ocrExtensions)) + ")"
+	args = append(args, stringsToAny(ocrExtensions)...)
+	if len(ocrExcluded) > 0 {
+		ocrClause += " AND extension NOT IN (" + placeholders(len(ocrExcluded)) + ")"
+		args = append(args, stringsToAny(ocrExcluded)...)
+	}
 	query := `SELECT
-		SUM(CASE WHEN content_status IN ('not_indexed', 'retry_pending', 'queued') AND extension IN (` + placeholders + `) THEN 1 ELSE 0 END),
-		SUM(CASE WHEN ocr_status IN ('pending', 'retry_pending', 'queued') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN content_status IN ('not_indexed', 'retry_pending', 'queued')` + contentClause + ` THEN 1 ELSE 0 END),
+		SUM(CASE WHEN ocr_status IN ('pending', 'retry_pending', 'queued')` + ocrClause + ` THEN 1 ELSE 0 END),
 		SUM(CASE WHEN hash_status IN ('not_hashed', 'queued') THEN 1 ELSE 0 END)
 		FROM documents WHERE status = 'active' AND is_folder = 0`
 	var backlog BackgroundBacklog
@@ -1227,10 +1238,16 @@ func (c *Catalog) CachedBackgroundBacklog() (BackgroundBacklog, bool) {
 	return c.backlog.value, true
 }
 
+func (c *Catalog) InvalidateBackgroundBacklog() {
+	c.backlogMu.Lock()
+	c.backlog.at = time.Time{}
+	c.backlogMu.Unlock()
+}
+
 // WarmAdminStats refreshes expensive dashboard aggregates in one low-priority
 // sequence. Running full-table scans together creates needless I/O contention
 // on large catalogs, regardless of backend.
-func (c *Catalog) WarmAdminStats(maxTextBytes int64) {
+func (c *Catalog) WarmAdminStats(maxTextBytes int64, contentExcluded, ocrExcluded []string) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
 	}
@@ -1250,7 +1267,7 @@ func (c *Catalog) WarmAdminStats(maxTextBytes int64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		_, _ = c.IndexStats(ctx)
-		_, _ = c.BackgroundBacklog(ctx)
+		_, _ = c.BackgroundBacklog(ctx, contentExcluded, ocrExcluded)
 		_, _ = c.StorageStats(ctx, maxTextBytes)
 	}()
 }
@@ -1746,6 +1763,12 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 	if doc.AccessStatus == "" {
 		doc.AccessStatus = "metadata_readable"
 	}
+	if doc.ContentStatus == "" {
+		doc.ContentStatus = "not_indexed"
+	}
+	if doc.OCRStatus == "" {
+		doc.OCRStatus = "not_requested"
+	}
 	var existingID, existingSignature string
 	err := c.db.QueryRowContext(ctx, `SELECT id, signature FROM documents WHERE root_id = ? AND normalized_path = ?`, doc.RootID, doc.NormalizedPath).Scan(&existingID, &existingSignature)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -1774,8 +1797,8 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 			}
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, ocr_status, content_text, content_hash, hash_status, owner, access_status, moved_from_path, is_folder, signature, missing_count)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', 'not_requested', '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
-			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
+			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.ContentStatus, doc.OCRStatus, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature)
 		if err != nil {
 			return UpsertResult{}, err
 		}
@@ -1797,9 +1820,9 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE documents
 		SET path = ?, name = ?, extension = ?, size = ?, modified_at = ?, created_at = ?, status = 'active',
-		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_error = '', ocr_error = '', content_attempts = 0, ocr_attempts = 0, content_retry_at = '', ocr_retry_at = '', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
+		    last_seen_generation = ?, last_indexed_at = ?, content_status = ?, ocr_status = ?, content_error = '', ocr_error = '', content_attempts = 0, ocr_attempts = 0, content_retry_at = '', ocr_retry_at = '', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
 		WHERE id = ?`,
-		doc.Path, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID)
+		doc.Path, doc.Name, doc.Extension, doc.Size, mod, created, doc.LastSeenGeneration, now, doc.ContentStatus, doc.OCRStatus, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID)
 	if err != nil {
 		return UpsertResult{}, err
 	}
@@ -1852,6 +1875,12 @@ func upsertDocumentTx(ctx context.Context, tx *catalogTx, doc Document) (UpsertR
 	if doc.AccessStatus == "" {
 		doc.AccessStatus = "metadata_readable"
 	}
+	if doc.ContentStatus == "" {
+		doc.ContentStatus = "not_indexed"
+	}
+	if doc.OCRStatus == "" {
+		doc.OCRStatus = "not_requested"
+	}
 	var existingID, existingSignature string
 	err := tx.QueryRowContext(ctx, `SELECT id, signature FROM documents WHERE root_id = ? AND normalized_path = ?`, doc.RootID, doc.NormalizedPath).Scan(&existingID, &existingSignature)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -1875,8 +1904,8 @@ func upsertDocumentTx(ctx context.Context, tx *catalogTx, doc Document) (UpsertR
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO documents(id, root_id, path, normalized_path, name, extension, size, modified_at, created_at, status, last_seen_generation, last_indexed_at, content_status, ocr_status, content_text, content_hash, hash_status, owner, access_status, moved_from_path, is_folder, signature, missing_count)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 'not_indexed', 'not_requested', '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
-			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, '', '', 'not_hashed', ?, ?, ?, ?, ?, 0)`,
+			doc.ID, doc.RootID, doc.Path, doc.NormalizedPath, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.ContentStatus, doc.OCRStatus, doc.Owner, doc.AccessStatus, doc.MovedFromPath, doc.IsFolder, doc.Signature); err != nil {
 			return UpsertResult{}, err
 		}
 		if err := upsertFTS(ctx, tx, doc.ID, doc.RootID, doc.Name, doc.Path, doc.Extension, ""); err != nil {
@@ -1890,9 +1919,9 @@ func upsertDocumentTx(ctx context.Context, tx *catalogTx, doc Document) (UpsertR
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE documents
 		SET path = ?, name = ?, extension = ?, size = ?, modified_at = ?, created_at = ?, status = 'active',
-		    last_seen_generation = ?, last_indexed_at = ?, content_status = 'not_indexed', ocr_status = 'not_requested', content_error = '', ocr_error = '', content_attempts = 0, ocr_attempts = 0, content_retry_at = '', ocr_retry_at = '', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
+		    last_seen_generation = ?, last_indexed_at = ?, content_status = ?, ocr_status = ?, content_error = '', ocr_error = '', content_attempts = 0, ocr_attempts = 0, content_retry_at = '', ocr_retry_at = '', content_text = '', content_hash = '', hash_status = 'not_hashed', owner = ?, access_status = ?, is_folder = ?, signature = ?, missing_count = 0
 		WHERE id = ?`,
-		doc.Path, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID); err != nil {
+		doc.Path, doc.Name, doc.Extension, doc.Size, modified, created, doc.LastSeenGeneration, now, doc.ContentStatus, doc.OCRStatus, doc.Owner, doc.AccessStatus, doc.IsFolder, doc.Signature, existingID); err != nil {
 		return UpsertResult{}, err
 	}
 	if err := upsertFTS(ctx, tx, existingID, doc.RootID, doc.Name, doc.Path, doc.Extension, ""); err != nil {
@@ -2111,35 +2140,35 @@ func (c *Catalog) ResetQueuedBackgroundForRoot(ctx context.Context, rootID strin
 	return tx.Commit()
 }
 
-func (c *Catalog) ClaimPendingContent(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "content_status", "not_indexed", "queued", rootIDs, extract.IndexableExtensions(), limit, maxSize)
+func (c *Catalog) ClaimPendingContent(ctx context.Context, rootIDs []string, limit int, maxSize int64, excludedExtensions []string) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "content_status", "not_indexed", "queued", rootIDs, extract.IndexableExtensions(), excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) ClaimPendingOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "ocr_status", "pending", "queued", rootIDs, nil, limit, maxSize)
+func (c *Catalog) ClaimPendingOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64, excludedExtensions []string) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "ocr_status", "pending", "queued", rootIDs, extract.OCREligibleExtensions(), excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) ClaimRetryContent(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPendingDue(ctx, "content_status", "content_retry_at", rootIDs, extract.IndexableExtensions(), limit, maxSize)
+func (c *Catalog) ClaimRetryContent(ctx context.Context, rootIDs []string, limit int, maxSize int64, excludedExtensions []string) ([]BackgroundCandidate, error) {
+	return c.claimPendingDue(ctx, "content_status", "content_retry_at", rootIDs, extract.IndexableExtensions(), excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) ClaimRetryOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPendingDue(ctx, "ocr_status", "ocr_retry_at", rootIDs, nil, limit, maxSize)
+func (c *Catalog) ClaimRetryOCR(ctx context.Context, rootIDs []string, limit int, maxSize int64, excludedExtensions []string) ([]BackgroundCandidate, error) {
+	return c.claimPendingDue(ctx, "ocr_status", "ocr_retry_at", rootIDs, extract.OCREligibleExtensions(), excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) ClaimPendingHashes(ctx context.Context, rootIDs []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", rootIDs, nil, limit, maxSize)
+func (c *Catalog) ClaimPendingHashes(ctx context.Context, rootIDs []string, limit int, maxSize int64, excludedExtensions []string) ([]BackgroundCandidate, error) {
+	return c.claimPending(ctx, "hash_status", "not_hashed", "queued", rootIDs, nil, excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimBackground(ctx, column, pending, claimed, "", rootIDs, extensions, limit, maxSize)
+func (c *Catalog) claimPending(ctx context.Context, column, pending, claimed string, rootIDs, extensions, excludedExtensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimBackground(ctx, column, pending, claimed, "", rootIDs, extensions, excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) claimPendingDue(ctx context.Context, column, retryAtColumn string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
-	return c.claimBackground(ctx, column, "retry_pending", "queued", retryAtColumn, rootIDs, extensions, limit, maxSize)
+func (c *Catalog) claimPendingDue(ctx context.Context, column, retryAtColumn string, rootIDs, extensions, excludedExtensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+	return c.claimBackground(ctx, column, "retry_pending", "queued", retryAtColumn, rootIDs, extensions, excludedExtensions, limit, maxSize)
 }
 
-func (c *Catalog) claimBackground(ctx context.Context, column, pending, claimed, retryAtColumn string, rootIDs, extensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
+func (c *Catalog) claimBackground(ctx context.Context, column, pending, claimed, retryAtColumn string, rootIDs, extensions, excludedExtensions []string, limit int, maxSize int64) ([]BackgroundCandidate, error) {
 	if len(rootIDs) == 0 || limit <= 0 || maxSize <= 0 {
 		return nil, nil
 	}
@@ -2167,11 +2196,18 @@ func (c *Catalog) claimBackground(ctx context.Context, column, pending, claimed,
 			args = append(args, extension)
 		}
 	}
+	excludeClause := ""
+	if len(excludedExtensions) > 0 {
+		excludeClause = " AND extension NOT IN (" + placeholders(len(excludedExtensions)) + ")"
+		for _, extension := range excludedExtensions {
+			args = append(args, extension)
+		}
+	}
 	args = append(args, limit)
 	// New or changed documents receive a fresh last_indexed_at value. Prefer
 	// them over the historical backlog so watcher hints reach the secondary
 	// content/OCR/hash pass promptly after structural indexing is idle.
-	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ?` + retryClause + ` AND root_id IN (` + rootPlaceholders + `)` + extensionClause + ` ORDER BY last_indexed_at DESC, path ASC LIMIT ?`
+	query := `SELECT id, root_id, path, signature, size FROM documents WHERE status = 'active' AND is_folder = 0 AND ` + column + ` = ? AND size <= ?` + retryClause + ` AND root_id IN (` + rootPlaceholders + `)` + extensionClause + excludeClause + ` ORDER BY last_indexed_at DESC, path ASC LIMIT ?`
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

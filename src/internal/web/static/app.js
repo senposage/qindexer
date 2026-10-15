@@ -694,12 +694,14 @@ function renderIndexingSettings(crawler, watcher = {}) {
 	  document.querySelector("#settings-extraction-workers").value = extraction.worker_count || 3;
   document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
 	document.querySelector("#settings-stored-text").value = extraction.max_stored_text_kb || 1024;
+	document.querySelector("#settings-extraction-exclude-extensions").value = lines(extraction.exclude_extensions);
   document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
 	  document.querySelector("#settings-ocr-workers").value = ocr.worker_count || 2;
   document.querySelector("#settings-ocr-engine").value = ocr.engine || "auto";
   document.querySelector("#settings-ocr-languages").value = ocr.languages || "eng";
   document.querySelector("#settings-ocr-size").value = ocr.max_file_size_mb || 128;
   document.querySelector("#settings-ocr-timeout").value = ocr.timeout_seconds || 180;
+	document.querySelector("#settings-ocr-exclude-extensions").value = lines(ocr.exclude_extensions);
   document.querySelector("#settings-tesseract-command").value = ocr.tesseract_command || "tesseract";
   document.querySelector("#settings-ocrmypdf-command").value = ocr.ocrmypdf_command || "ocrmypdf";
   document.querySelector("#settings-hashing").checked = Boolean(hashing.enabled);
@@ -720,6 +722,7 @@ function renderIndexingSettings(crawler, watcher = {}) {
 	  document.querySelector("#settings-root-parallelism").value = crawler.root_parallelism || 1;
 	  document.querySelector("#settings-metadata-queue").value = crawler.metadata_queue_size || 5000;
 	  document.querySelector("#settings-index-batch").value = crawler.index_batch_size || 1000;
+	  document.querySelector("#settings-scan-interval").value = Math.max(1, Math.round((crawler.scan_interval_seconds || 21600) / 60));
 }
 
 function renderNetworkSettings(network) {
@@ -756,14 +759,14 @@ async function saveNetworkSettings(event) {
 async function saveIndexingSettings(event) {
   event.preventDefault();
   const crawler = state.crawler || {};
-  const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, worker_count: Number(document.querySelector("#settings-ocr-workers").value) || 2, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf" };
-	const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, worker_count: Number(document.querySelector("#settings-extraction-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64, max_stored_text_kb: Number(document.querySelector("#settings-stored-text").value) || 1024 };
+  const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, worker_count: Number(document.querySelector("#settings-ocr-workers").value) || 2, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf", exclude_extensions: splitLines(document.querySelector("#settings-ocr-exclude-extensions").value) };
+	const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, worker_count: Number(document.querySelector("#settings-extraction-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64, max_stored_text_kb: Number(document.querySelector("#settings-stored-text").value) || 1024, exclude_extensions: splitLines(document.querySelector("#settings-extraction-exclude-extensions").value) };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, worker_count: Number(document.querySelector("#settings-hashing-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
   const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
   try {
-	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
-	await refresh({ quiet: true, message: "Indexing settings saved; restart to apply background worker changes" });
+	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ scan_interval_seconds: (Number(document.querySelector("#settings-scan-interval").value) || 360) * 60, root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
+	await refresh({ quiet: true, message: "Indexing settings saved; worker-count changes apply after restart" });
   } catch (err) { setMessage(err.message); }
 }
 

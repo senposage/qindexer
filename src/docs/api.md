@@ -369,6 +369,7 @@ Updates global crawler resource and enrichment settings:
 
 ```json
 {
+  "scan_interval_seconds": 21600,
   "collect_ownership": true,
   "adaptive_throttle": {
     "enabled": true,
@@ -382,7 +383,8 @@ Updates global crawler resource and enrichment settings:
     "worker_count": 1,
     "queue_size": 1000,
     "max_file_size_mb": 64,
-    "max_stored_text_kb": 1024
+    "max_stored_text_kb": 1024,
+    "exclude_extensions": ["png", "jpg", "jpeg"]
   },
   "ocr": {
     "enabled": true,
@@ -393,7 +395,8 @@ Updates global crawler resource and enrichment settings:
     "worker_count": 1,
     "queue_size": 100,
     "max_file_size_mb": 128,
-    "timeout_seconds": 180
+    "timeout_seconds": 180,
+    "exclude_extensions": ["pdf"]
   },
   "hashing": {
     "enabled": true,
@@ -403,6 +406,10 @@ Updates global crawler resource and enrichment settings:
   }
 }
 ```
+
+`content_extraction.exclude_extensions` and `ocr.exclude_extensions` accept
+arrays of extension names without a leading dot. The admin UI presents these as
+one extension per line; it does not use comma-separated input.
 
 ### POST /admin/v1/index/compact
 

@@ -29,7 +29,7 @@ index:
   max_results: 200
 
 crawler:
-  scan_interval_seconds: 300
+  scan_interval_seconds: 21600
   root_parallelism: 1
   directory_worker_count: 2
   metadata_worker_count: 4

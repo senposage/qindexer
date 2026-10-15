@@ -45,6 +45,26 @@ func TestExpandRootPathsRejectsEmptyGlob(t *testing.T) {
 	}
 }
 
+func TestExcludedImageIsNominatedForOCRWithoutContentExtraction(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "scan.jpg")
+	if err := os.WriteFile(path, []byte("image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Crawler: config.CrawlerConfig{
+		ContentExtraction: config.ContentExtractionConfig{Enabled: true, ExcludeExtensions: []string{"jpg"}},
+		OCR:               config.OCRConfig{Enabled: true},
+	}}
+	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	doc, indexable, err := c.describePath(config.RootConfig{ID: "root", Path: rootPath, Enabled: true}, path, 1)
+	if err != nil || !indexable {
+		t.Fatalf("describe image = %#v, indexable=%t, err=%v", doc, indexable, err)
+	}
+	if doc.OCRStatus != "pending" || doc.ContentStatus != "" {
+		t.Fatalf("excluded image routing = %#v", doc)
+	}
+}
+
 func TestRootWorkProfileCapsHighLatencyRoots(t *testing.T) {
 	profile := capRootWorkProfile(rootWorkProfile{
 		Latency:          150 * time.Millisecond,

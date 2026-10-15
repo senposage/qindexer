@@ -221,12 +221,20 @@ func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 	if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET ocr_status = 'pending' WHERE id = 'extractable'`); err != nil {
 		t.Fatal(err)
 	}
-	backlog, err := cat.BackgroundBacklog(ctx)
+	backlog, err := cat.BackgroundBacklog(ctx, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if backlog.Content != 1 || backlog.OCR != 1 || backlog.Hash != 2 {
 		t.Fatalf("unexpected backlog: %#v", backlog)
+	}
+	cat.InvalidateBackgroundBacklog()
+	backlog, err = cat.BackgroundBacklog(ctx, []string{"pdf"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backlog.Content != 0 || backlog.OCR != 1 || backlog.Hash != 2 {
+		t.Fatalf("exclusion-aware backlog = %#v", backlog)
 	}
 }
 
@@ -855,11 +863,11 @@ func TestClaimPendingWorkRespectsRootSelection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	items, err := cat.ClaimPendingContent(ctx, []string{"enabled"}, 10, 1024)
+	items, err := cat.ClaimPendingContent(ctx, []string{"enabled"}, 10, 1024, nil)
 	if err != nil || len(items) != 1 || items[0].RootID != "enabled" {
 		t.Fatalf("claimed items = %#v, %v", items, err)
 	}
-	items, err = cat.ClaimPendingContent(ctx, []string{"disabled"}, 10, 1024)
+	items, err = cat.ClaimPendingContent(ctx, []string{"disabled"}, 10, 1024, nil)
 	if err != nil || len(items) != 1 || items[0].RootID != "disabled" {
 		t.Fatalf("claimed items = %#v, %v", items, err)
 	}
@@ -879,7 +887,7 @@ func TestBackgroundFailuresAreBoundedAndSeparatedFromNewWork(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	claimed, err := cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024)
+	claimed, err := cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024, nil)
 	if err != nil || len(claimed) != 2 {
 		t.Fatalf("initial claims = %#v, %v", claimed, err)
 	}
@@ -899,7 +907,7 @@ func TestBackgroundFailuresAreBoundedAndSeparatedFromNewWork(t *testing.T) {
 			t.Fatalf("attempt %d status = %q, want %q", attempt, status, want)
 		}
 	}
-	claimed, err = cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024)
+	claimed, err = cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024, nil)
 	if err != nil || len(claimed) != 0 {
 		t.Fatalf("terminal failures returned to normal queue: %#v, %v", claimed, err)
 	}
@@ -914,7 +922,7 @@ func TestResetEnrichmentFailuresIsScopedToRequestedRoot(t *testing.T) {
 	defer cat.Close()
 	modified := time.Now().UTC()
 	for _, rootID := range []string{"manual", "other"} {
-		doc := Document{ID: rootID, RootID: rootID, Path: `D:\` + rootID + `.txt`, NormalizedPath: NormalizePath(`D:\` + rootID + `.txt`), Name: rootID + ".txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		doc := Document{ID: rootID, RootID: rootID, Path: `D:\` + rootID + `.pdf`, NormalizedPath: NormalizePath(`D:\` + rootID + `.pdf`), Name: rootID + ".pdf", Extension: "pdf", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
 		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
 			t.Fatal(err)
 		}
@@ -929,17 +937,52 @@ func TestResetEnrichmentFailuresIsScopedToRequestedRoot(t *testing.T) {
 	if err != nil || content != 1 || ocr != 1 {
 		t.Fatalf("reset = content %d, ocr %d, err %v", content, ocr, err)
 	}
-	contentJobs, err := cat.ClaimPendingContent(ctx, []string{"manual"}, 10, 1024)
+	contentJobs, err := cat.ClaimPendingContent(ctx, []string{"manual"}, 10, 1024, nil)
 	if err != nil || len(contentJobs) != 1 {
 		t.Fatalf("manual content claim = %#v, %v", contentJobs, err)
 	}
-	ocrJobs, err := cat.ClaimPendingOCR(ctx, []string{"manual"}, 10, 1024)
+	ocrJobs, err := cat.ClaimPendingOCR(ctx, []string{"manual"}, 10, 1024, nil)
 	if err != nil || len(ocrJobs) != 1 {
 		t.Fatalf("manual OCR claim = %#v, %v", ocrJobs, err)
 	}
-	otherContent, err := cat.ClaimPendingContent(ctx, []string{"other"}, 10, 1024)
+	otherContent, err := cat.ClaimPendingContent(ctx, []string{"other"}, 10, 1024, nil)
 	if err != nil || len(otherContent) != 0 {
 		t.Fatalf("automatic root requeued terminal work: %#v, %v", otherContent, err)
+	}
+}
+
+func TestBackgroundClaimsExcludeConfiguredExtensions(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, extension := range []string{"txt", "jpg", "pdf"} {
+		id := "file-" + extension
+		doc := Document{ID: id, RootID: "root", Path: `D:\\` + id + "." + extension, NormalizedPath: NormalizePath(`D:\\` + id + "." + extension), Name: id + "." + extension, Extension: extension, Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+		if extension != "txt" {
+			if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET ocr_status = 'pending' WHERE id = ?`, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	content, err := cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024, []string{"jpg"})
+	if err != nil || len(content) != 2 {
+		t.Fatalf("content claims = %#v, %v", content, err)
+	}
+	for _, item := range content {
+		if item.Path == `D:\\file-jpg.jpg` {
+			t.Fatalf("excluded image was queued for content: %#v", item)
+		}
+	}
+	ocr, err := cat.ClaimPendingOCR(ctx, []string{"root"}, 10, 1024, []string{"jpg"})
+	if err != nil || len(ocr) != 1 || ocr[0].Path != `D:\\file-pdf.pdf` {
+		t.Fatalf("OCR claims = %#v, %v", ocr, err)
 	}
 }
 

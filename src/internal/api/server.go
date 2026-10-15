@@ -1557,6 +1557,8 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	dataDir := config.ResolveDataDir(s.configPath, s.cfg.Index.DataDir)
 	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
+	contentExcluded := append([]string(nil), s.cfg.Crawler.ContentExtraction.ExcludeExtensions...)
+	ocrExcluded := append([]string(nil), s.cfg.Crawler.OCR.ExcludeExtensions...)
 	watch := s.watcher
 	s.mu.RUnlock()
 	size, err := indexSizeBytes(dataDir)
@@ -1572,7 +1574,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		size = storage.DatabaseBytes
 	}
 	_, backgroundReady := s.cat.CachedBackgroundBacklog()
-	s.cat.WarmAdminStats(maxStoredTextBytes)
+	s.cat.WarmAdminStats(maxStoredTextBytes, contentExcluded, ocrExcluded)
 	watcherStats := watcher.Stats{}
 	if watch != nil {
 		watcherStats = watch.Stats()
@@ -1717,6 +1719,7 @@ func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("crawler settings update requested")
 	var req struct {
+		ScanIntervalSeconds  int                            `json:"scan_interval_seconds"`
 		RootParallelism      int                            `json:"root_parallelism"`
 		DirectoryWorkerCount int                            `json:"directory_worker_count"`
 		MetadataWorkerCount  int                            `json:"metadata_worker_count"`
@@ -1736,6 +1739,9 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	candidate := config.Clone(s.cfg)
+	if req.ScanIntervalSeconds > 0 {
+		candidate.Crawler.ScanIntervalSeconds = req.ScanIntervalSeconds
+	}
 	if req.RootParallelism > 0 {
 		candidate.Crawler.RootParallelism = req.RootParallelism
 	}
@@ -1767,7 +1773,8 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
-	s.log.Info("crawler settings update completed", "root_parallelism", s.cfg.Crawler.RootParallelism, "directory_worker_limit", s.cfg.Crawler.DirectoryWorkerCount, "metadata_worker_limit", s.cfg.Crawler.MetadataWorkerCount, "metadata_queue_size", s.cfg.Crawler.MetadataQueueSize, "index_batch_size", s.cfg.Crawler.IndexBatchSize, "content_workers", s.cfg.Crawler.ContentExtraction.WorkerCount, "ocr_workers", s.cfg.Crawler.OCR.WorkerCount, "hash_workers", s.cfg.Crawler.Hashing.WorkerCount, "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
+	s.cat.InvalidateBackgroundBacklog()
+	s.log.Info("crawler settings update completed", "scan_interval", s.cfg.Crawler.ScanInterval(), "root_parallelism", s.cfg.Crawler.RootParallelism, "directory_worker_limit", s.cfg.Crawler.DirectoryWorkerCount, "metadata_worker_limit", s.cfg.Crawler.MetadataWorkerCount, "metadata_queue_size", s.cfg.Crawler.MetadataQueueSize, "index_batch_size", s.cfg.Crawler.IndexBatchSize, "content_workers", s.cfg.Crawler.ContentExtraction.WorkerCount, "ocr_workers", s.cfg.Crawler.OCR.WorkerCount, "hash_workers", s.cfg.Crawler.Hashing.WorkerCount, "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler, "watcher": s.cfg.Watcher})
 }
 

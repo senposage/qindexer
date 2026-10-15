@@ -19,14 +19,20 @@ type OCROptions struct {
 	Languages        string
 }
 
+var ocrEligibleExtensions = []string{"pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"}
+
 // OCREligible reports whether an empty extraction can be followed by local OCR.
 func OCREligible(path string) bool {
 	switch strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".") {
 	case "pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp":
 		return true
-	default:
-		return false
 	}
+	return false
+}
+
+// OCREligibleExtensions reports file types that can be submitted to a local OCR engine.
+func OCREligibleExtensions() []string {
+	return append([]string(nil), ocrEligibleExtensions...)
 }
 
 // OCR invokes a locally installed engine. It never changes the indexed source.
