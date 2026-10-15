@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.20 - 2026-10-15
+
+- Add global, line-based file-type exclusions for ordinary content extraction
+  and OCR. Queue claims and backlog counts now honor the configured lists.
+- Exclude common image formats from ordinary text extraction by default and
+  route newly indexed eligible images directly to OCR when enabled.
+- Restrict OCR candidates to supported PDFs and image formats.
+- Make the full reconciliation interval editable in the admin UI, apply it to
+  the live scheduler, and use a six-hour default in example configurations.
+
 ## 1.2.19 - 2026-10-14
 
 - Upgrade only the exact historical crawler default profile on startup to the
