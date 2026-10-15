@@ -1010,3 +1010,21 @@ QSurfer may still pass `-ServiceName` when it has an exact name, but it no
 longer needs to depend on the generic `QIndexer` default for an upgrade. The
 installer remains the authority for its own lifecycle; QSurfer should poll the
 existing progress JSON while the service is intentionally offline.
+
+## 2026-10-14: Windows Private PostgreSQL DSN Repair
+
+QIndexer `v1.2.16` fixes a stock Windows PowerShell interpolation bug in the
+private PostgreSQL helper. Older builds emitted a DSN ending in `/=disable`
+instead of `/qindexer?sslmode=disable`; PostgreSQL then logged a failed
+connection to database `=disable` and QIndexer exited before the APIs came up.
+The package and service installers detect only that known local generated
+shape, rerun private database provisioning to rotate the local role password,
+and rewrite the DSN. They do not alter a custom or remote PostgreSQL DSN.
+
+QSurfer must treat an `installed but not running` result as a failed update:
+do not leave its NSSM wrapper paused. Restore the wrapper to `Running` only
+after the QIndexer health endpoint succeeds, or restore the prior running
+state on failure. The current QSurfer-managed install path copies the binary
+and PostgreSQL helper directly, bypassing the packaged full service installer,
+so it must explicitly invoke this repair or replace the malformed generated
+DSN before starting the service.

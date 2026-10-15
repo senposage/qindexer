@@ -196,7 +196,8 @@ $installedConfig = Join-Path $configDir "qindexer.yaml"
 if (Test-Path -LiteralPath $installedConfig) {
   $configText = Get-Content -LiteralPath $installedConfig -Raw
   $needsProvisionedDatabase = $configText -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:change-me@'
-  if ($needsProvisionedDatabase) {
+  $needsPrivateDSNRepair = $configText -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:[^@\s]+@127\.0\.0\.1:\d+/=disable["'']?\s*$'
+  if ($needsProvisionedDatabase -or $needsPrivateDSNRepair) {
     if ($SkipDatabase) { throw "The supplied configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
     Require-Admin
     $database = & (Join-Path $scriptDir "setup-postgres-windows.ps1") -InstallDir $InstallDir -DataDir $dataDir -ResetIncomplete -ProgressPath $ProgressPath | ConvertFrom-Json

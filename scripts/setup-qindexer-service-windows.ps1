@@ -216,13 +216,15 @@ if (-not (Test-Path -LiteralPath $configPath)) {
   Write-EmptyConfig -Path $configPath -DataDir $dataDir -DatabaseDSN $database.dsn
   Write-Host "Created an empty configuration. Add roots and set the first admin token in the web UI."
 }
-if ((Get-Content -LiteralPath $configPath -Raw) -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:change-me@') {
-  if ($SkipDatabase) { throw "The existing configuration contains the PostgreSQL placeholder DSN, but -SkipDatabase was requested." }
+$configText = Get-Content -LiteralPath $configPath -Raw
+$needsProvisionedDatabase = $configText -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:change-me@'
+$needsPrivateDSNRepair = $configText -match '(?m)^\s*dsn:\s*["'']?postgres://qindexer:[^@\s]+@127\.0\.0\.1:\d+/=disable["'']?\s*$'
+if ($needsProvisionedDatabase -or $needsPrivateDSNRepair) {
+  if ($SkipDatabase) { throw "The existing configuration requires private PostgreSQL setup, but -SkipDatabase was requested." }
   $postgresScript = Join-Path $scriptsDir "setup-postgres-windows.ps1"
   if (-not (Test-Path -LiteralPath $postgresScript)) { throw "The packaged PostgreSQL setup script is missing: $postgresScript" }
   $database = & $postgresScript -InstallDir $InstallDir -DataDir $dataDir -ResetIncomplete -ProgressPath $ProgressPath | ConvertFrom-Json
   if (-not $database.dsn) { throw "PostgreSQL setup did not return a QIndexer DSN." }
-  $configText = Get-Content -LiteralPath $configPath -Raw
   $configText = [regex]::Replace($configText, '(?m)^(\s*dsn:\s*).*$', {
       param($match)
       return $match.Groups[1].Value + '"' + $database.dsn + '"'

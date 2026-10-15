@@ -313,7 +313,7 @@ Report-Progress "completed" "postgres_ready" 100 "Private PostgreSQL is ready fo
 
 [pscustomobject]@{
   driver = "postgres"
-  dsn = "postgres://$RoleName`:$appPassword@127.0.0.1`:$selectedPort/$DatabaseName?sslmode=disable"
+  dsn = "postgres://$RoleName`:$appPassword@127.0.0.1`:$selectedPort/${DatabaseName}?sslmode=disable"
   host = "127.0.0.1"
   port = $selectedPort
   database = $DatabaseName
