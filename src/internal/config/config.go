@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -209,6 +210,12 @@ func ResolveDataDir(configPath string, dataDir string) string {
 }
 
 func (c *Config) applyDefaults() {
+	logicalCPUs := max(1, runtime.GOMAXPROCS(0))
+	defaultRootParallelism := min(4, max(1, (logicalCPUs+5)/6))
+	defaultDirectoryWorkers := min(64, max(16, logicalCPUs*3))
+	defaultMetadataWorkers := min(64, max(16, logicalCPUs*2))
+	defaultMetadataQueue := min(100000, max(10000, defaultMetadataWorkers*512))
+	defaultIndexBatch := min(8192, max(2000, defaultMetadataWorkers*128))
 	if c.Server.Bind == "" {
 		c.Server.Bind = "127.0.0.1:41973"
 	}
@@ -247,19 +254,19 @@ func (c *Config) applyDefaults() {
 		c.Crawler.ScanIntervalSeconds = 21600
 	}
 	if c.Crawler.RootParallelism <= 0 {
-		c.Crawler.RootParallelism = 1
+		c.Crawler.RootParallelism = defaultRootParallelism
 	}
 	if c.Crawler.DirectoryWorkerCount <= 0 {
-		c.Crawler.DirectoryWorkerCount = 16
+		c.Crawler.DirectoryWorkerCount = defaultDirectoryWorkers
 	}
 	if c.Crawler.MetadataWorkerCount <= 0 {
-		c.Crawler.MetadataWorkerCount = 32
+		c.Crawler.MetadataWorkerCount = defaultMetadataWorkers
 	}
 	if c.Crawler.MetadataQueueSize <= 0 {
-		c.Crawler.MetadataQueueSize = 5000
+		c.Crawler.MetadataQueueSize = defaultMetadataQueue
 	}
 	if c.Crawler.IndexBatchSize <= 0 {
-		c.Crawler.IndexBatchSize = 1000
+		c.Crawler.IndexBatchSize = defaultIndexBatch
 	}
 	if c.Crawler.MissingAfterSuccessfulCrawls <= 0 {
 		c.Crawler.MissingAfterSuccessfulCrawls = 3
@@ -378,6 +385,15 @@ func (c *Config) Validate() error {
 		if workers.count < 1 || workers.count > 256 {
 			return fmt.Errorf("%s must be between 1 and 256", workers.name)
 		}
+	}
+	if c.Crawler.RootParallelism < 1 || c.Crawler.RootParallelism > 32 {
+		return fmt.Errorf("root crawl limit must be between 1 and 32")
+	}
+	if c.Crawler.MetadataQueueSize < 100 || c.Crawler.MetadataQueueSize > 1000000 {
+		return fmt.Errorf("metadata queue size must be between 100 and 1000000")
+	}
+	if c.Crawler.IndexBatchSize < 1 || c.Crawler.IndexBatchSize > 1000000 {
+		return fmt.Errorf("index batch size must be between 1 and 1000000")
 	}
 	throttle := c.Crawler.AdaptiveThrottle
 	if throttle.SampleIntervalSeconds < 1 || throttle.SampleIntervalSeconds > 3600 {

@@ -490,6 +490,19 @@ function renderOpsSummary(metrics, progress) {
   document.querySelector("#ops-directory-counts").textContent = first ? `${Number(first.directory_files || 0).toLocaleString()} files, ${Number(first.directory_folders || 0).toLocaleString()} folders` : "-";
   const workerProfile = first?.directory_workers ? ` | ${first.performance_class || "measured"} root: ${first.directory_workers} dir / ${first.metadata_workers} metadata workers` : "";
   document.querySelector("#ops-activity").textContent = metrics.last_activity_unix ? `${formatActivityAge(metrics.last_activity_unix)} | ${formatRate(metrics.files_per_second || 0)} files/s | ${formatRate(metrics.directories_per_second || 0)} dirs/s${workerProfile}` : "-";
+	const rootRates = document.querySelector("#ops-root-rates");
+	rootRates.replaceChildren();
+	for (const item of progress) {
+		const row = document.createElement("div");
+		const root = document.createElement("b");
+		const rate = document.createElement("span");
+		const queue = item.metadata_queue_capacity ? ` | queue ${Number(item.metadata_queue_depth || 0).toLocaleString()} / ${Number(item.metadata_queue_capacity).toLocaleString()}` : "";
+		root.textContent = item.root_id || "root";
+		rate.textContent = `${formatRate(item.files_per_second || 0)} files/s | ${formatRate(item.directories_per_second || 0)} dirs/s | ${formatBytes(item.logical_bytes_per_second || 0)}/s logical${queue}`;
+		row.title = item.current_directory || "";
+		row.append(root, rate);
+		rootRates.append(row);
+	}
   const watcherEnabled = watch.enabled || state.watcher?.enabled;
   const watcherStatus = watch.running
     ? `${Number(watch.watched_directories || 0).toLocaleString()} / ${Number(watch.max_watched_directories || 0).toLocaleString()} folders`
@@ -704,6 +717,9 @@ function renderIndexingSettings(crawler, watcher = {}) {
   document.querySelector("#settings-watcher-rebalance").value = watcher.rebalance_minutes || 15;
 	  document.querySelector("#settings-directory-workers").value = crawler.directory_worker_count || 16;
 	  document.querySelector("#settings-metadata-workers").value = crawler.metadata_worker_count || 32;
+	  document.querySelector("#settings-root-parallelism").value = crawler.root_parallelism || 1;
+	  document.querySelector("#settings-metadata-queue").value = crawler.metadata_queue_size || 5000;
+	  document.querySelector("#settings-index-batch").value = crawler.index_batch_size || 1000;
 }
 
 function renderNetworkSettings(network) {
@@ -746,7 +762,7 @@ async function saveIndexingSettings(event) {
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
   const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
   try {
-    await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
+	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
 	await refresh({ quiet: true, message: "Indexing settings saved; restart to apply background worker changes" });
   } catch (err) { setMessage(err.message); }
 }

@@ -28,13 +28,15 @@ index:
 
 crawler:
   scan_interval_seconds: 300
-  root_parallelism: 1
+  # Independent roots run concurrently. Per-root latency probes reduce this
+  # configuration ceiling for slow NAS and VPN paths.
+  root_parallelism: 3
   # High ceilings for a fast local root. QIndexer measures each root and caps
   # slower SMB/NAS roots below these values.
-  directory_worker_count: 16
+  directory_worker_count: 48
   metadata_worker_count: 32
-  metadata_queue_size: 5000
-  index_batch_size: 1000
+  metadata_queue_size: 16384
+  index_batch_size: 4096
   ignore_hidden: false
   follow_symlinks: false
   missing_after_successful_crawls: 3

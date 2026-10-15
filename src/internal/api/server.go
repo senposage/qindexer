@@ -1717,8 +1717,11 @@ func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("crawler settings update requested")
 	var req struct {
+		RootParallelism      int                            `json:"root_parallelism"`
 		DirectoryWorkerCount int                            `json:"directory_worker_count"`
 		MetadataWorkerCount  int                            `json:"metadata_worker_count"`
+		MetadataQueueSize    int                            `json:"metadata_queue_size"`
+		IndexBatchSize       int                            `json:"index_batch_size"`
 		CollectOwnership     bool                           `json:"collect_ownership"`
 		AdaptiveThrottle     config.AdaptiveThrottleConfig  `json:"adaptive_throttle"`
 		ContentExtraction    config.ContentExtractionConfig `json:"content_extraction"`
@@ -1733,11 +1736,20 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	candidate := config.Clone(s.cfg)
+	if req.RootParallelism > 0 {
+		candidate.Crawler.RootParallelism = req.RootParallelism
+	}
 	if req.DirectoryWorkerCount > 0 {
 		candidate.Crawler.DirectoryWorkerCount = req.DirectoryWorkerCount
 	}
 	if req.MetadataWorkerCount > 0 {
 		candidate.Crawler.MetadataWorkerCount = req.MetadataWorkerCount
+	}
+	if req.MetadataQueueSize > 0 {
+		candidate.Crawler.MetadataQueueSize = req.MetadataQueueSize
+	}
+	if req.IndexBatchSize > 0 {
+		candidate.Crawler.IndexBatchSize = req.IndexBatchSize
 	}
 	candidate.Crawler.CollectOwnership = req.CollectOwnership
 	candidate.Crawler.AdaptiveThrottle = req.AdaptiveThrottle
@@ -1755,7 +1767,7 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
-	s.log.Info("crawler settings update completed", "directory_worker_limit", s.cfg.Crawler.DirectoryWorkerCount, "metadata_worker_limit", s.cfg.Crawler.MetadataWorkerCount, "content_workers", s.cfg.Crawler.ContentExtraction.WorkerCount, "ocr_workers", s.cfg.Crawler.OCR.WorkerCount, "hash_workers", s.cfg.Crawler.Hashing.WorkerCount, "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
+	s.log.Info("crawler settings update completed", "root_parallelism", s.cfg.Crawler.RootParallelism, "directory_worker_limit", s.cfg.Crawler.DirectoryWorkerCount, "metadata_worker_limit", s.cfg.Crawler.MetadataWorkerCount, "metadata_queue_size", s.cfg.Crawler.MetadataQueueSize, "index_batch_size", s.cfg.Crawler.IndexBatchSize, "content_workers", s.cfg.Crawler.ContentExtraction.WorkerCount, "ocr_workers", s.cfg.Crawler.OCR.WorkerCount, "hash_workers", s.cfg.Crawler.Hashing.WorkerCount, "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler, "watcher": s.cfg.Watcher})
 }
 

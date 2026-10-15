@@ -264,8 +264,11 @@ func TestUpdateCrawlerSettingsSavesAdaptiveThrottle(t *testing.T) {
 	}
 	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
 	request := httptest.NewRequest(http.MethodPut, "/admin/v1/crawler/settings", bytes.NewBufferString(`{
+		"root_parallelism":3,
 		"directory_worker_count":12,
 		"metadata_worker_count":24,
+		"metadata_queue_size":12000,
+		"index_batch_size":3000,
 		"collect_ownership":false,
 		"adaptive_throttle":{"enabled":true,"sample_interval_seconds":7,"cpu_percent_threshold":63,"disk_busy_percent_threshold":58,"recovery_samples":5},
 		"content_extraction":{"enabled":false},
@@ -282,7 +285,7 @@ func TestUpdateCrawlerSettingsSavesAdaptiveThrottle(t *testing.T) {
 	if !throttle.Enabled || throttle.SampleIntervalSeconds != 7 || throttle.CPUPercentThreshold != 63 || throttle.DiskBusyPercentThreshold != 58 || throttle.RecoverySamples != 5 {
 		t.Fatalf("adaptive throttle was not saved: %#v", throttle)
 	}
-	if cfg.Crawler.DirectoryWorkerCount != 12 || cfg.Crawler.MetadataWorkerCount != 24 {
+	if cfg.Crawler.RootParallelism != 3 || cfg.Crawler.DirectoryWorkerCount != 12 || cfg.Crawler.MetadataWorkerCount != 24 || cfg.Crawler.MetadataQueueSize != 12000 || cfg.Crawler.IndexBatchSize != 3000 {
 		t.Fatalf("worker limits were not saved: %#v", cfg.Crawler)
 	}
 }

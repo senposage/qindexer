@@ -1071,3 +1071,20 @@ serialization. Please repair the PostgreSQL search query/argument construction
 and add a PostgreSQL-backed regression test covering the exact request above,
 including relevance sorting and explicit four-field matching. Do not change the
 wire protocol or make QSurfer omit match fields as a workaround.
+
+## 2026-10-14: Adaptive Crawl Throughput (1.2.18)
+
+QIndexer now runs PostgreSQL metadata batches concurrently rather than
+serializing them through SQLite's single-writer lock. New configurations size
+the initial crawl ceiling from available logical CPUs; on a 16-logical-core
+host the defaults are 3 concurrent roots, 48 directory workers, 32 metadata
+workers, a 16,384-entry metadata queue, and 4,096-document batches. Existing
+configured values are preserved until changed in the QIndexer admin UI.
+
+`GET /admin/v1/metrics` now includes per-active-root fields under
+`crawler.active_progress`: `files_per_second`, `directories_per_second`,
+`logical_bytes_per_second`, `metadata_queue_depth`,
+`metadata_queue_capacity`, and `database_batches`. The crawler settings
+endpoint accepts `root_parallelism`, `metadata_queue_size`, and
+`index_batch_size` in addition to its existing worker limits. No QSurfer
+wire-protocol change is required.

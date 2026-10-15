@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.18 - 2026-10-14
+
+- Remove SQLite's single-writer gate from PostgreSQL metadata batches so
+  independent roots and batches can use the configured PostgreSQL connection
+  pool concurrently.
+- Size new crawler configurations from the host's logical CPU count and expose
+  concurrent-root, metadata-queue, and database-batch limits in the admin UI.
+- Use a multi-sample root latency probe, preserve conservative limits for
+  high-latency storage, and display live per-root indexing rate, queue depth,
+  batch count, and logical indexed size.
+- Rename the UI's former I/O-rate counter to indexed-size rate. It measures
+  indexed file sizes during metadata traversal, not physical disk throughput.
+
 ## 1.2.17 - 2026-10-14
 
 - Fix PostgreSQL search binding for field-scoped queries. The query predicate

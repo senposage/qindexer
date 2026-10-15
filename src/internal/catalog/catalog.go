@@ -1809,14 +1809,19 @@ func (c *Catalog) UpsertDocument(ctx context.Context, doc Document) (UpsertResul
 	return UpsertResult{Updated: true}, tx.Commit()
 }
 
-// UpsertDocuments commits a metadata batch in one SQLite transaction. Full
-// crawls use this path to avoid serializing one durable commit per file.
+// UpsertDocuments commits a metadata batch in one transaction. Full crawls use
+// this path to avoid serializing one durable commit per file.
 func (c *Catalog) UpsertDocuments(ctx context.Context, docs []Document) ([]UpsertResult, error) {
 	if len(docs) == 0 {
 		return nil, nil
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	// SQLite permits a single writer. PostgreSQL can commit independent root
+	// batches concurrently, so retaining this legacy process-wide gate would
+	// throw away the connection pool and stall directory workers behind it.
+	if c.db.backend == backendSQLite {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err

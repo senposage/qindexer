@@ -96,7 +96,7 @@
         <strong id="dirs-rate">0</strong>
       </div>
       <div class="metric admin-metric">
-        <span>I/O rate</span>
+        <span title="Logical size of files whose metadata is being indexed; this is not physical disk read throughput.">Indexed size/sec</span>
         <strong id="io-rate">0 B/s</strong>
       </div>
       <div class="metric admin-metric">
@@ -151,6 +151,7 @@
           <div><dt>OCR</dt><dd id="ops-ocr">-</dd></div>
           <div><dt>Hashing</dt><dd id="ops-hash">-</dd></div>
         </dl>
+        <div id="ops-root-rates" class="ops-root-rates" aria-label="active root rates"></div>
         <p id="ops-alert" class="ops-alert hidden" role="alert"></p>
       </div>
       <div class="ops-metrics" aria-label="crawler background work">
@@ -404,11 +405,14 @@
           </div>
           <div class="form-section-title">
 			<p class="eyebrow">Crawl concurrency</p>
-			<p>These are upper limits. Each root is briefly measured at the start of a crawl; high-latency roots receive a lower per-root cap.</p>
+			<p>These are upper limits. Each root is measured at the start of a crawl; high-latency roots receive a lower per-root cap.</p>
 		  </div>
 		  <div class="rules-grid">
+			<label>Concurrent roots<input id="settings-root-parallelism" type="number" min="1" max="32" step="1"></label>
 			<label>Directory worker limit<input id="settings-directory-workers" type="number" min="1" max="256" step="1"></label>
 			<label>Metadata worker limit<input id="settings-metadata-workers" type="number" min="1" max="256" step="1"></label>
+			<label>Metadata queue size<input id="settings-metadata-queue" type="number" min="100" max="1000000" step="100"></label>
+			<label>Database batch size<input id="settings-index-batch" type="number" min="1" max="1000000" step="100"></label>
 		  </div>
 		  <div class="form-section-title">
             <p class="eyebrow">Optional indexing work</p>

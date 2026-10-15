@@ -336,6 +336,29 @@ func TestThroughputUsesRollingSample(t *testing.T) {
 	}
 }
 
+func TestProgressIncludesPerRootRateAndQueuePressure(t *testing.T) {
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	finish := c.beginProgress("fast-root", "C:\\")
+	defer finish()
+	started := time.Now()
+	c.sampleProgressThroughput(started)
+	c.updateDirectoryProgress("fast-root", `C:\\work`, 2, 1)
+	c.recordProgressFiles("fast-root", 12, 2048)
+	c.recordProgressBatch("fast-root", 450, 1000)
+	c.sampleProgressThroughput(started.Add(2 * time.Second))
+	progress := c.ActiveProgress()
+	if len(progress) != 1 {
+		t.Fatalf("progress count = %d, want 1", len(progress))
+	}
+	item := progress[0]
+	if item.FilesPerSecond != 6 || item.DirectoriesPerSecond != 0.5 || item.LogicalBytesPerSecond != 1024 {
+		t.Fatalf("unexpected progress rate: %#v", item)
+	}
+	if item.MetadataQueueDepth != 450 || item.MetadataQueueCapacity != 1000 || item.DatabaseBatches != 1 {
+		t.Fatalf("unexpected queue state: %#v", item)
+	}
+}
+
 func TestAdaptivePressureRecoversAfterHealthySamples(t *testing.T) {
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.updateAdaptivePressure("cpu", 90, 0, 3)

@@ -73,3 +73,11 @@ func TestDatabaseDefaultsToPostgresAndRequiresDSN(t *testing.T) {
 		t.Fatalf("expected postgres configuration with a DSN to validate: %v", err)
 	}
 }
+
+func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
+	cfg := Config{}
+	cfg.ApplyDefaults()
+	if cfg.Crawler.RootParallelism < 1 || cfg.Crawler.DirectoryWorkerCount < 16 || cfg.Crawler.MetadataWorkerCount < 16 || cfg.Crawler.MetadataQueueSize < 10000 || cfg.Crawler.IndexBatchSize < 2000 {
+		t.Fatalf("unexpected crawler defaults: %#v", cfg.Crawler)
+	}
+}

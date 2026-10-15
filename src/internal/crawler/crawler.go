@@ -123,21 +123,28 @@ type throughputSample struct {
 }
 
 type CrawlProgress struct {
-	RootID           string    `json:"root_id"`
-	StartedAt        time.Time `json:"started_at"`
-	CurrentDirectory string    `json:"current_directory,omitempty"`
-	DirectoryFiles   int       `json:"directory_files"`
-	DirectoryFolders int       `json:"directory_folders"`
-	DirectoriesRead  int64     `json:"directories_read"`
-	FilesIndexed     int64     `json:"files_indexed"`
-	Errors           int64     `json:"errors"`
-	AccessErrors     int64     `json:"access_errors"`
-	PerformanceClass string    `json:"performance_class,omitempty"`
-	ProbeLatencyMS   float64   `json:"probe_latency_ms,omitempty"`
-	DirectoryWorkers int       `json:"directory_workers,omitempty"`
-	MetadataWorkers  int       `json:"metadata_workers,omitempty"`
-	LastError        string    `json:"last_error,omitempty"`
-	LastActivityUnix int64     `json:"last_activity_unix"`
+	RootID                string    `json:"root_id"`
+	StartedAt             time.Time `json:"started_at"`
+	CurrentDirectory      string    `json:"current_directory,omitempty"`
+	DirectoryFiles        int       `json:"directory_files"`
+	DirectoryFolders      int       `json:"directory_folders"`
+	DirectoriesRead       int64     `json:"directories_read"`
+	FilesIndexed          int64     `json:"files_indexed"`
+	LogicalBytesIndexed   int64     `json:"logical_bytes_indexed"`
+	FilesPerSecond        float64   `json:"files_per_second"`
+	DirectoriesPerSecond  float64   `json:"directories_per_second"`
+	LogicalBytesPerSecond float64   `json:"logical_bytes_per_second"`
+	MetadataQueueDepth    int       `json:"metadata_queue_depth"`
+	MetadataQueueCapacity int       `json:"metadata_queue_capacity"`
+	DatabaseBatches       int64     `json:"database_batches"`
+	Errors                int64     `json:"errors"`
+	AccessErrors          int64     `json:"access_errors"`
+	PerformanceClass      string    `json:"performance_class,omitempty"`
+	ProbeLatencyMS        float64   `json:"probe_latency_ms,omitempty"`
+	DirectoryWorkers      int       `json:"directory_workers,omitempty"`
+	MetadataWorkers       int       `json:"metadata_workers,omitempty"`
+	LastError             string    `json:"last_error,omitempty"`
+	LastActivityUnix      int64     `json:"last_activity_unix"`
 }
 
 type rootWorkProfile struct {
@@ -147,13 +154,15 @@ type rootWorkProfile struct {
 	MetadataWorkers  int
 }
 
-// probeRootWork uses tiny directory reads to pick a per-root concurrency cap.
-// It deliberately avoids file-content reads, which would compete with the crawl.
+// probeRootWork takes a small metadata-only sample to pick a per-root
+// concurrency cap. It deliberately avoids file-content reads, which would
+// compete with the crawl, but several samples avoid letting one cached read
+// define an entire root's profile.
 func probeRootWork(ctx context.Context, paths []string, settings config.CrawlerConfig) rootWorkProfile {
 	profile := rootWorkProfile{Class: "unmeasured", DirectoryWorkers: max(1, settings.DirectoryWorkerCount), MetadataWorkers: max(1, settings.MetadataWorkerCount)}
 	var samples []time.Duration
 	for _, path := range paths {
-		for attempt := 0; attempt < 3; attempt++ {
+		for attempt := 0; attempt < 8; attempt++ {
 			if ctx.Err() != nil {
 				return profile
 			}
@@ -162,10 +171,15 @@ func probeRootWork(ctx context.Context, paths []string, settings config.CrawlerC
 			if err != nil {
 				break
 			}
-			_, readErr := file.Readdirnames(1)
+			names, readErr := file.Readdirnames(16)
 			_ = file.Close()
 			if readErr != nil && !errors.Is(readErr, io.EOF) {
 				break
+			}
+			for _, name := range names {
+				if _, err := os.Lstat(filepath.Join(path, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					break
+				}
 			}
 			samples = append(samples, time.Since(started))
 		}
@@ -178,11 +192,8 @@ func probeRootWork(ctx context.Context, paths []string, settings config.CrawlerC
 		profile.MetadataWorkers = min(profile.MetadataWorkers, 8)
 		return profile
 	}
-	var total time.Duration
-	for _, sample := range samples {
-		total += sample
-	}
-	profile.Latency = total / time.Duration(len(samples))
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	profile.Latency = samples[(len(samples)-1)*3/4]
 	return capRootWorkProfile(profile)
 }
 
@@ -209,6 +220,9 @@ func capRootWorkProfile(profile rootWorkProfile) rootWorkProfile {
 type crawlProgress struct {
 	mu sync.RWMutex
 	CrawlProgress
+	rateAt              time.Time
+	rateFiles, rateDirs int64
+	rateBytes           int64
 }
 
 type suppressedLog struct {
@@ -412,7 +426,7 @@ func (c *Crawler) updateDirectoryProgress(rootID, directory string, files, folde
 	item.mu.Unlock()
 }
 
-func (c *Crawler) recordProgressFiles(rootID string, count int64) {
+func (c *Crawler) recordProgressFiles(rootID string, count, logicalBytes int64) {
 	c.progressMu.RLock()
 	item := c.progress[rootID]
 	c.progressMu.RUnlock()
@@ -421,7 +435,22 @@ func (c *Crawler) recordProgressFiles(rootID string, count int64) {
 	}
 	item.mu.Lock()
 	item.FilesIndexed += count
+	item.LogicalBytesIndexed += logicalBytes
 	item.LastActivityUnix = time.Now().Unix()
+	item.mu.Unlock()
+}
+
+func (c *Crawler) recordProgressBatch(rootID string, queueDepth, queueCapacity int) {
+	c.progressMu.RLock()
+	item := c.progress[rootID]
+	c.progressMu.RUnlock()
+	if item == nil {
+		return
+	}
+	item.mu.Lock()
+	item.MetadataQueueDepth = queueDepth
+	item.MetadataQueueCapacity = queueCapacity
+	item.DatabaseBatches++
 	item.mu.Unlock()
 }
 
@@ -490,6 +519,32 @@ func (c *Crawler) sampleThroughput(now time.Time) {
 		}
 	}
 	c.rate.at, c.rate.files, c.rate.dirs, c.rate.bytes = now, files, dirs, bytes
+	c.sampleProgressThroughput(now)
+}
+
+func (c *Crawler) sampleProgressThroughput(now time.Time) {
+	c.progressMu.RLock()
+	items := make([]*crawlProgress, 0, len(c.progress))
+	for _, item := range c.progress {
+		items = append(items, item)
+	}
+	c.progressMu.RUnlock()
+	for _, item := range items {
+		item.mu.Lock()
+		if !item.rateAt.IsZero() {
+			elapsed := now.Sub(item.rateAt).Seconds()
+			if elapsed > 0 {
+				item.FilesPerSecond = float64(item.FilesIndexed-item.rateFiles) / elapsed
+				item.DirectoriesPerSecond = float64(item.DirectoriesRead-item.rateDirs) / elapsed
+				item.LogicalBytesPerSecond = float64(item.LogicalBytesIndexed-item.rateBytes) / elapsed
+			}
+		}
+		item.rateAt = now
+		item.rateFiles = item.FilesIndexed
+		item.rateDirs = item.DirectoriesRead
+		item.rateBytes = item.LogicalBytesIndexed
+		item.mu.Unlock()
+	}
 }
 
 func (c *Crawler) currentThroughput() throughputSample {
@@ -1295,7 +1350,12 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 						atomic.AddInt64(&filesUnchanged, 1)
 					}
 				}
-				c.recordProgressFiles(root.ID, int64(len(results)))
+				var logicalBytes int64
+				for _, doc := range batch {
+					logicalBytes += doc.Size
+				}
+				c.recordProgressFiles(root.ID, int64(len(results)), logicalBytes)
+				c.recordProgressBatch(root.ID, len(jobs), cap(jobs))
 				c.RecordFolderActivity(ctx, root.ID, activityPaths, 1)
 				batch = batch[:0]
 				return true
