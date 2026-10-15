@@ -81,3 +81,33 @@ func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
 		t.Fatalf("unexpected crawler defaults: %#v", cfg.Crawler)
 	}
 }
+
+func TestLegacyCrawlerDefaultProfileUpgradesToHostSizedValues(t *testing.T) {
+	baseline := Config{}
+	baseline.ApplyDefaults()
+	cfg := Config{Crawler: CrawlerConfig{
+		RootParallelism:      1,
+		DirectoryWorkerCount: 16,
+		MetadataWorkerCount:  32,
+		MetadataQueueSize:    5000,
+		IndexBatchSize:       1000,
+	}}
+	cfg.ApplyDefaults()
+	if cfg.Crawler.RootParallelism != baseline.Crawler.RootParallelism || cfg.Crawler.DirectoryWorkerCount != baseline.Crawler.DirectoryWorkerCount || cfg.Crawler.MetadataWorkerCount != baseline.Crawler.MetadataWorkerCount || cfg.Crawler.MetadataQueueSize != baseline.Crawler.MetadataQueueSize || cfg.Crawler.IndexBatchSize != baseline.Crawler.IndexBatchSize {
+		t.Fatalf("legacy profile = %#v, want host defaults %#v", cfg.Crawler, baseline.Crawler)
+	}
+}
+
+func TestCustomizedCrawlerProfileIsNotOverwritten(t *testing.T) {
+	cfg := Config{Crawler: CrawlerConfig{
+		RootParallelism:      1,
+		DirectoryWorkerCount: 12,
+		MetadataWorkerCount:  24,
+		MetadataQueueSize:    4000,
+		IndexBatchSize:       800,
+	}}
+	cfg.ApplyDefaults()
+	if cfg.Crawler.DirectoryWorkerCount != 12 || cfg.Crawler.MetadataWorkerCount != 24 || cfg.Crawler.MetadataQueueSize != 4000 || cfg.Crawler.IndexBatchSize != 800 {
+		t.Fatalf("custom profile was overwritten: %#v", cfg.Crawler)
+	}
+}

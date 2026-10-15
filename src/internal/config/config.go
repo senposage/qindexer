@@ -216,6 +216,11 @@ func (c *Config) applyDefaults() {
 	defaultMetadataWorkers := min(64, max(16, logicalCPUs*2))
 	defaultMetadataQueue := min(100000, max(10000, defaultMetadataWorkers*512))
 	defaultIndexBatch := min(8192, max(2000, defaultMetadataWorkers*128))
+	legacyCrawlerDefaults := c.Crawler.RootParallelism == 1 &&
+		c.Crawler.DirectoryWorkerCount == 16 &&
+		c.Crawler.MetadataWorkerCount == 32 &&
+		c.Crawler.MetadataQueueSize == 5000 &&
+		c.Crawler.IndexBatchSize == 1000
 	if c.Server.Bind == "" {
 		c.Server.Bind = "127.0.0.1:41973"
 	}
@@ -253,7 +258,15 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.ScanIntervalSeconds <= 0 {
 		c.Crawler.ScanIntervalSeconds = 21600
 	}
-	if c.Crawler.RootParallelism <= 0 {
+	if legacyCrawlerDefaults {
+		// Upgrade the exact historical shipped profile, while preserving every
+		// intentionally customized setting already stored by an administrator.
+		c.Crawler.RootParallelism = defaultRootParallelism
+		c.Crawler.DirectoryWorkerCount = defaultDirectoryWorkers
+		c.Crawler.MetadataWorkerCount = defaultMetadataWorkers
+		c.Crawler.MetadataQueueSize = defaultMetadataQueue
+		c.Crawler.IndexBatchSize = defaultIndexBatch
+	} else if c.Crawler.RootParallelism <= 0 {
 		c.Crawler.RootParallelism = defaultRootParallelism
 	}
 	if c.Crawler.DirectoryWorkerCount <= 0 {

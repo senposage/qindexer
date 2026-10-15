@@ -1088,3 +1088,12 @@ configured values are preserved until changed in the QIndexer admin UI.
 endpoint accepts `root_parallelism`, `metadata_queue_size`, and
 `index_batch_size` in addition to its existing worker limits. No QSurfer
 wire-protocol change is required.
+
+## 2026-10-14: Legacy Performance Profile Migration (1.2.19)
+
+QIndexer `v1.2.19` automatically upgrades only the exact old shipped crawl
+profile (`1` concurrent root, `16` directory workers, `32` metadata workers,
+queue `5000`, batch `1000`) to the host-sized performance defaults during
+startup. Any profile that differs in any of those fields is treated as an
+administrator choice and is left untouched. QSurfer needs no protocol or UI
+change for this migration.

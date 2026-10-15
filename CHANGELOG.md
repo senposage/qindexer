@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.19 - 2026-10-14
+
+- Upgrade only the exact historical crawler default profile on startup to the
+  host-sized performance profile. Administrator-customized crawl settings are
+  preserved unchanged.
+
 ## 1.2.18 - 2026-10-14
 
 - Remove SQLite's single-writer gate from PostgreSQL metadata batches so
