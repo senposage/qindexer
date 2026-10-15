@@ -129,16 +129,12 @@ func (c *Catalog) searchPostgres(ctx context.Context, req SearchRequest, maxResu
 	hasQuery := strings.TrimSpace(req.Query) != "" || req.Filters.Boolean.TermCount() > 0
 	highlightQuery := strings.Join(append(append([]string{req.Query}, req.Filters.Boolean.All...), req.Filters.Boolean.Any...), " ")
 	if hasQuery {
-		clause, values, err := postgresMatchClause(req.Query, req.Filters.MatchFields, req.Filters.MatchMode, req.Filters.Boolean)
+		clause, values, err := postgresMatchWhere(req.Query, req.Filters.MatchFields, req.Filters.MatchMode, req.Filters.Boolean)
 		if err != nil {
 			return SearchResponse{}, err
 		}
-		folderClause, folderValues, err := postgresMatchClause(req.Query, []string{"name"}, req.Filters.MatchMode, req.Filters.Boolean)
-		if err != nil {
-			return SearchResponse{}, err
-		}
-		where = append(where, "("+clause+" AND (d.is_folder = FALSE OR ("+folderClause+")))")
-		args, args = append(args, values...), append(args, folderValues...)
+		where = append(where, clause)
+		args = append(args, values...)
 	}
 	if len(req.Filters.Roots) > 0 {
 		where = append(where, "d.root_id IN ("+placeholders(len(req.Filters.Roots))+")")
@@ -293,6 +289,21 @@ func (c *Catalog) searchPostgres(ctx context.Context, req SearchRequest, maxResu
 		response.Index = searchIndexInfo(states, req.Filters.Roots)
 	}
 	return response, nil
+}
+
+// postgresMatchWhere keeps the SQL predicate and its values coupled so the
+// generated PostgreSQL placeholders can never outnumber the supplied values.
+func postgresMatchWhere(query string, fields []string, mode string, boolean BooleanFilter) (string, []any, error) {
+	clause, values, err := postgresMatchClause(query, fields, mode, boolean)
+	if err != nil {
+		return "", nil, err
+	}
+	folderClause, folderValues, err := postgresMatchClause(query, []string{"name"}, mode, boolean)
+	if err != nil {
+		return "", nil, err
+	}
+	values = append(values, folderValues...)
+	return "(" + clause + " AND (d.is_folder = FALSE OR (" + folderClause + ")))", values, nil
 }
 
 func postgresMatchClause(query string, fields []string, mode string, boolean BooleanFilter) (string, []any, error) {

@@ -1028,3 +1028,46 @@ state on failure. The current QSurfer-managed install path copies the binary
 and PostgreSQL helper directly, bypassing the packaged full service installer,
 so it must explicitly invoke this repair or replace the malformed generated
 DSN before starting the service.
+
+## 2026-10-14: PostgreSQL Field-Scoped Search Binding
+
+QIndexer `v1.2.17` fixes the PostgreSQL search path for QSurfer's normal
+four-field request (`name`, `path`, `extension`, and `content`) with prefix
+matching and relevance sorting. The server previously returned HTTP 503 with
+`expected 13 arguments, got 9`; the wire request is unchanged. A regression
+test now verifies the generated PostgreSQL placeholder count and supplied
+values for that exact request shape. QSurfer should retry the ordinary
+`POST /v1/search` request unchanged after updating.
+
+## 2026-10-14: PostgreSQL Search Placeholder Mismatch
+
+Live QSurfer-compatible search against the active local PostgreSQL service
+returns HTTP 503:
+
+```
+{"error":{"code":"search_unavailable","message":"expected 13 arguments, got 9"}}
+```
+
+The exact request shape is a regular `POST /v1/search` using protocol 1.1:
+
+```json
+{
+  "search_id": "qsurfer-proto-smoke",
+  "query": "office",
+  "limit": 10,
+  "offset": 0,
+  "sort": "relevance",
+  "sort_direction": "desc",
+  "filters": {
+    "match_fields": ["name", "path", "extension", "content"],
+    "match_mode": "prefix"
+  }
+}
+```
+
+This occurs only after switching the catalog to PostgreSQL. SQLite works. The
+failure is in QIndexer catalog SQL binding, not in QSurfer's HTTP request
+serialization. Please repair the PostgreSQL search query/argument construction
+and add a PostgreSQL-backed regression test covering the exact request above,
+including relevance sorting and explicit four-field matching. Do not change the
+wire protocol or make QSurfer omit match fields as a workaround.
