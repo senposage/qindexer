@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.22 - 2026-10-15
+
+- Decouple filesystem notification intake from hint crawls. Changed paths now
+  coalesce in a per-root queue, so a large subtree or a concurrently running
+  reconciliation cannot freeze watcher intake or drop a notification.
+- Bound root watch registration and reserve 40% of the configured watcher
+  budget for hot folders. Admin metrics now distinguish pinned and hot watches
+  and show pending changed paths.
+- Add `adaptive_throttle.pressure_samples`, defaulting to three. Sustained
+  external CPU or disk pressure pauses traversal and background content/OCR/
+  hash refill until the configured healthy-sample recovery threshold is met.
+
 ## 1.2.21 - 2026-10-15
 
 - Add per-root content and OCR extension overrides. Roots inherit the global

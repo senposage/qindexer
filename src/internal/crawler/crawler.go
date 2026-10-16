@@ -237,6 +237,7 @@ type adaptivePressure struct {
 	Reason          string
 	CPUPercent      float64
 	DiskBusyPercent float64
+	PressureSamples int
 	HealthySamples  int
 }
 
@@ -1150,7 +1151,7 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 func (c *Crawler) refillBackground(ctx context.Context) {
 	// Structural indexing takes priority only within its own root. A crawl of
 	// one share must not stall OCR, content extraction, or hashing for another.
-	if c.InMaintenance() {
+	if c.InMaintenance() || c.adaptiveStatus().Paused {
 		return
 	}
 	content := c.snapshot().Crawler.ContentExtraction
@@ -1411,7 +1412,7 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 					return
 				default:
 				}
-				if c.waitIfPaused(ctx, !initial) != nil {
+				if c.waitIfPaused(ctx, true) != nil {
 					return
 				}
 				doc, indexable, err := c.describePath(root, path, generation)
@@ -1894,7 +1895,7 @@ func (c *Crawler) adaptiveMonitor(ctx context.Context) {
 	for {
 		settings := c.snapshot().Crawler.AdaptiveThrottle
 		if !settings.Enabled {
-			c.updateAdaptivePressure("", 0, 0, 1)
+			c.updateAdaptivePressure("", 0, 0, 1, 1)
 			select {
 			case <-ctx.Done():
 				return
@@ -1905,7 +1906,7 @@ func (c *Crawler) adaptiveMonitor(ctx context.Context) {
 		// System counter collection is comparatively expensive on some platforms.
 		// Only sample while indexing or enrichment work is actually in flight.
 		if !c.hasActiveWork() {
-			c.updateAdaptivePressure("", 0, 0, settings.RecoverySamples)
+			c.updateAdaptivePressure("", 0, 0, settings.PressureSamples, settings.RecoverySamples)
 			select {
 			case <-ctx.Done():
 				return
@@ -1942,7 +1943,7 @@ func (c *Crawler) adaptiveMonitor(ctx context.Context) {
 				reason = "disk"
 			}
 		}
-		c.updateAdaptivePressure(reason, cpuBusy, diskBusy, settings.RecoverySamples)
+		c.updateAdaptivePressure(reason, cpuBusy, diskBusy, settings.PressureSamples, settings.RecoverySamples)
 	}
 }
 
@@ -1987,26 +1988,34 @@ func diskBusyPercent(previous, current map[string]disk.IOCountersStat, interval 
 	return busiest
 }
 
-func (c *Crawler) updateAdaptivePressure(reason string, cpuPercent, diskBusy float64, recoverySamples int) {
+func (c *Crawler) updateAdaptivePressure(reason string, cpuPercent, diskBusy float64, pressureSamples, recoverySamples int) {
 	c.pressureMu.Lock()
 	defer c.pressureMu.Unlock()
 	c.pressure.CPUPercent = cpuPercent
 	c.pressure.DiskBusyPercent = diskBusy
+	if pressureSamples < 1 {
+		pressureSamples = 1
+	}
 	if reason != "" {
+		c.pressure.PressureSamples++
+		c.pressure.HealthySamples = 0
+		c.pressure.Reason = reason
+		if c.pressure.PressureSamples < pressureSamples {
+			return
+		}
 		if !c.pressure.Paused {
-			c.log.Info("crawler throttled by system pressure", "reason", reason, "cpu_percent", cpuPercent, "disk_busy_percent", diskBusy)
+			c.log.Info("crawler paused by sustained system pressure", "reason", reason, "samples", c.pressure.PressureSamples, "cpu_percent", cpuPercent, "disk_busy_percent", diskBusy)
 		}
 		c.pressure.Paused = true
-		c.pressure.Reason = reason
-		c.pressure.HealthySamples = 0
 		return
 	}
+	c.pressure.PressureSamples = 0
 	if !c.pressure.Paused {
 		return
 	}
 	c.pressure.HealthySamples++
 	if c.pressure.HealthySamples >= recoverySamples {
-		c.log.Info("crawler resumed after system pressure", "cpu_percent", cpuPercent, "disk_busy_percent", diskBusy)
+		c.log.Info("crawler resumed after sustained system pressure", "healthy_samples", c.pressure.HealthySamples, "cpu_percent", cpuPercent, "disk_busy_percent", diskBusy)
 		c.pressure.Paused = false
 		c.pressure.Reason = ""
 		c.pressure.HealthySamples = 0

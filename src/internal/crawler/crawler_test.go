@@ -422,12 +422,18 @@ func TestProgressIncludesPerRootRateAndQueuePressure(t *testing.T) {
 
 func TestAdaptivePressureRecoversAfterHealthySamples(t *testing.T) {
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	c.updateAdaptivePressure("cpu", 90, 0, 3)
+	c.updateAdaptivePressure("cpu", 90, 0, 3, 3)
+	if c.adaptiveStatus().Paused {
+		t.Fatal("single pressure sample should not pause the crawler")
+	}
+	for range 2 {
+		c.updateAdaptivePressure("cpu", 90, 0, 3, 3)
+	}
 	if !c.adaptiveStatus().Paused {
 		t.Fatal("expected adaptive pause")
 	}
 	for range 3 {
-		c.updateAdaptivePressure("", 10, 5, 3)
+		c.updateAdaptivePressure("", 10, 5, 3, 3)
 	}
 	if c.adaptiveStatus().Paused {
 		t.Fatal("expected adaptive recovery")
@@ -436,7 +442,7 @@ func TestAdaptivePressureRecoversAfterHealthySamples(t *testing.T) {
 
 func TestInitialCrawlIgnoresAdaptivePause(t *testing.T) {
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	c.updateAdaptivePressure("disk", 0, 90, 3)
+	c.updateAdaptivePressure("disk", 0, 90, 1, 3)
 	if err := c.waitIfPaused(context.Background(), false); err != nil {
 		t.Fatalf("initial crawl should ignore adaptive pause: %v", err)
 	}
@@ -444,7 +450,7 @@ func TestInitialCrawlIgnoresAdaptivePause(t *testing.T) {
 
 func TestNormalCrawlWaitsForAdaptivePause(t *testing.T) {
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	c.updateAdaptivePressure("disk", 0, 90, 3)
+	c.updateAdaptivePressure("disk", 0, 90, 1, 3)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	if err := c.waitIfPaused(ctx, true); err != context.DeadlineExceeded {

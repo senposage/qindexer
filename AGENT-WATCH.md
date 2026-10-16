@@ -88,6 +88,18 @@ The service still truthfully declares `acl_filtering`, content search, and OCR
 as unavailable. ACL-aware results require a concrete caller identity and policy
 source before any untrusted-network exposure.
 
+## 2026-10-15 Watcher And Throttle Update
+
+- Admin metrics now expose watcher `pinned_directories`, `hot_directories`,
+  `pending_hint_roots`, and `pending_hint_paths` alongside the existing watch
+  limit and last-event fields. A low number such as `99 / 25000` is therefore
+  distinguishable as a small pinned set versus a full watcher budget.
+- Filesystem events are queued per root and processed away from the native
+  watcher loop. Client behavior and public search protocol are unchanged.
+- `crawler.adaptive_throttle` adds `pressure_samples` (default `3`). QIndexer
+  pauses traversal plus content/OCR/hash refill only after that many consecutive
+  above-threshold samples, and resumes after `recovery_samples` healthy samples.
+
 ## 2026-09-10 Verification Update
 
 Live smoke validation passed against an existing SQLite index after the schema

@@ -119,6 +119,7 @@ type AdaptiveThrottleConfig struct {
 	SampleIntervalSeconds    int     `yaml:"sample_interval_seconds" json:"sample_interval_seconds"`
 	CPUPercentThreshold      float64 `yaml:"cpu_percent_threshold" json:"cpu_percent_threshold"`
 	DiskBusyPercentThreshold float64 `yaml:"disk_busy_percent_threshold" json:"disk_busy_percent_threshold"`
+	PressureSamples          int     `yaml:"pressure_samples" json:"pressure_samples"`
 	RecoverySamples          int     `yaml:"recovery_samples" json:"recovery_samples"`
 }
 
@@ -391,6 +392,9 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold <= 0 {
 		c.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold = 70
 	}
+	if c.Crawler.AdaptiveThrottle.PressureSamples <= 0 {
+		c.Crawler.AdaptiveThrottle.PressureSamples = 3
+	}
 	if c.Crawler.AdaptiveThrottle.RecoverySamples <= 0 {
 		c.Crawler.AdaptiveThrottle.RecoverySamples = 3
 	}
@@ -473,6 +477,9 @@ func (c *Config) Validate() error {
 	}
 	if throttle.DiskBusyPercentThreshold <= 0 || throttle.DiskBusyPercentThreshold > 100 {
 		return fmt.Errorf("adaptive throttle disk-busy threshold must be greater than 0 and at most 100")
+	}
+	if throttle.PressureSamples < 1 || throttle.PressureSamples > 3600 {
+		return fmt.Errorf("adaptive throttle pressure samples must be between 1 and 3600")
 	}
 	if throttle.RecoverySamples < 1 || throttle.RecoverySamples > 3600 {
 		return fmt.Errorf("adaptive throttle recovery samples must be between 1 and 3600")

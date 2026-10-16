@@ -129,11 +129,12 @@ adaptive_throttle:
   sample_interval_seconds: 5
   cpu_percent_threshold: 80
   disk_busy_percent_threshold: 70
+  pressure_samples: 3
   recovery_samples: 3
 ```
 
-When enabled, QIndexer pauses crawl and enrichment work while host CPU or disk
-pressure is above threshold. QIndexer subtracts its own CPU share when
+When enabled, QIndexer pauses crawl and enrichment work after sustained host
+CPU or disk pressure. QIndexer subtracts its own CPU share when
 evaluating host pressure, so the thresholds reflect other workload on the
 workstation or NAS. The management UI can change all five settings live.
 
@@ -143,6 +144,8 @@ workstation or NAS. The management UI can change all five settings live.
   range greater than `0` through `100`.
 - `disk_busy_percent_threshold`: busiest observed local disk busy percentage
   that pauses work; valid range greater than `0` through `100`.
+- `pressure_samples`: consecutive above-threshold samples required before work
+  pauses. This prevents a short burst from interrupting a crawl.
 - `recovery_samples`: consecutive healthy samples required before work resumes.
 
 ## Pause Windows

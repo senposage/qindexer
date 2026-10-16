@@ -185,8 +185,10 @@ Enable them per root and keep worker counts low until the host has headroom.
 
 ## Adaptive Throttling
 
-Adaptive throttle pauses crawl scheduling when CPU or disk pressure crosses
-configured thresholds. It resumes after `recovery_samples` healthy samples.
+Adaptive throttle pauses traversal plus content/OCR/hash queue refills after
+`pressure_samples` consecutive CPU or disk pressure samples. It resumes only
+after `recovery_samples` healthy samples, leaving already-running extraction
+jobs to finish cleanly.
 
 Initial indexing can be made more aggressive by raising thresholds or disabling
 adaptive throttle temporarily, but long-running shared machines should keep it
@@ -195,8 +197,11 @@ enabled.
 ## Watcher And Reconciliation
 
 Filesystem watchers are opportunistic. They provide speed by noticing changed
-directories, but they are not the only correctness mechanism. Periodic full
-reconciliation catches missed events, unavailable roots, and watcher overflow.
+directories, but they are not the only correctness mechanism. The watcher
+reserves 40% of its directory budget for recent hot folders, and queues
+per-root hint crawls outside the native event loop so a large changed subtree
+cannot stop notification intake. Periodic full reconciliation catches missed
+events, unavailable roots, and watcher overflow.
 
 ## Backups
 

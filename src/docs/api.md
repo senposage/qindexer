@@ -376,6 +376,7 @@ Updates global crawler resource and enrichment settings:
     "sample_interval_seconds": 5,
     "cpu_percent_threshold": 80,
     "disk_busy_percent_threshold": 70,
+    "pressure_samples": 3,
     "recovery_samples": 3
   },
   "content_extraction": {
