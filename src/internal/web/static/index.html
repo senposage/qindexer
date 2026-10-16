@@ -469,8 +469,10 @@
             <label>OCR file limit (MB)<input id="settings-ocr-size" type="number" min="1" step="1"></label>
             <label>OCR timeout (seconds)<input id="settings-ocr-timeout" type="number" min="10" step="1"></label>
 			<label>Exclude from OCR<textarea id="settings-ocr-exclude-extensions" spellcheck="false" placeholder=".tmp&#10;.bak"></textarea></label>
-            <label>Tesseract command<input id="settings-tesseract-command" type="text" placeholder="tesseract"></label>
-            <label>OCRmyPDF command<input id="settings-ocrmypdf-command" type="text" placeholder="ocrmypdf"></label>
+            <div class="command-settings" aria-label="OCR command overrides">
+              <label>Tesseract command<input id="settings-tesseract-command" type="text" placeholder="tesseract"></label>
+              <label>OCRmyPDF command<input id="settings-ocrmypdf-command" type="text" placeholder="ocrmypdf"></label>
+            </div>
             <label class="check-row"><input id="settings-hashing" type="checkbox"><span>Calculate SHA-256 hashes</span></label>
 			<label>Hash workers<input id="settings-hashing-workers" type="number" min="1" max="256" step="1"></label>
             <label>Hash file limit (MB)<input id="settings-hashing-size" type="number" min="1" step="1"></label>

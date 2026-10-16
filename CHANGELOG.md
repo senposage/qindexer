@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.26 - 2026-10-15
+
+- Compact the OCR executable overrides into a single horizontal command row in
+  the indexing settings UI.
+
 ## 1.2.25 - 2026-10-15
 
 - Unify extension-policy inputs as dotted values such as `.pdf`, `.xml`, and
