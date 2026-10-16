@@ -133,6 +133,7 @@ type WatcherConfig struct {
 	Enabled               bool `yaml:"enabled" json:"enabled"`
 	DebounceMilliseconds  int  `yaml:"debounce_milliseconds" json:"debounce_milliseconds"`
 	HintCooldownSeconds   int  `yaml:"hint_cooldown_seconds" json:"hint_cooldown_seconds"`
+	HintBatchSeconds      int  `yaml:"hint_batch_seconds" json:"hint_batch_seconds"`
 	MaxWatchedDirectories int  `yaml:"max_watched_directories" json:"max_watched_directories"`
 	MaxDirtyPathsPerFlush int  `yaml:"max_dirty_paths_per_flush" json:"max_dirty_paths_per_flush"`
 	ActivityHalfLifeDays  int  `yaml:"activity_half_life_days" json:"activity_half_life_days"`
@@ -407,6 +408,9 @@ func (c *Config) applyDefaults() {
 	if c.Watcher.HintCooldownSeconds <= 0 {
 		c.Watcher.HintCooldownSeconds = 900
 	}
+	if c.Watcher.HintBatchSeconds <= 0 {
+		c.Watcher.HintBatchSeconds = 15
+	}
 	if c.Watcher.MaxWatchedDirectories <= 0 {
 		c.Watcher.MaxWatchedDirectories = 5000
 	}
@@ -498,6 +502,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Watcher.HintCooldownSeconds < 1 || c.Watcher.HintCooldownSeconds > 3600 {
 		return fmt.Errorf("watcher hint cooldown must be between 1 and 3600 seconds")
+	}
+	if c.Watcher.HintBatchSeconds < 1 || c.Watcher.HintBatchSeconds > 3600 {
+		return fmt.Errorf("watcher hint batch interval must be between 1 and 3600 seconds")
 	}
 	if c.Watcher.MaxWatchedDirectories < 1 || c.Watcher.MaxWatchedDirectories > 250000 {
 		return fmt.Errorf("watcher directory limit must be between 1 and 250000")
@@ -728,6 +735,10 @@ func (w WatcherConfig) Debounce() time.Duration {
 
 func (w WatcherConfig) HintCooldown() time.Duration {
 	return time.Duration(w.HintCooldownSeconds) * time.Second
+}
+
+func (w WatcherConfig) HintBatchInterval() time.Duration {
+	return time.Duration(w.HintBatchSeconds) * time.Second
 }
 
 func (w WatcherConfig) ActivityHalfLife() time.Duration {

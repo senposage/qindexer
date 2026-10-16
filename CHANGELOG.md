@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.33 - 2026-10-16
+
+- Prevent watcher hint traffic from starving content extraction, OCR, or
+  hashing: full/reconciliation crawls retain priority, while lightweight
+  targeted hints may run alongside enrichment work.
+- Coalesce distinct filesystem changes into one per-root hint batch every 15
+  seconds by default, substantially reducing unnecessary PostgreSQL activity
+  on busy local folders.
+- Add content worker, wait-state, and buffered-job metrics for immediate
+  visibility into an enrichment backlog that is deferred versus stalled.
+
 ## 1.2.32 - 2026-10-16
 
 - Coalesce repeat filesystem hints for the same path for 15 minutes by default,

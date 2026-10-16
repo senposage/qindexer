@@ -245,6 +245,8 @@ similar-copy workflows. Hashing has its own process-wide worker pool.
 watcher:
   enabled: true
   debounce_milliseconds: 1500
+  hint_cooldown_seconds: 900
+  hint_batch_seconds: 15
   max_watched_directories: 25000
   max_dirty_paths_per_flush: 500
   activity_half_life_days: 60
@@ -253,6 +255,11 @@ watcher:
 
 The watcher uses OS filesystem hints when available. It is an accelerator, not
 the only source of truth. Periodic full crawls reconcile missed events.
+
+`hint_cooldown_seconds` suppresses repeated work for the same path.
+`hint_batch_seconds` limits each root to one database-backed hint batch per
+interval; the default 15 seconds coalesces a busy application's changes while
+the first notification remains immediate.
 
 On large NAS trees, the watcher pins roots and immediate child folders, then
 uses the remaining watch budget for folders with recent change activity. Folder

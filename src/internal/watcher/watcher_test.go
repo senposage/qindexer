@@ -76,3 +76,15 @@ func TestFilterRecentHintsSuppressesRepeatedPathUntilCooldownExpires(t *testing.
 		t.Fatalf("released hint count = %d, want 1", len(third))
 	}
 }
+
+func TestHintBatchWindowDefersRepeatedRootDispatch(t *testing.T) {
+	w := &Watcher{hintsAt: map[string]time.Time{}, rootHintsAt: map[string]time.Time{}}
+	if !w.waitForHintBatchWindow(context.Background(), "root", time.Minute) {
+		t.Fatal("initial hint batch was not accepted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if w.waitForHintBatchWindow(ctx, "root", time.Minute) {
+		t.Fatal("repeated root hint was not deferred")
+	}
+}

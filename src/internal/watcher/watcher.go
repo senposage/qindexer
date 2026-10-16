@@ -19,18 +19,19 @@ import (
 )
 
 type Watcher struct {
-	cfg      *config.Config
-	cfgMu    sync.RWMutex
-	crawler  *crawler.Crawler
-	log      *slog.Logger
-	ignore   string
-	reload   chan struct{}
-	hints    *hintQueue
-	statsMu  sync.RWMutex
-	stats    Stats
-	hintMu   sync.Mutex
-	hintsAt  map[string]time.Time
-	prunedAt time.Time
+	cfg         *config.Config
+	cfgMu       sync.RWMutex
+	crawler     *crawler.Crawler
+	log         *slog.Logger
+	ignore      string
+	reload      chan struct{}
+	hints       *hintQueue
+	statsMu     sync.RWMutex
+	stats       Stats
+	hintMu      sync.Mutex
+	hintsAt     map[string]time.Time
+	rootHintsAt map[string]time.Time
+	prunedAt    time.Time
 }
 
 type Stats struct {
@@ -69,7 +70,7 @@ const watchRootLookupTimeout = 5 * time.Second
 const watchSeedAddTimeout = 5 * time.Second
 
 func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
-	w := &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1), hintsAt: map[string]time.Time{}}
+	w := &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1), hintsAt: map[string]time.Time{}, rootHintsAt: map[string]time.Time{}}
 	w.hints = newHintQueue(w)
 	return w
 }
@@ -598,6 +599,9 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 	if len(paths) == 0 {
 		return true
 	}
+	if !w.waitForHintBatchWindow(ctx, rootID, cfg.Watcher.HintBatchInterval()) {
+		return false
+	}
 	limit := cfg.Watcher.MaxDirtyPathsPerFlush
 	activity := make([]string, 0, len(paths))
 	for _, dirty := range paths {
@@ -653,6 +657,31 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 			return false
 		}
 	}
+	return true
+}
+
+// waitForHintBatchWindow keeps a noisy root from issuing one database-backed
+// hint crawl per filesystem event. The per-root queue continues coalescing
+// changes while it waits, so the next run processes a useful batch instead.
+func (w *Watcher) waitForHintBatchWindow(ctx context.Context, rootID string, interval time.Duration) bool {
+	if interval <= 0 {
+		return true
+	}
+	w.hintMu.Lock()
+	last := w.rootHintsAt[rootID]
+	w.hintMu.Unlock()
+	if remaining := interval - time.Since(last); !last.IsZero() && remaining > 0 {
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+		}
+	}
+	w.hintMu.Lock()
+	w.rootHintsAt[rootID] = time.Now()
+	w.hintMu.Unlock()
 	return true
 }
 

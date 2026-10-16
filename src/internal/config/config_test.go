@@ -86,6 +86,9 @@ func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
 	if cfg.Watcher.HintCooldownSeconds != 900 {
 		t.Fatalf("watcher hint cooldown = %d, want 900", cfg.Watcher.HintCooldownSeconds)
 	}
+	if cfg.Watcher.HintBatchSeconds != 15 {
+		t.Fatalf("watcher hint batch interval = %d, want 15", cfg.Watcher.HintBatchSeconds)
+	}
 }
 
 func TestEnrichmentExclusionsNormalizeAsLineEntries(t *testing.T) {

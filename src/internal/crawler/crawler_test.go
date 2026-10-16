@@ -600,19 +600,50 @@ func TestRootWorkIsVisibleToStopAndWait(t *testing.T) {
 	}
 }
 
-func TestEnrichmentForAnotherRootDoesNotWaitForActiveCrawl(t *testing.T) {
+func TestEnrichmentDoesNotWaitForWatcherHint(t *testing.T) {
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	_, finish, started := c.beginRootWork(context.Background(), "root-a")
-	if !started {
-		t.Fatal("root crawl did not start")
-	}
-	defer finish()
+	atomic.AddInt64(&c.activeCrawls, 1)
+	defer atomic.AddInt64(&c.activeCrawls, -1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if err := c.waitForEnrichmentWindow(ctx, "root-b"); err != nil {
-		t.Fatalf("enrichment for a different root was blocked by active crawl: %v", err)
+		t.Fatalf("enrichment was blocked by a watcher hint: %v", err)
 	}
+}
+
+func TestEnrichmentWaitsForFullCrawl(t *testing.T) {
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	atomic.AddInt64(&c.activeCrawls, 1)
+	atomic.AddInt64(&c.activeFullCrawls, 1)
+	defer atomic.AddInt64(&c.activeCrawls, -1)
+	defer atomic.AddInt64(&c.activeFullCrawls, -1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := c.waitForEnrichmentWindow(ctx, "root-b"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("enrichment wait error = %v, want context deadline", err)
+	}
+}
+
+func TestContentWorkerStatsExposeWaitingWorkerAndBufferedJob(t *testing.T) {
+	c := New(&config.Config{Crawler: config.CrawlerConfig{ContentExtraction: config.ContentExtractionConfig{QueueSize: 1}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	atomic.AddInt64(&c.activeFullCrawls, 1)
+	defer atomic.AddInt64(&c.activeFullCrawls, -1)
+	c.contentJobs <- backgroundJob{rootID: "root"}
+	go c.contentWorker(ctx)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stats := c.Stats()
+		if stats.ContentWorkers == 1 && stats.ContentWaiting == 1 && stats.ContentBuffered == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("content worker stats never reflected blocked worker: %#v", c.Stats())
 }
 
 func TestRepeatedUnreachableLogsAreSuppressed(t *testing.T) {

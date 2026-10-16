@@ -52,6 +52,9 @@ type Crawler struct {
 	configChanged       chan struct{}
 	startedAt           time.Time
 	activeCrawls        int64
+	activeFullCrawls    int64
+	contentWorkers      int64
+	contentWaiting      int64
 	filesStatted        int64
 	bytesStatted        int64
 	dirsRead            int64
@@ -301,6 +304,9 @@ type Stats struct {
 	DiskBusyPercent   float64            `json:"disk_busy_percent"`
 	NextFullCrawlUnix int64              `json:"next_full_crawl_unix"`
 	ContentQueueDepth int64              `json:"content_queue_depth"`
+	ContentWorkers    int64              `json:"content_workers"`
+	ContentWaiting    int64              `json:"content_waiting"`
+	ContentBuffered   int                `json:"content_buffered"`
 	OCRQueueDepth     int64              `json:"ocr_queue_depth"`
 	HashQueueDepth    int64              `json:"hash_queue_depth"`
 	ContentActivity   BackgroundActivity `json:"content_activity"`
@@ -345,6 +351,9 @@ func (c *Crawler) Stats() Stats {
 		DiskBusyPercent:   pressure.DiskBusyPercent,
 		NextFullCrawlUnix: atomic.LoadInt64(&c.nextFullCrawl),
 		ContentQueueDepth: backlog.Content,
+		ContentWorkers:    atomic.LoadInt64(&c.contentWorkers),
+		ContentWaiting:    atomic.LoadInt64(&c.contentWaiting),
+		ContentBuffered:   len(c.contentJobs),
 		OCRQueueDepth:     backlog.OCR,
 		HashQueueDepth:    backlog.Hash,
 		ContentActivity:   c.contentActivity.snapshot(),
@@ -1182,10 +1191,10 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 }
 
 func (c *Crawler) refillBackground(ctx context.Context) {
-	// Structural indexing has priority over every enrichment queue. This keeps
-	// initial and reconciliation crawls focused on making the index searchable
-	// before competing for I/O with content extraction, OCR, or hashing.
-	if c.InMaintenance() || c.IsPaused() || c.IsAdaptivePaused() || c.HasActiveCrawls() {
+	// Structural indexing has priority over every enrichment queue. Watcher
+	// hints are deliberately excluded: frequent, short-lived hints must not
+	// starve enrichment indefinitely on an otherwise idle root.
+	if c.InMaintenance() || c.IsPaused() || c.IsAdaptivePaused() || c.HasActiveFullCrawls() {
 		return
 	}
 	content := c.snapshot().Crawler.ContentExtraction
@@ -1209,7 +1218,7 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 }
 
 func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) error {
-	for c.HasActiveCrawls() || c.InMaintenance() {
+	for c.HasActiveFullCrawls() || c.InMaintenance() {
 		timer := time.NewTimer(250 * time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -1221,10 +1230,17 @@ func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) er
 	return c.waitIfPaused(ctx, true)
 }
 
-// HasActiveCrawls reports structural crawl work only; enrichment work is
-// deliberately excluded so it can wait for every root to become quiescent.
+// HasActiveCrawls reports every active traversal, including short watcher
+// hints. It is used for operational status and pressure monitoring.
 func (c *Crawler) HasActiveCrawls() bool {
 	return atomic.LoadInt64(&c.activeCrawls) > 0
+}
+
+// HasActiveFullCrawls reports initial and reconciliation crawl work. The
+// enrichment scheduler defers to this work but may run beside tiny watcher
+// hints so an active filesystem cannot starve the backlog forever.
+func (c *Crawler) HasActiveFullCrawls() bool {
+	return atomic.LoadInt64(&c.activeFullCrawls) > 0
 }
 
 // IsAdaptivePaused lets the watcher retain native change hints while system
@@ -1384,6 +1400,7 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig, initial bool) (catalog.CrawlRun, error) {
 	defer c.beginProgress(root.ID, root.Path)()
 	atomic.AddInt64(&c.activeCrawls, 1)
+	atomic.AddInt64(&c.activeFullCrawls, 1)
 	atomic.AddInt64(&c.fullCrawls, 1)
 	if initial {
 		atomic.AddInt64(&c.initialCrawls, 1)
@@ -1394,6 +1411,7 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 			atomic.AddInt64(&c.initialCrawls, -1)
 		}
 		atomic.AddInt64(&c.activeCrawls, -1)
+		atomic.AddInt64(&c.activeFullCrawls, -1)
 	}()
 
 	generation, err := c.cat.NextGeneration(ctx, root.ID)
@@ -2473,6 +2491,8 @@ func (c *Crawler) startBackgroundWorkers(ctx context.Context, workers *sync.Wait
 }
 
 func (c *Crawler) contentWorker(ctx context.Context) {
+	atomic.AddInt64(&c.contentWorkers, 1)
+	defer atomic.AddInt64(&c.contentWorkers, -1)
 	for {
 		select {
 		case <-ctx.Done():
@@ -2481,7 +2501,10 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if c.waitForEnrichmentWindow(ctx, job.rootID) != nil {
+			atomic.AddInt64(&c.contentWaiting, 1)
+			waitErr := c.waitForEnrichmentWindow(ctx, job.rootID)
+			atomic.AddInt64(&c.contentWaiting, -1)
+			if waitErr != nil {
 				return
 			}
 			jobCtx, finish, valid := c.beginBackgroundWork(ctx, job.rootID, job.epoch)
