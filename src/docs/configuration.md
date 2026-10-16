@@ -171,9 +171,9 @@ content_extraction:
   max_file_size_mb: 64
   max_stored_text_kb: 1024
   exclude_extensions:
-    - png
-    - jpg
-    - jpeg
+    - .png
+    - .jpg
+    - .jpeg
 ```
 
 When enabled, supported document text is extracted into the index. Current
@@ -189,7 +189,8 @@ document from inflating the index.
 Content extraction has an independent process-wide worker pool. It runs after
 structural indexing is idle, alongside the OCR and hashing pools.
 
-`exclude_extensions` is a global line/list setting. Excluded supported types
+`exclude_extensions` is a global line/list setting using dotted extensions such
+as `.pdf`. Excluded supported types
 are never placed into the content queue. Image formats are excluded from
 ordinary content extraction by default so they can proceed directly to OCR.
 
@@ -207,7 +208,7 @@ ocr:
   max_file_size_mb: 128
   timeout_seconds: 180
   exclude_extensions:
-    - pdf
+    - .pdf
 ```
 
 - `engine`: `auto`, `tesseract`, or `ocrmypdf`.
@@ -336,8 +337,8 @@ crawler:
 Each root owns its own rules.
 
 ```yaml
-include_extensions: ["pdf", "docx", "xlsx"]
-exclude_extensions: ["tmp", "bak", "partial"]
+include_extensions: [".pdf", ".docx", ".xlsx"]
+exclude_extensions: [".tmp", ".bak", ".partial"]
 include_file_patterns:
   - "*.pdf"
   - "report-*.xlsx"
@@ -354,8 +355,8 @@ exclude_folder_patterns:
 exclude_patterns: []
 ```
 
-- `include_extensions`: allow only these extensions. Empty means all.
-- `exclude_extensions`: block these extensions.
+- `include_extensions`: allow only these dotted extensions. Empty means all.
+- `exclude_extensions`: block these dotted extensions.
 - `include_file_patterns`: wildcard file-name/path includes. Empty means all.
 - `exclude_file_patterns`: wildcard file-name/path excludes.
 - `include_folder_patterns`: wildcard folder includes. Empty means all.
@@ -394,7 +395,7 @@ extensions to replace that default for only that root. An explicit empty list
 means exclude no supported extension for that root; omit the field to inherit.
 
 ```yaml
-content_exclude_extensions: ["pdf"]
+content_exclude_extensions: [".pdf"]
 ocr_exclude_extensions: []
 ```
 - `**/.qsync/**`

@@ -589,8 +589,8 @@ function openRules(rootId) {
   document.querySelector("#rules-labels").value = (root.labels || []).join(", ");
   document.querySelector("#rules-credential").value = root.credential_ref || "";
   setAliasRows(root.path_aliases);
-  document.querySelector("#rules-include-ext").value = lines(root.include_extensions);
-  document.querySelector("#rules-exclude-ext").value = lines(root.exclude_extensions);
+  document.querySelector("#rules-include-ext").value = extensionLines(root.include_extensions);
+  document.querySelector("#rules-exclude-ext").value = extensionLines(root.exclude_extensions);
   document.querySelector("#rules-include-file").value = lines(root.include_file_patterns);
   document.querySelector("#rules-exclude-file").value = lines(root.exclude_file_patterns);
   document.querySelector("#rules-include-folder").value = lines(root.include_folder_patterns);
@@ -662,8 +662,8 @@ async function saveRules(event) {
     labels: splitList(document.querySelector("#rules-labels").value),
     credential_ref: document.querySelector("#rules-credential").value.trim(),
     path_aliases: aliases,
-    include_extensions: splitList(document.querySelector("#rules-include-ext").value),
-    exclude_extensions: splitList(document.querySelector("#rules-exclude-ext").value),
+    include_extensions: splitExtensions(document.querySelector("#rules-include-ext").value),
+    exclude_extensions: splitExtensions(document.querySelector("#rules-exclude-ext").value),
     include_file_patterns: splitList(document.querySelector("#rules-include-file").value),
     exclude_file_patterns: splitList(document.querySelector("#rules-exclude-file").value),
     include_folder_patterns: splitList(document.querySelector("#rules-include-folder").value),
@@ -703,7 +703,7 @@ function renderIndexingSettings(crawler, watcher = {}) {
 	  document.querySelector("#settings-extraction-workers").value = extraction.worker_count || 3;
   document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
 	document.querySelector("#settings-stored-text").value = extraction.max_stored_text_kb || 1024;
-	document.querySelector("#settings-extraction-exclude-extensions").value = lines(extraction.exclude_extensions);
+	document.querySelector("#settings-extraction-exclude-extensions").value = extensionLines(extraction.exclude_extensions);
 	document.querySelector("#settings-global-exclude-file").value = lines(crawler.exclude_file_patterns);
 	document.querySelector("#settings-global-exclude-folder").value = lines(crawler.exclude_folder_patterns);
   document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
@@ -712,7 +712,7 @@ function renderIndexingSettings(crawler, watcher = {}) {
   document.querySelector("#settings-ocr-languages").value = ocr.languages || "eng";
   document.querySelector("#settings-ocr-size").value = ocr.max_file_size_mb || 128;
   document.querySelector("#settings-ocr-timeout").value = ocr.timeout_seconds || 180;
-	document.querySelector("#settings-ocr-exclude-extensions").value = lines(ocr.exclude_extensions);
+	document.querySelector("#settings-ocr-exclude-extensions").value = extensionLines(ocr.exclude_extensions);
   document.querySelector("#settings-tesseract-command").value = ocr.tesseract_command || "tesseract";
   document.querySelector("#settings-ocrmypdf-command").value = ocr.ocrmypdf_command || "ocrmypdf";
   document.querySelector("#settings-hashing").checked = Boolean(hashing.enabled);
@@ -770,16 +770,37 @@ async function saveNetworkSettings(event) {
 
 async function saveIndexingSettings(event) {
   event.preventDefault();
+  const button = document.querySelector("#save-indexing-settings");
+  const status = document.querySelector("#indexing-settings-save-status");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Saving...";
+  status.className = "save-status";
+  status.textContent = "Saving configuration...";
   const crawler = state.crawler || {};
-  const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, worker_count: Number(document.querySelector("#settings-ocr-workers").value) || 2, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf", exclude_extensions: splitLines(document.querySelector("#settings-ocr-exclude-extensions").value) };
-	const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, worker_count: Number(document.querySelector("#settings-extraction-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64, max_stored_text_kb: Number(document.querySelector("#settings-stored-text").value) || 1024, exclude_extensions: splitLines(document.querySelector("#settings-extraction-exclude-extensions").value) };
+	const ocr = { ...(crawler.ocr || {}), enabled: document.querySelector("#settings-ocr").checked, worker_count: Number(document.querySelector("#settings-ocr-workers").value) || 2, engine: document.querySelector("#settings-ocr-engine").value, languages: document.querySelector("#settings-ocr-languages").value.trim() || "eng", max_file_size_mb: Number(document.querySelector("#settings-ocr-size").value) || 128, timeout_seconds: Number(document.querySelector("#settings-ocr-timeout").value) || 180, tesseract_command: document.querySelector("#settings-tesseract-command").value.trim() || "tesseract", ocrmypdf_command: document.querySelector("#settings-ocrmypdf-command").value.trim() || "ocrmypdf", exclude_extensions: splitExtensions(document.querySelector("#settings-ocr-exclude-extensions").value) };
+	const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, worker_count: Number(document.querySelector("#settings-extraction-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64, max_stored_text_kb: Number(document.querySelector("#settings-stored-text").value) || 1024, exclude_extensions: splitExtensions(document.querySelector("#settings-extraction-exclude-extensions").value) };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, worker_count: Number(document.querySelector("#settings-hashing-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, pressure_samples: Number(document.querySelector("#settings-throttle-pressure").value) || 3, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
   const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
   try {
 	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ scan_interval_seconds: (Number(document.querySelector("#settings-scan-interval").value) || 360) * 60, root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, exclude_file_patterns: splitLines(document.querySelector("#settings-global-exclude-file").value), exclude_folder_patterns: splitLines(document.querySelector("#settings-global-exclude-folder").value), collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
 	await refresh({ quiet: true, message: "Indexing settings saved; worker-count changes apply after restart" });
-  } catch (err) { setMessage(err.message); }
+    status.className = "save-status success";
+    status.textContent = "Saved";
+    button.textContent = "Saved";
+  } catch (err) {
+    status.className = "save-status error";
+    status.textContent = "Save failed";
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
+    window.setTimeout(() => {
+      button.textContent = originalText;
+      status.textContent = "";
+      status.className = "save-status";
+    }, 2400);
+  }
 }
 
 async function ensureOCRDependencies(event) {
@@ -1141,6 +1162,20 @@ function splitLines(value) {
     .filter(Boolean);
 }
 
+function canonicalExtension(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized || normalized === "*") return normalized;
+  return `.${normalized.replace(/^\.+/, "")}`;
+}
+
+function splitExtensions(value) {
+  return [...new Set(splitLines(value).map(canonicalExtension).filter(Boolean))];
+}
+
+function extensionLines(values = []) {
+  return array(values).map(canonicalExtension).filter(Boolean).join("\n");
+}
+
 function lines(values = []) {
   return array(values).join("\n");
 }
@@ -1275,20 +1310,20 @@ function setRootExclusionOverride(kind, value) {
   const controls = rootExclusionControls(kind);
   const overridden = Array.isArray(value);
   controls.override.checked = overridden;
-  controls.values.value = lines(overridden ? value : controls.global);
+	controls.values.value = extensionLines(overridden ? value : controls.global);
   controls.values.disabled = !overridden;
 }
 
 function toggleRootExclusionOverride(kind) {
   const controls = rootExclusionControls(kind);
   controls.values.disabled = !controls.override.checked;
-  if (!controls.override.checked) controls.values.value = lines(controls.global);
+	if (!controls.override.checked) controls.values.value = extensionLines(controls.global);
   if (controls.override.checked) controls.values.focus();
 }
 
 function readRootExclusionOverride(kind) {
   const controls = rootExclusionControls(kind);
-  return controls.override.checked ? splitLines(controls.values.value) : null;
+	return controls.override.checked ? splitExtensions(controls.values.value) : null;
 }
 
 function showView(view) {

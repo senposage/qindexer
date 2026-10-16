@@ -252,16 +252,16 @@
         <section class="form-section">
           <div class="form-section-title">
             <p class="eyebrow">This root's file filters</p>
-            <p>One extension or wildcard per line. Leave an include list empty to allow all.</p>
+            <p>File types use dotted extensions such as <code>.pdf</code>. Wildcard fields use glob patterns such as <code>*.pdf</code> or <code>**/Finance/*.pdf</code>. Leave file types empty to allow all.</p>
           </div>
           <div class="rules-grid">
             <label>
               Include file types
-              <textarea id="rules-include-ext" spellcheck="false" placeholder="pdf&#10;docx&#10;xlsx"></textarea>
+              <textarea id="rules-include-ext" spellcheck="false" placeholder=".pdf&#10;.docx&#10;.xlsx"></textarea>
             </label>
             <label>
               Exclude file types
-              <textarea id="rules-exclude-ext" spellcheck="false" placeholder="tmp&#10;bak"></textarea>
+              <textarea id="rules-exclude-ext" spellcheck="false" placeholder=".tmp&#10;.bak"></textarea>
             </label>
             <label>
               Include file wildcards
@@ -307,12 +307,12 @@
             <label class="check-row"><input id="rules-ocr-exclude-override" type="checkbox"><span>Override global OCR exclusions</span></label>
             <label>
               Content extraction exclusions
-              <textarea id="rules-content-exclude-extensions" spellcheck="false" placeholder="pdf&#10;jpg"></textarea>
+              <textarea id="rules-content-exclude-extensions" spellcheck="false" placeholder=".pdf&#10;.jpg"></textarea>
               <small>One extension per line. Disabled values inherit the global list.</small>
             </label>
             <label>
               OCR exclusions
-              <textarea id="rules-ocr-exclude-extensions" spellcheck="false" placeholder="pdf&#10;png"></textarea>
+              <textarea id="rules-ocr-exclude-extensions" spellcheck="false" placeholder=".pdf&#10;.png"></textarea>
               <small>One extension per line. An enabled empty list excludes nothing.</small>
             </label>
           </div>
@@ -453,14 +453,14 @@
               <section class="settings-section">
 			<div class="form-section-title">
             <p class="eyebrow">Optional indexing work</p>
-            <p>Extraction, OCR, and hashing run in parallel background pools and obey crawler throttling. Enter one extension per line in exclusion lists.</p>
+            <p>Extraction, OCR, and hashing run in parallel background pools and obey crawler throttling. Enter one dotted extension per line in exclusion lists.</p>
                 </div>
                 <div class="rules-grid">
             <label class="check-row"><input id="settings-extraction" type="checkbox"><span>Extract Office, PDF, and text content</span></label>
 			<label>Extraction workers<input id="settings-extraction-workers" type="number" min="1" max="256" step="1"></label>
             <label>Extraction file limit (MB)<input id="settings-extraction-size" type="number" min="1" step="1"></label>
 			<label>Stored text limit (KB)<input id="settings-stored-text" type="number" min="64" max="1024" step="64"></label>
-			<label>Exclude from content extraction<textarea id="settings-extraction-exclude-extensions" spellcheck="false" placeholder="jpg&#10;png&#10;tmp"></textarea></label>
+			<label>Exclude from content extraction<textarea id="settings-extraction-exclude-extensions" spellcheck="false" placeholder=".jpg&#10;.png&#10;.tmp"></textarea></label>
             <label class="check-row"><input id="settings-ocr" type="checkbox"><span>OCR scanned PDFs and images</span></label>
 			<label>OCR workers<input id="settings-ocr-workers" type="number" min="1" max="256" step="1"></label>
 			<button id="install-ocr-sidecars" type="button" class="secondary">Install OCR dependencies</button>
@@ -468,7 +468,7 @@
             <label>OCR language(s)<input id="settings-ocr-languages" type="text" placeholder="eng"></label>
             <label>OCR file limit (MB)<input id="settings-ocr-size" type="number" min="1" step="1"></label>
             <label>OCR timeout (seconds)<input id="settings-ocr-timeout" type="number" min="10" step="1"></label>
-			<label>Exclude from OCR<textarea id="settings-ocr-exclude-extensions" spellcheck="false" placeholder="tmp&#10;bak"></textarea></label>
+			<label>Exclude from OCR<textarea id="settings-ocr-exclude-extensions" spellcheck="false" placeholder=".tmp&#10;.bak"></textarea></label>
             <label>Tesseract command<input id="settings-tesseract-command" type="text" placeholder="tesseract"></label>
             <label>OCRmyPDF command<input id="settings-ocrmypdf-command" type="text" placeholder="ocrmypdf"></label>
             <label class="check-row"><input id="settings-hashing" type="checkbox"><span>Calculate SHA-256 hashes</span></label>
@@ -479,7 +479,10 @@
               </section>
             </div>
           </div>
-          <div class="form-actions"><button type="submit">Save indexing settings</button></div>
+          <div class="form-actions">
+            <span id="indexing-settings-save-status" class="save-status" role="status" aria-live="polite"></span>
+            <button id="save-indexing-settings" type="submit">Save indexing settings</button>
+          </div>
         </form>
 		<div class="settings-form maintenance-settings">
 		  <div class="form-section-title">

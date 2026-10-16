@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.25 - 2026-10-15
+
+- Unify extension-policy inputs as dotted values such as `.pdf`, `.xml`, and
+  `.h`. Root file types plus global/per-root content and OCR exclusions now
+  normalize legacy bare entries during load and save them canonically through
+  the admin API/UI. File wildcard fields intentionally remain glob patterns
+  such as `*.pdf` and `**/Finance/*.pdf`.
+- Make the indexing-settings save action visible: it now disables while saving
+  and reports `Saving...`, `Saved`, or `Save failed` beside the button.
+
 ## 1.2.24 - 2026-10-15
 
 - Fix admin numeric validation for metadata queue and database batch settings.

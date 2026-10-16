@@ -385,7 +385,7 @@ Updates global crawler resource and enrichment settings:
     "queue_size": 1000,
     "max_file_size_mb": 64,
     "max_stored_text_kb": 1024,
-    "exclude_extensions": ["png", "jpg", "jpeg"]
+    "exclude_extensions": [".png", ".jpg", ".jpeg"]
   },
   "ocr": {
     "enabled": true,
@@ -397,7 +397,7 @@ Updates global crawler resource and enrichment settings:
     "queue_size": 100,
     "max_file_size_mb": 128,
     "timeout_seconds": 180,
-    "exclude_extensions": ["pdf"]
+    "exclude_extensions": [".pdf"]
   },
   "hashing": {
     "enabled": true,
@@ -409,8 +409,9 @@ Updates global crawler resource and enrichment settings:
 ```
 
 `content_extraction.exclude_extensions` and `ocr.exclude_extensions` accept
-arrays of extension names without a leading dot. The admin UI presents these as
-one extension per line; it does not use comma-separated input.
+arrays of dotted extension names such as `.pdf`. The admin UI presents these as
+one extension per line; it does not use comma-separated input. Legacy bare
+entries are normalized when QIndexer loads the configuration.
 
 ### POST /admin/v1/index/compact
 
@@ -468,8 +469,8 @@ Updates all rules for one root. The full payload is accepted:
       "target": "\\\\nas01\\finance"
     }
   ],
-  "include_extensions": ["pdf", "docx"],
-  "exclude_extensions": ["tmp", "bak"],
+  "include_extensions": [".pdf", ".docx"],
+  "exclude_extensions": [".tmp", ".bak"],
   "include_file_patterns": ["*.pdf"],
   "exclude_file_patterns": ["~$*", "*.tmp"],
   "include_folder_patterns": ["**/Finance/**"],
@@ -477,7 +478,7 @@ Updates all rules for one root. The full payload is accepted:
   "exclude_patterns": [],
   "content_extraction": true,
   "ocr": false,
-  "content_exclude_extensions": ["pdf"],
+  "content_exclude_extensions": [".pdf"],
   "ocr_exclude_extensions": [],
   "hashing": true,
   "collect_ownership": true
@@ -487,8 +488,8 @@ Updates all rules for one root. The full payload is accepted:
 `content_exclude_extensions` and `ocr_exclude_extensions` are optional
 per-root overrides for the crawler-wide extension lists. Omit either field (or
 send `null`) to inherit the global policy. Send `[]` to explicitly exclude no
-otherwise supported extensions for that root. Arrays use one bare extension per
-entry, without dots or comma-delimited strings.
+otherwise supported extensions for that root. Arrays use one dotted extension
+per entry, without comma-delimited strings.
 
 When the canonical root path changes, QIndexer rewrites existing indexed rows
 from the previous path to the new path and preserves the previous path as an

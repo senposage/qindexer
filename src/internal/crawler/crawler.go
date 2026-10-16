@@ -2366,8 +2366,9 @@ func (c *Crawler) describePath(root config.RootConfig, path string, generation i
 }
 
 func extensionExcluded(extension string, excluded []string) bool {
+	extension = canonicalExtension(extension)
 	for _, value := range excluded {
-		if extension == value {
+		if extension == canonicalExtension(value) {
 			return true
 		}
 	}
@@ -2661,12 +2662,21 @@ func extensionAllowed(root config.RootConfig, ext string) bool {
 }
 
 func containsExt(candidates []string, ext string) bool {
+	ext = canonicalExtension(ext)
 	for _, candidate := range candidates {
-		if strings.TrimPrefix(strings.ToLower(candidate), ".") == ext || strings.TrimSpace(candidate) == "*" {
+		if canonicalExtension(candidate) == ext || strings.TrimSpace(candidate) == "*" {
 			return true
 		}
 	}
 	return false
+}
+
+func canonicalExtension(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == "*" {
+		return value
+	}
+	return "." + strings.TrimLeft(value, ".")
 }
 
 func filePatternAllowed(root config.RootConfig, path string) bool {

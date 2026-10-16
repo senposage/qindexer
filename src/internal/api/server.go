@@ -2321,7 +2321,9 @@ func validatePath(path string) error {
 func cleanExtensions(values []string) []string {
 	cleaned := cleanList(values, true)
 	for i, value := range cleaned {
-		cleaned[i] = strings.TrimPrefix(value, ".")
+		if value != "*" {
+			cleaned[i] = "." + strings.TrimLeft(value, ".")
+		}
 	}
 	return cleaned
 }

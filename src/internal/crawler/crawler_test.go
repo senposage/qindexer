@@ -45,6 +45,21 @@ func TestExpandRootPathsRejectsEmptyGlob(t *testing.T) {
 	}
 }
 
+func TestExtensionPoliciesMatchDottedAndLegacyEntries(t *testing.T) {
+	if !extensionAllowed(config.RootConfig{IncludeExtensions: []string{".xml"}}, "xml") {
+		t.Fatal("dotted include policy should match a filename extension")
+	}
+	if !extensionAllowed(config.RootConfig{IncludeExtensions: []string{"h"}}, ".h") {
+		t.Fatal("legacy bare include policy should remain compatible")
+	}
+	if !extensionExcluded("xml", []string{".xml"}) {
+		t.Fatal("dotted exclusion should match a filename extension")
+	}
+	if !extensionExcluded(".h", []string{"h"}) {
+		t.Fatal("legacy bare exclusion should remain compatible")
+	}
+}
+
 func TestExcludedImageIsNominatedForOCRWithoutContentExtraction(t *testing.T) {
 	rootPath := t.TempDir()
 	path := filepath.Join(rootPath, "scan.jpg")

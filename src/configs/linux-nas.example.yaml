@@ -69,8 +69,8 @@ roots:
         target: "/mnt/nas-finance"
     enabled: true
     labels: ["nas", "finance"]
-    include_extensions: ["pdf", "docx", "xlsx", "pptx", "txt", "csv", "md"]
-    exclude_extensions: ["tmp", "bak", "partial"]
+    include_extensions: [".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".csv", ".md"]
+    exclude_extensions: [".tmp", ".bak", ".partial"]
     include_file_patterns: []
     exclude_file_patterns:
       - "**/~$*"
@@ -101,7 +101,7 @@ roots:
     enabled: false
     labels: ["nas", "projects"]
     include_extensions: []
-    exclude_extensions: ["tmp", "bak"]
+    exclude_extensions: [".tmp", ".bak"]
     include_file_patterns: []
     exclude_file_patterns:
       - "**/~$*"
@@ -117,8 +117,8 @@ roots:
     path: "/mnt/nas-*/*"
     enabled: false
     labels: ["mounted", "wildcard"]
-    include_extensions: ["pdf", "docx", "xlsx", "pptx", "txt", "csv", "md"]
-    exclude_extensions: ["tmp", "bak", "partial"]
+    include_extensions: [".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".csv", ".md"]
+    exclude_extensions: [".tmp", ".bak", ".partial"]
     include_file_patterns: []
     exclude_file_patterns:
       - "~$*"

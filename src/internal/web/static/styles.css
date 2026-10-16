@@ -255,6 +255,9 @@ td.rules { color: var(--muted); font-size: 12px; line-height: 1.55; }
 .advanced-rules label { margin-top: 14px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; }
 .rules-form .form-actions { position: sticky; bottom: 0; border-top: 1px solid var(--line); background: var(--surface); }
+.save-status { min-height: 20px; align-self: center; color: var(--muted); font-size: 12px; font-weight: 650; }
+.save-status.success { color: var(--good); }
+.save-status.error { color: var(--bad); }
 
 .list { display: grid; max-height: 480px; overflow: auto; }
 .activity-item { display: grid; grid-template-columns: minmax(180px, 1fr) 92px minmax(320px, 1.6fr); gap: 14px; align-items: center; min-height: 72px; padding: 12px 16px; border-bottom: 1px solid var(--line); }

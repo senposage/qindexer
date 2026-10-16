@@ -1136,8 +1136,8 @@ QIndexer `v1.2.21` keeps `crawler.content_extraction.exclude_extensions` and
 requests may now include optional `content_exclude_extensions` and
 `ocr_exclude_extensions` arrays. Omit either field, or send `null`, to inherit
 the global list. Send an explicit empty array (`[]`) to allow every otherwise
-supported extension for that one root. Values are bare extensions, one per
-array item; no comma-delimited string is accepted or needed.
+supported extension for that one root. Values are dotted extensions such as
+`.pdf`, one per array item; no comma-delimited string is accepted or needed.
 
 This is an admin/root-rules capability only. QSurfer's search protocol and
 ordinary `POST /v1/search` payloads do not change. The admin UI also now owns
@@ -1145,3 +1145,13 @@ global `crawler.exclude_file_patterns` and `crawler.exclude_folder_patterns`;
 they are process-wide hygiene filters for temporary files, recycle/snapshot
 trees, sync metadata, and similar noise, while root filters remain reserved for
 business-specific rules.
+
+## 2026-10-15: Dotted Extension Policies (1.2.25)
+
+Root `include_extensions`/`exclude_extensions` and global or per-root content
+and OCR exclusion lists now use dotted values (`.pdf`, `.xml`, `.h`). QIndexer
+normalizes legacy bare values on configuration load and admin saves persist the
+canonical dotted form. This does **not** change QSurfer's search request
+`filters.extensions` field or result `extension` field, which remain bare
+values such as `pdf` and `docx`. File and folder wildcard rules are unchanged:
+they continue to use glob patterns such as `*.pdf` and `**/Finance/**`.

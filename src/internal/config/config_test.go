@@ -91,11 +91,26 @@ func TestEnrichmentExclusionsNormalizeAsLineEntries(t *testing.T) {
 		OCR:               OCRConfig{ExcludeExtensions: []string{".PDF", " pdf "}},
 	}}
 	cfg.ApplyDefaults()
-	if got := cfg.Crawler.ContentExtraction.ExcludeExtensions; len(got) != 2 || got[0] != "jpg" || got[1] != "png" {
+	if got := cfg.Crawler.ContentExtraction.ExcludeExtensions; len(got) != 2 || got[0] != ".jpg" || got[1] != ".png" {
 		t.Fatalf("content exclusions = %#v", got)
 	}
-	if got := cfg.Crawler.OCR.ExcludeExtensions; len(got) != 1 || got[0] != "pdf" {
+	if got := cfg.Crawler.OCR.ExcludeExtensions; len(got) != 1 || got[0] != ".pdf" {
 		t.Fatalf("OCR exclusions = %#v", got)
+	}
+}
+
+func TestRootExtensionFiltersNormalizeToDottedEntries(t *testing.T) {
+	cfg := Config{Roots: []RootConfig{{
+		IncludeExtensions: []string{" XML ", ".h", "*", "xml"},
+		ExcludeExtensions: []string{"tmp", ".BAK", "tmp"},
+	}}}
+	cfg.ApplyDefaults()
+	root := cfg.Roots[0]
+	if got := root.IncludeExtensions; len(got) != 3 || got[0] != ".xml" || got[1] != ".h" || got[2] != "*" {
+		t.Fatalf("include extensions = %#v", got)
+	}
+	if got := root.ExcludeExtensions; len(got) != 2 || got[0] != ".tmp" || got[1] != ".bak" {
+		t.Fatalf("exclude extensions = %#v", got)
 	}
 }
 
@@ -107,14 +122,14 @@ func TestRootEnrichmentExclusionOverridesRemainIndependent(t *testing.T) {
 	}}}
 	cfg.ApplyDefaults()
 	root := cfg.Roots[0]
-	if got := root.ContentExcludedExtensions(cfg.Crawler.ContentExtraction.ExcludeExtensions); len(got) != 2 || got[0] != "jpg" || got[1] != "pdf" {
+	if got := root.ContentExcludedExtensions(cfg.Crawler.ContentExtraction.ExcludeExtensions); len(got) != 2 || got[0] != ".jpg" || got[1] != ".pdf" {
 		t.Fatalf("content root override = %#v", got)
 	}
 	if got := root.OCRExcludedExtensions(cfg.Crawler.OCR.ExcludeExtensions); got == nil || len(got) != 0 {
 		t.Fatalf("empty OCR root override must stay explicit: %#v", got)
 	}
 	inherited := RootConfig{}
-	if got := inherited.ContentExcludedExtensions([]string{"png"}); len(got) != 1 || got[0] != "png" {
+	if got := inherited.ContentExcludedExtensions([]string{".png"}); len(got) != 1 || got[0] != ".png" {
 		t.Fatalf("inherited content exclusions = %#v", got)
 	}
 }

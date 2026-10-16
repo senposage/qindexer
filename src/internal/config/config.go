@@ -102,8 +102,8 @@ type OCRConfig struct {
 	ExcludeExtensions []string `yaml:"exclude_extensions" json:"exclude_extensions"`
 }
 
-var defaultContentExcludeExtensions = []string{"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp", "tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"}
-var defaultOCRExcludeExtensions = []string{"tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"}
+var defaultContentExcludeExtensions = []string{".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp", ".tmp", ".bak", ".part", ".partial", ".crdownload", ".download", ".lnk", ".url", ".ds_store", ".thumbs.db"}
+var defaultOCRExcludeExtensions = []string{".tmp", ".bak", ".part", ".partial", ".crdownload", ".download", ".lnk", ".url", ".ds_store", ".thumbs.db"}
 var defaultExcludeFilePatterns = []string{"~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*", "*.tmp", "*.temp", "*.bak", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo"}
 var defaultExcludeFolderPatterns = []string{"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**", "**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**", "**/AppData/Local/Temp/**"}
 
@@ -365,6 +365,8 @@ func (c *Config) applyDefaults() {
 	}
 	c.Crawler.OCR.ExcludeExtensions = normalizeExtensions(c.Crawler.OCR.ExcludeExtensions)
 	for i := range c.Roots {
+		c.Roots[i].IncludeExtensions = normalizeExtensions(c.Roots[i].IncludeExtensions)
+		c.Roots[i].ExcludeExtensions = normalizeExtensions(c.Roots[i].ExcludeExtensions)
 		if c.Roots[i].ContentExcludeExtensions != nil {
 			values := normalizeExtensions(*c.Roots[i].ContentExcludeExtensions)
 			c.Roots[i].ContentExcludeExtensions = &values
@@ -648,8 +650,20 @@ func normalizeExtensions(values []string) []string {
 	seen := make(map[string]bool, len(values))
 	normalized := make([]string, 0, len(values))
 	for _, value := range values {
-		value = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), ".")
-		if value == "" || seen[value] {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "*" {
+			if !seen[value] {
+				seen[value] = true
+				normalized = append(normalized, value)
+			}
+			continue
+		}
+		value = strings.TrimLeft(value, ".")
+		if value == "" {
+			continue
+		}
+		value = "." + value
+		if seen[value] {
 			continue
 		}
 		seen[value] = true
