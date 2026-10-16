@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.31 - 2026-10-16
+
+- Make administrative crawler stop a hard boundary: queued, watcher, scheduled,
+  and manual work remains stopped until an explicit resume, while a service
+  restart can still resume due work normally.
+- Avoid recursive recrawls from ordinary directory-change notifications; new
+  files continue to trigger recursive discovery where needed.
+- Clarify enrichment diagnostics so unavailable engines, deferred retries, and
+  files that are not eligible for OCR or content extraction are distinguishable.
+- Hide protected document totals until an administrator has authenticated.
+
 ## 1.2.30 - 2026-10-15
 
 - Stop issuing `ANALYZE documents` every five seconds in PostgreSQL mode;

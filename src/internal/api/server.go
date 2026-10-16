@@ -786,6 +786,10 @@ func (s *Server) crawlRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "crawler_maintenance", "crawler maintenance is in progress; retry after it completes")
 		return
 	}
+	if s.crawler.IsPaused() {
+		writeError(w, http.StatusConflict, "crawler_paused", "crawler is paused or stopped; resume it before starting a root crawl")
+		return
+	}
 	if s.crawler.IsRootRunning(rootID) {
 		writeError(w, http.StatusConflict, "crawl_already_running", "this root is already crawling")
 		return
@@ -1691,19 +1695,19 @@ func (s *Server) resumeCrawler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) stopCrawler(w http.ResponseWriter, r *http.Request) {
-	until, requestedRoots := s.crawler.CancelAllAndPause(24 * time.Hour)
+	requestedRoots := s.crawler.CancelAllAndStop()
 	s.rememberResumeRoots(requestedRoots)
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	stopped := s.crawler.WaitAll(waitCtx)
 	cancel()
 	activeRoots := s.crawler.ActiveRoots()
 	if stopped {
-		s.log.Info("crawler stop completed", "requested_roots", requestedRoots, "paused_until", until)
-		writeJSON(w, http.StatusOK, map[string]any{"status": "stopped", "paused_until": until, "paused_until_unix": until.Unix(), "requested_roots": requestedRoots, "active_roots": activeRoots})
+		s.log.Info("crawler stop completed", "requested_roots", requestedRoots)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "stopped", "requested_roots": requestedRoots, "active_roots": activeRoots})
 		return
 	}
-	s.log.Warn("crawler stop still draining", "requested_roots", requestedRoots, "active_roots", activeRoots, "paused_until", until)
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "paused_until": until, "paused_until_unix": until.Unix(), "requested_roots": requestedRoots, "active_roots": activeRoots})
+	s.log.Warn("crawler stop still draining", "requested_roots", requestedRoots, "active_roots", activeRoots)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "stopping", "requested_roots": requestedRoots, "active_roots": activeRoots})
 }
 
 func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ package crawler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -57,6 +58,18 @@ func TestExtensionPoliciesMatchDottedAndLegacyEntries(t *testing.T) {
 	}
 	if !extensionExcluded(".h", []string{"h"}) {
 		t.Fatal("legacy bare exclusion should remain compatible")
+	}
+}
+
+func TestEnrichmentFailureMessageDistinguishesFileAndEngineFailures(t *testing.T) {
+	if got := enrichmentFailureMessage("OCR", "unindexable", errors.New(`OCR command "tesseract" failed`)); got != "file not eligible for ocr" {
+		t.Fatalf("terminal OCR failure message = %q", got)
+	}
+	if got := enrichmentFailureMessage("Content extraction", "retry_pending", errors.New("resource temporarily unavailable")); got != "Content extraction deferred; file will be retried" {
+		t.Fatalf("retryable content failure message = %q", got)
+	}
+	if got := enrichmentFailureMessage("OCR", "unindexable", errors.New(`OCR command "tesseract" was not found`)); got != "OCR engine unavailable" {
+		t.Fatalf("missing engine message = %q", got)
 	}
 }
 
@@ -188,6 +201,74 @@ func TestRemovalHintDoesNotMarkDocumentsMissing(t *testing.T) {
 	}
 	if len(results.Results) != 1 || results.Results[0].Status != "active" {
 		t.Fatalf("removal hint changed indexed state: %#v", results.Results)
+	}
+}
+
+func TestShallowDirectoryHintDoesNotWalkDescendants(t *testing.T) {
+	ctx := context.Background()
+	rootPath := t.TempDir()
+	nested := filepath.Join(rootPath, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "changed.txt"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	cr := New(&config.Config{
+		Roots:   []config.RootConfig{{ID: "root", Path: rootPath, Enabled: true}},
+		Crawler: config.CrawlerConfig{MetadataWorkerCount: 1, MetadataQueueSize: 1},
+	}, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := cr.CrawlHintShallow(ctx, "root", rootPath, false)
+	if err != nil || run.Status != "hint_ok" {
+		t.Fatalf("shallow hint = %#v, %v", run, err)
+	}
+	if run.FilesSeen != 1 {
+		t.Fatalf("shallow hint saw %d entries, want only the directory itself", run.FilesSeen)
+	}
+}
+
+func TestPausedCrawlerRejectsNewWorkBeforeClaimingRoot(t *testing.T) {
+	rootPath := t.TempDir()
+	c := New(&config.Config{Roots: []config.RootConfig{{ID: "root", Path: rootPath, Enabled: true}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.Pause(time.Hour)
+
+	hint, err := c.CrawlHintShallow(context.Background(), "root", rootPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manual, err := c.CrawlRootManual(context.Background(), "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []catalog.CrawlRun{hint, manual} {
+		if run.Status != "paused" {
+			t.Fatalf("paused crawl status = %q, want paused", run.Status)
+		}
+	}
+	if roots := c.ActiveRoots(); len(roots) != 0 {
+		t.Fatalf("paused work claimed roots: %v", roots)
+	}
+}
+
+func TestHardStopWaitsForExplicitResume(t *testing.T) {
+	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.CancelAllAndStop()
+	if !c.IsPaused() || c.Stats().PauseReason != "stopped" {
+		t.Fatalf("hard stop was not visible in crawler state: %#v", c.Stats())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := c.waitIfPaused(ctx, true); err != context.DeadlineExceeded {
+		t.Fatalf("hard stop wait = %v, want deadline exceeded", err)
+	}
+	c.Resume()
+	if c.IsPaused() {
+		t.Fatal("resume did not clear hard stop")
 	}
 }
 

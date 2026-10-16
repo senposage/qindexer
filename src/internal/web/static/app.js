@@ -446,8 +446,9 @@ function renderMetrics(metrics) {
     document.querySelector("#crawler-state").textContent = `Throttled: ${String(metrics.pause_reason || "system").replace("adaptive_", "")}`;
     renderOps("Crawler throttled");
   } else if (metrics.paused) {
-    document.querySelector("#crawler-state").textContent = `Paused ${formatPause(metrics.paused_until_unix)}`;
-    renderOps("Crawler paused");
+    const stopped = metrics.pause_reason === "stopped";
+    document.querySelector("#crawler-state").textContent = stopped ? "Stopped; resume required" : `Paused ${formatPause(metrics.paused_until_unix)}`;
+    renderOps(stopped ? "Crawler stopped" : "Crawler paused");
   } else {
     document.querySelector("#crawler-state").textContent = active ? `${active} active; background deferred` : "Idle";
     renderOps(active ? "Crawler active" : "Crawler idle");

@@ -55,8 +55,9 @@ type watchSet struct {
 }
 
 type dirtyPath struct {
-	path    string
-	removed bool
+	path      string
+	removed   bool
+	recursive bool
 }
 
 const hotFolderLookupTimeout = 2 * time.Second
@@ -204,6 +205,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 				continue
 			}
 			removed := event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)
+			recursive := event.Has(fsnotify.Create)
 			if event.Has(fsnotify.Create) {
 				_ = w.tryWatchCreatedDirectory(ctx, set, event.Name, rootID)
 			}
@@ -212,7 +214,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 			if dirty[rootID] == nil {
 				dirty[rootID] = map[string]dirtyPath{}
 			}
-			dirty[rootID][event.Name] = dirtyPath{path: event.Name, removed: removed}
+			dirty[rootID][event.Name] = dirtyPath{path: event.Name, removed: removed, recursive: recursive}
 			mu.Unlock()
 			resetTimer()
 		case <-timerC:
@@ -607,7 +609,11 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 		return run.Status != "already_running" && run.Status != "maintenance_paused"
 	}
 	for _, dirty := range paths {
-		run, err := w.crawler.CrawlHint(ctx, rootID, dirty.path, dirty.removed)
+		crawlHint := w.crawler.CrawlHintShallow
+		if dirty.recursive {
+			crawlHint = w.crawler.CrawlHint
+		}
+		run, err := crawlHint(ctx, rootID, dirty.path, dirty.removed)
 		if err != nil {
 			if isCancellation(ctx, err) {
 				return false
@@ -615,7 +621,7 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 			w.log.Warn("hint crawl failed", "root", rootID, "path", dirty.path, "error", err)
 			continue
 		}
-		if run.Status == "already_running" || run.Status == "maintenance_paused" {
+		if run.Status == "already_running" || run.Status == "maintenance_paused" || run.Status == "paused" {
 			return false
 		}
 	}
@@ -674,9 +680,13 @@ func (q *hintQueue) run(ctx context.Context, rootID string) {
 		if ctx.Err() != nil {
 			return
 		}
-		// Maintenance has no active root to wait on. Yield before retrying so a
-		// deliberate pause cannot turn into a hot loop.
-		timer := time.NewTimer(time.Second)
+		// A timed stop has no active root to wait on. Keep the coalesced hints
+		// for later, but do not poll the paused crawler in a hot loop.
+		delay := time.Second
+		if q.watcher.crawler.IsPaused() {
+			delay = 5 * time.Second
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -710,6 +720,9 @@ func mergeDirtyPaths(dst map[string]map[string]dirtyPath, rootID string, src map
 		dst[rootID] = make(map[string]dirtyPath, len(src))
 	}
 	for path, dirty := range src {
+		if existing, ok := dst[rootID][path]; ok {
+			dirty.recursive = dirty.recursive || existing.recursive
+		}
 		dst[rootID][path] = dirty
 	}
 }

@@ -62,6 +62,7 @@ type Crawler struct {
 	initialCrawls       int64
 	lastActivity        int64
 	pausedUntil         int64
+	hardStopped         atomic.Bool
 	nextFullCrawl       int64
 	maintenance         int64
 	maintenanceMu       sync.Mutex
@@ -317,16 +318,12 @@ func (c *Crawler) Stats() Stats {
 	dirs := atomic.LoadInt64(&c.dirsRead)
 	bytes := atomic.LoadInt64(&c.bytesStatted)
 	rate := c.currentThroughput()
-	pausedUntil := atomic.LoadInt64(&c.pausedUntil)
+	pausedUntil, pausedReason := c.pauseStateAt(time.Now())
 	initialCrawls := atomic.LoadInt64(&c.initialCrawls)
-	pausedReason := ""
 	pressure := c.adaptiveStatus()
-	backlog, _ := c.cat.CachedBackgroundBacklog()
-	if scheduledUntil, active := c.scheduledPauseUntil(time.Now()); active && scheduledUntil.Unix() > pausedUntil {
-		pausedUntil = scheduledUntil.Unix()
-		pausedReason = "schedule"
-	} else if pausedUntil > time.Now().Unix() {
-		pausedReason = "manual"
+	var backlog catalog.BackgroundBacklog
+	if c.cat != nil {
+		backlog, _ = c.cat.CachedBackgroundBacklog()
 	}
 	if pressure.Paused && initialCrawls == 0 {
 		pausedReason = "adaptive_" + pressure.Reason
@@ -340,7 +337,7 @@ func (c *Crawler) Stats() Stats {
 		BytesPerSecond: rate.bytesPerSecond,
 		HintCrawls:     atomic.LoadInt64(&c.hintCrawls), FullCrawls: atomic.LoadInt64(&c.fullCrawls),
 		LastActivityUnix:  atomic.LoadInt64(&c.lastActivity),
-		Paused:            pausedUntil > time.Now().Unix() || (pressure.Paused && initialCrawls == 0),
+		Paused:            pausedReason != "" || (pressure.Paused && initialCrawls == 0),
 		PausedUntilUnix:   pausedUntil,
 		PauseReason:       pausedReason,
 		AdaptivePaused:    pressure.Paused,
@@ -568,6 +565,28 @@ func (c *Crawler) Pause(duration time.Duration) time.Time {
 	return until
 }
 
+// IsPaused reports an explicit timed pause or a configured schedule window.
+// Adaptive pressure is intentionally excluded: it is a throttle, not a hard
+// stop, and current work should retain its checkpoint state while it waits.
+func (c *Crawler) IsPaused() bool {
+	_, reason := c.pauseStateAt(time.Now())
+	return reason != ""
+}
+
+func (c *Crawler) pauseStateAt(now time.Time) (int64, string) {
+	if c.hardStopped.Load() {
+		return 0, "stopped"
+	}
+	until := atomic.LoadInt64(&c.pausedUntil)
+	if scheduledUntil, active := c.scheduledPauseUntil(now); active && scheduledUntil.Unix() > until {
+		return scheduledUntil.Unix(), "schedule"
+	}
+	if until > now.Unix() {
+		return until, "manual"
+	}
+	return until, ""
+}
+
 func (c *Crawler) MaintenancePause(duration time.Duration) (time.Time, func()) {
 	if duration <= 0 {
 		duration = 10 * time.Minute
@@ -622,6 +641,7 @@ func (c *Crawler) BeginMaintenance(duration time.Duration) (time.Time, func()) {
 }
 
 func (c *Crawler) Resume() {
+	c.hardStopped.Store(false)
 	atomic.StoreInt64(&c.pausedUntil, 0)
 }
 
@@ -642,6 +662,9 @@ func (c *Crawler) CrawlRootManual(ctx context.Context, rootID string) (catalog.C
 	}
 	if c.InMaintenance() {
 		return catalog.CrawlRun{RootID: root.ID, Status: "maintenance_paused", ErrorMessage: "crawler maintenance in progress"}, nil
+	}
+	if c.IsPaused() {
+		return catalog.CrawlRun{RootID: root.ID, Status: "paused", ErrorMessage: "crawler is paused"}, nil
 	}
 	workCtx, finish, started := c.beginRootWork(ctx, root.ID)
 	if !started {
@@ -728,10 +751,9 @@ func (c *Crawler) CancelAll() []string {
 	return roots
 }
 
-func (c *Crawler) CancelAllAndPause(duration time.Duration) (time.Time, []string) {
-	until := c.Pause(duration)
-	activeRoots := c.CancelAll()
-	return until, activeRoots
+func (c *Crawler) CancelAllAndStop() []string {
+	c.hardStopped.Store(true)
+	return c.CancelAll()
 }
 
 func (c *Crawler) WaitAll(ctx context.Context) bool {
@@ -891,7 +913,18 @@ func (c *Crawler) CrawlHint(ctx context.Context, rootID string, path string, rem
 	if !ok {
 		return catalog.CrawlRun{}, os.ErrNotExist
 	}
-	return c.crawlHint(ctx, root, path, removed)
+	return c.crawlHint(ctx, root, path, removed, true)
+}
+
+// CrawlHintShallow refreshes only the changed entry. Filesystem notifications
+// for an already watched directory commonly mean that a child changed; walking
+// that directory recursively would turn one event into a subtree recrawl.
+func (c *Crawler) CrawlHintShallow(ctx context.Context, rootID string, path string, removed bool) (catalog.CrawlRun, error) {
+	root, ok := c.rootByID(rootID)
+	if !ok {
+		return catalog.CrawlRun{}, os.ErrNotExist
+	}
+	return c.crawlHint(ctx, root, path, removed, false)
 }
 
 func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
@@ -1151,7 +1184,7 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 func (c *Crawler) refillBackground(ctx context.Context) {
 	// Structural indexing takes priority only within its own root. A crawl of
 	// one share must not stall OCR, content extraction, or hashing for another.
-	if c.InMaintenance() || c.adaptiveStatus().Paused {
+	if c.InMaintenance() || c.IsPaused() || c.adaptiveStatus().Paused {
 		return
 	}
 	content := c.snapshot().Crawler.ContentExtraction
@@ -1303,9 +1336,25 @@ func enrichmentFailureRetryable(err error) bool {
 	return true
 }
 
+// enrichmentFailureMessage keeps a normal per-file rejection distinct from a
+// service-side problem in the operational log. The original error is retained
+// as a detail field at the call site for diagnosis.
+func enrichmentFailureMessage(kind, status string, err error) string {
+	if strings.Contains(strings.ToLower(err.Error()), "was not found") {
+		return kind + " engine unavailable"
+	}
+	if status == "retry_pending" {
+		return kind + " deferred; file will be retried"
+	}
+	return "file not eligible for " + strings.ToLower(kind)
+}
+
 func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial bool) (catalog.CrawlRun, error) {
 	if atomic.LoadInt64(&c.maintenance) > 0 {
 		return catalog.CrawlRun{RootID: root.ID, Status: "maintenance_paused", ErrorMessage: "crawler maintenance in progress"}, nil
+	}
+	if c.IsPaused() {
+		return catalog.CrawlRun{RootID: root.ID, Status: "paused", ErrorMessage: "crawler is paused"}, nil
 	}
 	var started bool
 	ctx, finish, started := c.beginRootWork(ctx, root.ID)
@@ -1554,9 +1603,12 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 	return run, walkErr
 }
 
-func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path string, removed bool) (catalog.CrawlRun, error) {
+func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path string, removed, recursive bool) (catalog.CrawlRun, error) {
 	if atomic.LoadInt64(&c.maintenance) > 0 {
 		return catalog.CrawlRun{RootID: root.ID, Status: "maintenance_paused", ErrorMessage: "crawler maintenance in progress"}, nil
+	}
+	if c.IsPaused() {
+		return catalog.CrawlRun{RootID: root.ID, Status: "paused", ErrorMessage: "crawler is paused"}, nil
 	}
 	var started bool
 	ctx, finish, started := c.beginRootWork(ctx, root.ID)
@@ -1643,7 +1695,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 		}()
 	}
 	var walkErr error
-	if info.IsDir() {
+	if info.IsDir() && recursive {
 		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, false, true, settings.DirectoryWorkerCount)
 	} else {
 		walkErr = sendPath(ctx, jobs, path)
@@ -1873,17 +1925,14 @@ func isConfiguredRootPath(configured, path string) bool {
 
 func (c *Crawler) waitIfPaused(ctx context.Context, adaptivePause bool) error {
 	for {
-		until := atomic.LoadInt64(&c.pausedUntil)
-		if scheduledUntil, active := c.scheduledPauseUntil(time.Now()); active && scheduledUntil.Unix() > until {
-			until = scheduledUntil.Unix()
-		}
+		until, pauseReason := c.pauseStateAt(time.Now())
 		now := time.Now().Unix()
 		pressure := c.adaptiveStatus()
-		if until <= now && (!adaptivePause || !pressure.Paused) {
+		if pauseReason == "" && (!adaptivePause || !pressure.Paused) {
 			return ctx.Err()
 		}
 		wait := time.Second
-		if (!adaptivePause || !pressure.Paused) && until-now < 1 {
+		if pauseReason != "stopped" && (!adaptivePause || !pressure.Paused) && until-now < 1 {
 			wait = time.Duration(until-now) * time.Second
 		}
 		timer := time.NewTimer(wait)
@@ -2457,7 +2506,7 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 					c.log.Debug("content failure state update failed", "path", job.path, "error", recordErr)
 					_ = c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature)
 				} else {
-					c.log.Debug("content extraction failed", "path", job.path, "status", result, "error", err)
+					c.log.Debug(enrichmentFailureMessage("Content extraction", result, err), "path", job.path, "status", result, "detail", err)
 				}
 				finish()
 				continue
@@ -2541,7 +2590,7 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 					c.log.Debug("OCR failure state update failed", "path", job.path, "error", recordErr)
 					_ = c.cat.ReleaseOCRClaim(context.Background(), job.id, job.signature)
 				} else {
-					c.log.Debug("OCR failed", "path", job.path, "engine", settings.Engine, "status", result, "error", err)
+					c.log.Debug(enrichmentFailureMessage("OCR", result, err), "path", job.path, "engine", settings.Engine, "status", result, "detail", err)
 				}
 				finish()
 				continue
