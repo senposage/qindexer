@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.29 - 2026-10-15
+
+- Keep PostgreSQL search-vector input below its hard 1 MiB limit, avoiding
+  repeated `SQLSTATE 54000` failures on large generated text assets.
+- Treat browser cache, service-worker, web-storage, IndexedDB, and local-storage
+  folders beneath AppData as built-in non-indexable locations.
+- Apply global path exclusions during traversal and fix nested `**/.../**`
+  directory rules to match the directory node itself as well as its descendants.
+
 ## 1.2.28 - 2026-10-15
 
 - Sanitize extracted and OCR text before storage, including malformed UTF-8 and

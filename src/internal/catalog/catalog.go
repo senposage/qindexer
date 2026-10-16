@@ -1963,12 +1963,22 @@ func upsertFTS(ctx context.Context, tx *catalogTx, id, rootID, name, path, exten
 
 // storageText ensures the TEXT boundary remains valid for both SQLite and
 // PostgreSQL, even when a misnamed or legacy-encoded file reaches extraction.
-func storageText(value string) string {
-	return strings.ReplaceAll(strings.ToValidUTF8(value, "\uFFFD"), "\x00", "\uFFFD")
+const postgresTSVectorContentLimit = 192 << 10
+
+func (c *Catalog) storageText(value string) string {
+	value = strings.ReplaceAll(strings.ToValidUTF8(value, "\uFFFD"), "\x00", "\uFFFD")
+	// PostgreSQL's generated tsvector has a hard 1 MiB limit and a highly
+	// tokenized document can expand beyond its source byte count. Keep enough
+	// headroom for the file metadata and vector representation while retaining
+	// the configured, less restrictive behavior for SQLite.
+	if c.db != nil && c.db.backend == backendPostgres {
+		return truncateUTF8(value, postgresTSVectorContentLimit)
+	}
+	return value
 }
 
 func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, status, content string) error {
-	content = storageText(content)
+	content = c.storageText(content)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	tx, err := c.db.BeginTx(ctx, nil)
@@ -2004,7 +2014,7 @@ func (c *Catalog) UpdateContentStatus(ctx context.Context, id, signature, status
 }
 
 func (c *Catalog) UpdateOCRContent(ctx context.Context, id, signature, status, content string) error {
-	content = storageText(content)
+	content = c.storageText(content)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	tx, err := c.db.BeginTx(ctx, nil)

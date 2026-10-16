@@ -317,7 +317,7 @@ func TestShouldSkipOfficeTemporaryLockFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, entry := range entries {
-			if entry.Name() == name && !shouldSkip(config.RootConfig{}, `X:\Legal\`+name, entry, false) {
+			if entry.Name() == name && !shouldSkip(config.RootConfig{}, config.CrawlerConfig{}, `X:\Legal\`+name, entry, false) {
 				t.Fatalf("expected Office temporary lock file %q to be skipped", name)
 			}
 		}
@@ -342,10 +342,26 @@ func TestShouldSkipOperationalWindowsDirectories(t *testing.T) {
 		`C:\Users\Test\AppData\Local\Microsoft\Windows\WebCache`,
 		`C:\Windows\System32\sru`,
 		`C:\Users\Test\AppData\Local\Temp\_MEI12345`,
+		`C:\Users\Test\AppData\Local\Google\Chrome\User Data\Default\CacheStorage`,
 	} {
-		if !shouldSkip(config.RootConfig{}, path, entries[0], false) {
+		if !shouldSkip(config.RootConfig{}, config.CrawlerConfig{}, path, entries[0], false) {
 			t.Fatalf("expected operational directory %q to be skipped", path)
 		}
+	}
+}
+
+func TestShouldSkipHonorsGlobalFolderExclusions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "probe.txt"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := config.CrawlerConfig{ExcludeFolderPatterns: []string{"**/Confidential/**"}}
+	if !shouldSkip(config.RootConfig{}, global, `X:\Cases\Confidential\memo.txt`, entries[0], false) {
+		t.Fatal("global folder exclusion did not stop traversal")
 	}
 }
 

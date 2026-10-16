@@ -1792,6 +1792,7 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 		return
 	}
 	folders := 0
+	settings := c.snapshot().Crawler
 	for _, entry := range entries {
 		if entry.IsDir() {
 			folders++
@@ -1808,7 +1809,7 @@ func (c *Crawler) walkDirectory(ctx context.Context, root config.RootConfig, dir
 			return
 		}
 		path := filepath.Join(dir, entry.Name())
-		if shouldSkip(root, path, entry, c.snapshot().Crawler.IgnoreHidden) {
+		if shouldSkip(root, settings, path, entry, settings.IgnoreHidden) {
 			continue
 		}
 		if (entry.IsDir() || entry.Type()&os.ModeSymlink != 0) && isReparsePoint(path, entry) && !c.snapshot().Crawler.FollowSymlinks {
@@ -2638,7 +2639,7 @@ func (c *Crawler) rootIDsFor(include func(config.RootConfig) bool) []string {
 	return rootIDs
 }
 
-func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHidden bool) bool {
+func shouldSkip(root config.RootConfig, global config.CrawlerConfig, path string, entry fs.DirEntry, ignoreHidden bool) bool {
 	name := entry.Name()
 	if ignoreHidden && strings.HasPrefix(name, ".") {
 		return true
@@ -2648,10 +2649,11 @@ func shouldSkip(root config.RootConfig, path string, entry fs.DirEntry, ignoreHi
 	if !entry.IsDir() && strings.HasPrefix(strings.TrimLeft(name, `\\/`), "~$") {
 		return true
 	}
-	if entry.IsDir() && (matchesAny(path, root.ExcludeFolderPatterns) || isOperationalPath(root, path)) {
-		return true
+	extension := ""
+	if !entry.IsDir() {
+		extension = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	}
-	return matchesAny(path, root.ExcludePatterns)
+	return !PathAllowedWithGlobalRules(root, global, path, extension, entry.IsDir())
 }
 
 var defaultOperationalFolderExclusions = []string{
@@ -2661,6 +2663,7 @@ var defaultOperationalFolderExclusions = []string{
 	"**/System Volume Information/**", "**/$WinREAgent/**", "**/Recovery/**", "**/PerfLogs/**", "**/Config.Msi/**", "**/MSOCache/**",
 	"**/Windows/**", "**/Program Files/**", "**/Program Files (x86)/**", "**/ProgramData/**",
 	"**/AppData/Local/Temp/**", "**/AppData/Local/CrashDumps/**", "**/AppData/Local/Microsoft/Windows/WebCache/**", "**/AppData/Local/Packages/**",
+	"**/AppData/**/CacheStorage/**", "**/AppData/**/Service Worker/**", "**/AppData/**/WebStorage/**", "**/AppData/**/IndexedDB/**", "**/AppData/**/Local Storage/**",
 	"**/proc/**", "**/sys/**", "**/dev/**", "**/run/**", "**/lost+found/**", "**/var/cache/**",
 }
 
@@ -2779,6 +2782,9 @@ func matchesAny(path string, patterns []string) bool {
 			}
 		}
 		if strings.HasSuffix(p, "/**") {
+			if pathGlobMatch(strings.TrimSuffix(p, "/**"), normalized) {
+				return true
+			}
 			needle := strings.TrimSuffix(p, "/**")
 			needle = strings.TrimPrefix(needle, "**/")
 			if needle != "" && (strings.Contains(normalized, "/"+needle+"/") || strings.HasSuffix(normalized, "/"+needle)) {

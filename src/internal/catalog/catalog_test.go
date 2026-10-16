@@ -429,6 +429,18 @@ func TestUpdateExtractedContentRepairsInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestStorageTextCapsPostgresTSVectorInput(t *testing.T) {
+	cat := &Catalog{db: &catalogDB{backend: backendPostgres}}
+	value := strings.Repeat("distinct-token ", postgresTSVectorContentLimit)
+	got := cat.storageText(value)
+	if len(got) > postgresTSVectorContentLimit {
+		t.Fatalf("PostgreSQL text length = %d, want at most %d", len(got), postgresTSVectorContentLimit)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("PostgreSQL text cap split UTF-8")
+	}
+}
+
 func TestCheckpointSkipsWhileCatalogWriterIsActive(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())
