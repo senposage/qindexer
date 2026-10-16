@@ -230,9 +230,7 @@ td.rules { color: var(--muted); font-size: 12px; line-height: 1.55; }
 .form-section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .form-section-title > p:last-child { color: var(--muted); font-size: 12px; }
 .rules-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.command-settings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.command-settings label { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.command-settings input { min-width: 0; flex: 1 1 auto; }
+.command-setting { align-self: start; }
 .enrichment-overrides { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 .wide-field { grid-column: 1 / -1; }
 .alias-editor { display: grid; gap: 8px; }
@@ -312,7 +310,7 @@ pre { max-height: 480px; margin: 0; padding: 16px; overflow: auto; color: #24313
   .toolbar { align-items: stretch; }
   .view-toggle, .pause-control { padding: 0; border: 0; }
   .section-heading { align-items: start; flex-direction: column; }
-  .status-grid, .rules-grid, .command-settings, .root-settings-grid, .split, .operations, .ops-metrics, .ops-summary, .settings-columns { grid-template-columns: 1fr; }
+  .status-grid, .rules-grid, .root-settings-grid, .split, .operations, .ops-metrics, .ops-summary, .settings-columns { grid-template-columns: 1fr; }
   .activity-item { grid-template-columns: 1fr; align-items: start; }
   .activity-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bootstrap-form { grid-template-columns: 1fr; }

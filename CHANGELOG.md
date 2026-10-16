@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.27 - 2026-10-15
+
+- Keep each OCR command override in its own normal-height grid cell, even when
+  it shares a row with a multiline exclusion field.
+
 ## 1.2.26 - 2026-10-15
 
 - Compact the OCR executable overrides into a single horizontal command row in
