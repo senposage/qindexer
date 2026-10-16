@@ -745,3 +745,23 @@ func TestHintStatFailureLeavesExistingDocumentStateUntouched(t *testing.T) {
 		t.Fatalf("missing count = %d, want 0", states["share"].MissingCount)
 	}
 }
+
+func TestHintIgnoresOperationalDirectory(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	rootDir := t.TempDir()
+	path := filepath.Join(rootDir, "System Volume Information")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := New(&config.Config{Roots: []config.RootConfig{{ID: "root", Path: `C:\`, Enabled: true}}}, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, err := c.CrawlHint(ctx, "root", path, false)
+	if err != nil || run.Status != "hint_ignored" {
+		t.Fatalf("hint = %#v, err=%v; want hint_ignored", run, err)
+	}
+}

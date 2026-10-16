@@ -239,6 +239,9 @@ func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Co
 		}
 		paths, err := expandRootPathsWithTimeout(ctx, root.Path)
 		if err != nil {
+			if isCancellation(ctx, err) {
+				return
+			}
 			set.noteFailure(err)
 			w.log.Warn("watch root unavailable", "root", root.ID, "path", root.Path, "error", err)
 			continue
@@ -252,6 +255,9 @@ func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Co
 			}
 			entries, err := readDirWithTimeout(ctx, path, perRootCandidateLimit)
 			if err != nil {
+				if isCancellation(ctx, err) {
+					return
+				}
 				set.noteFailure(err)
 				w.log.Warn("watch root enumeration deferred", "root", root.ID, "path", path, "error", err)
 				continue
@@ -543,6 +549,10 @@ func (w *Watcher) recordEvent() {
 	w.statsMu.Unlock()
 }
 
+func isCancellation(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.Canceled)
+}
+
 func (w *Watcher) shouldIgnore(path string) bool {
 	if w.ignore == "" || w.ignore == "." {
 		return false
@@ -577,6 +587,9 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 			w.log.Warn("dirty path limit reached; crawling affected scope", "root", rootID, "paths", len(paths), "limit", limit, "path", target)
 			run, err := w.crawler.CrawlHint(ctx, rootID, target, false)
 			if err != nil {
+				if isCancellation(ctx, err) {
+					return false
+				}
 				w.log.Warn("affected scope crawl failed", "root", rootID, "path", target, "error", err)
 				return true
 			}
@@ -585,6 +598,9 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 		w.log.Warn("dirty path limit reached; falling back to root crawl", "root", rootID, "limit", limit)
 		run, err := w.crawler.CrawlRoot(ctx, rootID)
 		if err != nil {
+			if isCancellation(ctx, err) {
+				return false
+			}
 			w.log.Warn("affected root crawl failed", "root", rootID, "error", err)
 			return true
 		}
@@ -593,6 +609,9 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 	for _, dirty := range paths {
 		run, err := w.crawler.CrawlHint(ctx, rootID, dirty.path, dirty.removed)
 		if err != nil {
+			if isCancellation(ctx, err) {
+				return false
+			}
 			w.log.Warn("hint crawl failed", "root", rootID, "path", dirty.path, "error", err)
 			continue
 		}

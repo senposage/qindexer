@@ -78,6 +78,9 @@ func (a App) Run(ctx context.Context) error {
 			continue
 		}
 		if removed, err := cat.PruneRecoveryPaths(ctx, root.ID); err != nil {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				break
+			}
 			log.Warn("recovery path cleanup failed", "root", root.ID, "error", err)
 		} else if removed > 0 {
 			log.Info("recovery paths removed from index", "root", root.ID, "documents", removed)

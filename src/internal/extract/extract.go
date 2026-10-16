@@ -178,6 +178,10 @@ func readText(r io.Reader) (string, error) {
 // normalizeText keeps stored search text bounded after whitespace cleanup. The
 // byte slice boundary is adjusted so valid UTF-8 is never split in half.
 func normalizeText(value string) string {
+	// Plain-text files may be legacy-encoded or binary despite their extension.
+	// PostgreSQL TEXT requires valid UTF-8, so normalize invalid byte sequences
+	// before whitespace cleanup and storage truncation.
+	value = strings.ReplaceAll(strings.ToValidUTF8(value, "\uFFFD"), "\x00", "\uFFFD")
 	value = strings.Join(strings.Fields(value), " ")
 	if len(value) <= maxTextBytes {
 		return value

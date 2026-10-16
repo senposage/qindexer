@@ -1257,6 +1257,9 @@ func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, j
 		}
 		items, err := claim(ctx, []string{rootID}, limit, maxSize, excluded)
 		if err != nil {
+			if isCrawlerCancellation(ctx, err) {
+				return
+			}
 			c.log.Debug(kind+" queue refill failed", "root", rootID, "error", err)
 			continue
 		}
@@ -1599,6 +1602,15 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	}
 
 	settings := c.snapshot().Crawler
+	extension := ""
+	if !info.IsDir() {
+		extension = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	}
+	if (settings.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) || !PathAllowedWithGlobalRules(root, settings, path, extension, info.IsDir()) {
+		run.Status = "hint_ignored"
+		_ = c.finishCrawl(ctx, run)
+		return run, nil
+	}
 	jobs := make(chan string, settings.MetadataQueueSize)
 	var filesSeen, filesAdded, filesUpdated, filesUnchanged, errorsCount int64
 	var workers sync.WaitGroup
@@ -2450,6 +2462,10 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				continue
 			}
 			if err := c.cat.UpdateExtractedContent(jobCtx, job.id, job.signature, status, text); err != nil {
+				if isCrawlerCancellation(jobCtx, err) {
+					finish()
+					continue
+				}
 				c.log.Debug("content update failed", "path", job.path, "error", err)
 				if releaseErr := c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature); releaseErr != nil {
 					c.log.Debug("content claim release failed", "path", job.path, "error", releaseErr)
@@ -2459,6 +2475,10 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			}
 			if err == nil && exists && strings.TrimSpace(text) == "" && root.OCREnabled(c.snapshot().Crawler.OCR.Enabled) && extract.OCREligible(job.path) {
 				if updateErr := c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending"); updateErr != nil {
+					if isCrawlerCancellation(jobCtx, updateErr) {
+						finish()
+						continue
+					}
 					c.log.Debug("OCR pending update failed", "path", job.path, "error", updateErr)
 				}
 			}
@@ -2526,6 +2546,10 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				continue
 			}
 			if err := c.cat.UpdateOCRContent(jobCtx, job.id, job.signature, status, text); err != nil {
+				if isCrawlerCancellation(jobCtx, err) {
+					finish()
+					continue
+				}
 				c.log.Debug("OCR update failed", "path", job.path, "error", err)
 				if releaseErr := c.cat.ReleaseOCRClaim(context.Background(), job.id, job.signature); releaseErr != nil {
 					c.log.Debug("OCR claim release failed", "path", job.path, "error", releaseErr)
@@ -2580,6 +2604,10 @@ func (c *Crawler) hashWorker(ctx context.Context) {
 				continue
 			}
 			if err := c.cat.UpdateContentHash(jobCtx, job.id, job.signature, value, status); err != nil {
+				if isCrawlerCancellation(jobCtx, err) {
+					finish()
+					continue
+				}
 				c.log.Debug("hash update failed", "path", job.path, "error", err)
 				if releaseErr := c.cat.ReleaseHashClaim(context.Background(), job.id, job.signature); releaseErr != nil {
 					c.log.Debug("hash claim release failed", "path", job.path, "error", releaseErr)

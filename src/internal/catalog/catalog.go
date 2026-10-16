@@ -1961,7 +1961,14 @@ func upsertFTS(ctx context.Context, tx *catalogTx, id, rootID, name, path, exten
 	return nil
 }
 
+// storageText ensures the TEXT boundary remains valid for both SQLite and
+// PostgreSQL, even when a misnamed or legacy-encoded file reaches extraction.
+func storageText(value string) string {
+	return strings.ReplaceAll(strings.ToValidUTF8(value, "\uFFFD"), "\x00", "\uFFFD")
+}
+
 func (c *Catalog) UpdateExtractedContent(ctx context.Context, id, signature, status, content string) error {
+	content = storageText(content)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	tx, err := c.db.BeginTx(ctx, nil)
@@ -1997,6 +2004,7 @@ func (c *Catalog) UpdateContentStatus(ctx context.Context, id, signature, status
 }
 
 func (c *Catalog) UpdateOCRContent(ctx context.Context, id, signature, status, content string) error {
+	content = storageText(content)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	tx, err := c.db.BeginTx(ctx, nil)

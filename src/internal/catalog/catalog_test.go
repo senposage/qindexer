@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSearchPaginationFoldersAndSegmentAwareScopes(t *testing.T) {
@@ -399,6 +400,32 @@ func TestCompactKeepsContentSearchAndTrimsStoredText(t *testing.T) {
 	resp, err := cat.Search(ctx, SearchRequest{Query: "orchid", Filters: SearchFilters{MatchFields: []string{"content"}}, Limit: 10}, 10)
 	if err != nil || len(resp.Results) != 1 || resp.Results[0].ID != doc.ID {
 		t.Fatalf("content search after compact = %#v, %v", resp.Results, err)
+	}
+}
+
+func TestUpdateExtractedContentRepairsInvalidUTF8(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	doc := Document{ID: "invalid-utf8", RootID: "test", Path: `D:\fixtures\legacy.txt`, NormalizedPath: NormalizePath(`D:\fixtures\legacy.txt`), Name: "legacy.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.UpdateExtractedContent(ctx, doc.ID, doc.Signature, "extracted", "alpha\x00\x80 beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stored string
+	if err := cat.db.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, doc.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(stored) || strings.ContainsRune(stored, '\x00') || stored != "alpha\uFFFD\uFFFD beta" {
+		t.Fatalf("stored content = %q, want valid normalized UTF-8", stored)
 	}
 }
 

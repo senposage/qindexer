@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.28 - 2026-10-15
+
+- Sanitize extracted and OCR text before storage, including malformed UTF-8 and
+  NUL bytes that PostgreSQL rejects. This prevents repeated content-update
+  failures and the corresponding database error spam from malformed files.
+- Apply path exclusions to filesystem notification hints before they are
+  indexed, keeping protected operating-system directories out of watcher work.
+- Suppress expected cancellation diagnostics during a clean stop or restart so
+  the operational log stays focused on real crawler failures.
+
 ## 1.2.27 - 2026-10-15
 
 - Keep each OCR command override in its own normal-height grid cell, even when
