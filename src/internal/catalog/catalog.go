@@ -46,6 +46,14 @@ type BackgroundBacklog struct {
 	Hash    int64
 }
 
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
 type backgroundBacklogCache struct {
 	at    time.Time
 	value BackgroundBacklog
@@ -1192,7 +1200,7 @@ func (c *Catalog) CachedIndexStats() (IndexStats, bool) {
 
 // BackgroundBacklog reports every eligible document still waiting for content,
 // OCR, or hashing. Unlike worker-channel depth it is not capped by queue size.
-func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcluded, ocrExcluded []string) (BackgroundBacklog, error) {
+func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcludedByRoot, ocrExcludedByRoot map[string][]string) (BackgroundBacklog, error) {
 	c.backlogMu.Lock()
 	if time.Since(c.backlog.at) < backgroundBacklogCacheTTL {
 		value := c.backlog.value
@@ -1200,27 +1208,43 @@ func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcluded, ocrExc
 		return value, nil
 	}
 	c.backlogMu.Unlock()
-	contentExtensions := extract.IndexableExtensions()
-	ocrExtensions := extract.OCREligibleExtensions()
-	contentClause := " AND extension IN (" + placeholders(len(contentExtensions)) + ")"
-	args := stringsToAny(contentExtensions)
-	if len(contentExcluded) > 0 {
-		contentClause += " AND extension NOT IN (" + placeholders(len(contentExcluded)) + ")"
-		args = append(args, stringsToAny(contentExcluded)...)
+	contentEligible := stringSet(extract.IndexableExtensions())
+	ocrEligible := stringSet(extract.OCREligibleExtensions())
+	contentExcluded := make(map[string]map[string]bool, len(contentExcludedByRoot))
+	for rootID, values := range contentExcludedByRoot {
+		contentExcluded[rootID] = stringSet(values)
 	}
-	ocrClause := " AND extension IN (" + placeholders(len(ocrExtensions)) + ")"
-	args = append(args, stringsToAny(ocrExtensions)...)
-	if len(ocrExcluded) > 0 {
-		ocrClause += " AND extension NOT IN (" + placeholders(len(ocrExcluded)) + ")"
-		args = append(args, stringsToAny(ocrExcluded)...)
+	ocrExcluded := make(map[string]map[string]bool, len(ocrExcludedByRoot))
+	for rootID, values := range ocrExcludedByRoot {
+		ocrExcluded[rootID] = stringSet(values)
 	}
-	query := `SELECT
-		SUM(CASE WHEN content_status IN ('not_indexed', 'retry_pending', 'queued')` + contentClause + ` THEN 1 ELSE 0 END),
-		SUM(CASE WHEN ocr_status IN ('pending', 'retry_pending', 'queued')` + ocrClause + ` THEN 1 ELSE 0 END),
+	query := `SELECT root_id, extension,
+		SUM(CASE WHEN content_status IN ('not_indexed', 'retry_pending', 'queued') THEN 1 ELSE 0 END),
+		SUM(CASE WHEN ocr_status IN ('pending', 'retry_pending', 'queued') THEN 1 ELSE 0 END),
 		SUM(CASE WHEN hash_status IN ('not_hashed', 'queued') THEN 1 ELSE 0 END)
-		FROM documents WHERE status = 'active' AND is_folder = 0`
+		FROM documents WHERE status = 'active' AND is_folder = 0
+		GROUP BY root_id, extension`
 	var backlog BackgroundBacklog
-	if err := c.db.QueryRowContext(ctx, query, args...).Scan(&backlog.Content, &backlog.OCR, &backlog.Hash); err != nil {
+	rows, err := c.db.QueryContext(ctx, query)
+	if err != nil {
+		return BackgroundBacklog{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rootID, extension string
+		var content, ocr, hash int64
+		if err := rows.Scan(&rootID, &extension, &content, &ocr, &hash); err != nil {
+			return BackgroundBacklog{}, err
+		}
+		if contentEligible[extension] && !contentExcluded[rootID][extension] {
+			backlog.Content += content
+		}
+		if ocrEligible[extension] && !ocrExcluded[rootID][extension] {
+			backlog.OCR += ocr
+		}
+		backlog.Hash += hash
+	}
+	if err := rows.Err(); err != nil {
 		return BackgroundBacklog{}, err
 	}
 	c.backlogMu.Lock()
@@ -1247,7 +1271,7 @@ func (c *Catalog) InvalidateBackgroundBacklog() {
 // WarmAdminStats refreshes expensive dashboard aggregates in one low-priority
 // sequence. Running full-table scans together creates needless I/O contention
 // on large catalogs, regardless of backend.
-func (c *Catalog) WarmAdminStats(maxTextBytes int64, contentExcluded, ocrExcluded []string) {
+func (c *Catalog) WarmAdminStats(maxTextBytes int64, contentExcludedByRoot, ocrExcludedByRoot map[string][]string) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
 	}
@@ -1267,7 +1291,7 @@ func (c *Catalog) WarmAdminStats(maxTextBytes int64, contentExcluded, ocrExclude
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		_, _ = c.IndexStats(ctx)
-		_, _ = c.BackgroundBacklog(ctx, contentExcluded, ocrExcluded)
+		_, _ = c.BackgroundBacklog(ctx, contentExcludedByRoot, ocrExcludedByRoot)
 		_, _ = c.StorageStats(ctx, maxTextBytes)
 	}()
 }

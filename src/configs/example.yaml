@@ -37,6 +37,27 @@ crawler:
   metadata_worker_count: 32
   metadata_queue_size: 16384
   index_batch_size: 4096
+  # Global hygiene filters apply to every root. Keep root-level filters for
+  # business-specific exceptions only.
+  exclude_file_patterns:
+    - "~$*"
+    - "Thumbs.db"
+    - "desktop.ini"
+    - "*.tmp"
+    - "*.partial"
+    - "*.crdownload"
+  exclude_folder_patterns:
+    - "**/.git/**"
+    - "**/node_modules/**"
+    - "**/.Trash-*/**"
+    - "**/@Recently-Snapshot/**"
+    - "**/@Recycle/**"
+    - "**/$RECYCLE.BIN/**"
+    - "**/RECYCLER/**"
+    - "**/.sync/**"
+    - "**/.qsync/**"
+    - "**/.qsync_sn/**"
+    - "**/AppData/Local/Temp/**"
   ignore_hidden: false
   follow_symlinks: false
   missing_after_successful_crawls: 3
@@ -91,28 +112,19 @@ roots:
     enabled: true
     labels: ["local"]
     include_extensions: []
-    exclude_extensions: ["tmp", "bak"]
+    exclude_extensions: []
     include_file_patterns: []
-    exclude_file_patterns:
-      - "~$*"
-      - "*.tmp"
-      - "*.bak"
+    exclude_file_patterns: []
     include_folder_patterns: []
-    exclude_folder_patterns:
-      - "**/.git/**"
-      - "**/node_modules/**"
-      - "**/@Recently-Snapshot/**"
-      - "**/@Recycle/**"
-      - "**/#recycle/**"
-      - "**/$RECYCLE.BIN/**"
-      - "**/RECYCLER/**"
-      - "**/.sync/**"
-      - "**/.qsync/**"
-      - "**/.qsync_sn/**"
+    exclude_folder_patterns: []
     exclude_patterns: []
     path_aliases: []
     # Per-root enrichment switches override the crawler-wide legacy defaults.
     content_extraction: false
     ocr: false
+    # Omit these to inherit the crawler-wide type exclusions. Set either to
+    # [] to allow every supported extension for this root.
+    # content_exclude_extensions: ["pdf"]
+    # ocr_exclude_extensions: []
     hashing: false
     collect_ownership: false

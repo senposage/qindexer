@@ -75,6 +75,8 @@ document.querySelector("#close-rules").addEventListener("click", closeRules);
 document.querySelector("#cancel-rules").addEventListener("click", closeRules);
 document.querySelector("#close-validation").addEventListener("click", closeValidation);
 document.querySelector("#rules-form").addEventListener("submit", saveRules);
+document.querySelector("#rules-content-exclude-override").addEventListener("change", () => toggleRootExclusionOverride("content"));
+document.querySelector("#rules-ocr-exclude-override").addEventListener("change", () => toggleRootExclusionOverride("ocr"));
 document.querySelector("#add-alias").addEventListener("click", () => {
   const row = appendAliasRow();
   row.querySelector(".alias-path").focus();
@@ -597,6 +599,8 @@ function openRules(rootId) {
   document.querySelector("#rules-ocr").checked = rootOption(root, "ocr", state.crawler.ocr?.enabled);
   document.querySelector("#rules-hashing").checked = rootOption(root, "hashing", state.crawler.hashing?.enabled);
   document.querySelector("#rules-ownership").checked = rootOption(root, "collect_ownership", state.crawler.collect_ownership);
+  setRootExclusionOverride("content", root.content_exclude_extensions);
+  setRootExclusionOverride("ocr", root.ocr_exclude_extensions);
   document.querySelector("#rules-panel").classList.remove("hidden");
   document.querySelector("#rules-panel").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -625,6 +629,8 @@ function openNewRoot() {
   document.querySelector("#rules-ocr").checked = Boolean(state.crawler.ocr?.enabled);
   document.querySelector("#rules-hashing").checked = Boolean(state.crawler.hashing?.enabled);
   document.querySelector("#rules-ownership").checked = Boolean(state.crawler.collect_ownership);
+  setRootExclusionOverride("content", null);
+  setRootExclusionOverride("ocr", null);
   document.querySelector("#rules-panel").classList.remove("hidden");
   document.querySelector("#rules-panel").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -664,6 +670,8 @@ async function saveRules(event) {
     exclude_patterns: splitList(document.querySelector("#rules-exclude-legacy").value),
     content_extraction: document.querySelector("#rules-extraction").checked,
     ocr: document.querySelector("#rules-ocr").checked,
+    content_exclude_extensions: readRootExclusionOverride("content"),
+    ocr_exclude_extensions: readRootExclusionOverride("ocr"),
     hashing: document.querySelector("#rules-hashing").checked,
     collect_ownership: document.querySelector("#rules-ownership").checked,
   };
@@ -695,6 +703,8 @@ function renderIndexingSettings(crawler, watcher = {}) {
   document.querySelector("#settings-extraction-size").value = extraction.max_file_size_mb || 64;
 	document.querySelector("#settings-stored-text").value = extraction.max_stored_text_kb || 1024;
 	document.querySelector("#settings-extraction-exclude-extensions").value = lines(extraction.exclude_extensions);
+	document.querySelector("#settings-global-exclude-file").value = lines(crawler.exclude_file_patterns);
+	document.querySelector("#settings-global-exclude-folder").value = lines(crawler.exclude_folder_patterns);
   document.querySelector("#settings-ocr").checked = Boolean(ocr.enabled);
 	  document.querySelector("#settings-ocr-workers").value = ocr.worker_count || 2;
   document.querySelector("#settings-ocr-engine").value = ocr.engine || "auto";
@@ -765,7 +775,7 @@ async function saveIndexingSettings(event) {
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
   const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
   try {
-	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ scan_interval_seconds: (Number(document.querySelector("#settings-scan-interval").value) || 360) * 60, root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
+	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ scan_interval_seconds: (Number(document.querySelector("#settings-scan-interval").value) || 360) * 60, root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, exclude_file_patterns: splitLines(document.querySelector("#settings-global-exclude-file").value), exclude_folder_patterns: splitLines(document.querySelector("#settings-global-exclude-folder").value), collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
 	await refresh({ quiet: true, message: "Indexing settings saved; worker-count changes apply after restart" });
   } catch (err) { setMessage(err.message); }
 }
@@ -1248,6 +1258,35 @@ function normalizeRoot(root) {
 
 function rootOption(root, field, fallback) {
   return typeof root[field] === "boolean" ? root[field] : Boolean(fallback);
+}
+
+function rootExclusionControls(kind) {
+  const content = kind === "content";
+  return {
+    override: document.querySelector(content ? "#rules-content-exclude-override" : "#rules-ocr-exclude-override"),
+    values: document.querySelector(content ? "#rules-content-exclude-extensions" : "#rules-ocr-exclude-extensions"),
+    global: content ? state.crawler.content_extraction?.exclude_extensions : state.crawler.ocr?.exclude_extensions,
+  };
+}
+
+function setRootExclusionOverride(kind, value) {
+  const controls = rootExclusionControls(kind);
+  const overridden = Array.isArray(value);
+  controls.override.checked = overridden;
+  controls.values.value = lines(overridden ? value : controls.global);
+  controls.values.disabled = !overridden;
+}
+
+function toggleRootExclusionOverride(kind) {
+  const controls = rootExclusionControls(kind);
+  controls.values.disabled = !controls.override.checked;
+  if (!controls.override.checked) controls.values.value = lines(controls.global);
+  if (controls.override.checked) controls.values.focus();
+}
+
+function readRootExclusionOverride(kind) {
+  const controls = rootExclusionControls(kind);
+  return controls.override.checked ? splitLines(controls.values.value) : null;
 }
 
 function showView(view) {

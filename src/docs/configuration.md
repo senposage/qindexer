@@ -314,6 +314,20 @@ path_aliases:
 Aliases are used for explicit path scopes, `display_path`, and repair. Free
 text search terms are not rewritten.
 
+## Global Crawl Exclusions
+
+`crawler.exclude_file_patterns` and `crawler.exclude_folder_patterns` apply to
+every root. QIndexer preloads them with common Office lock files, temporary
+downloads, shell metadata, recycle bins, snapshots, sync metadata, and local
+development folders. They are additive with a root's own filters, so normal
+roots can stay focused on business-specific rules.
+
+```yaml
+crawler:
+  exclude_file_patterns: ["~$*", "*.tmp", "*.crdownload"]
+  exclude_folder_patterns: ["**/$RECYCLE.BIN/**", "**/@Recycle/**"]
+```
+
 ## Root Rules
 
 Each root owns its own rules.
@@ -349,8 +363,9 @@ A bare folder name, such as `.Trash-1000`, matches that directory at any depth
 of the root. Use `**/name/**` when you want to express the same intent as an
 explicit folder path pattern, including its descendants.
 
-Rules are evaluated before catalog insertion. Exclusions prevent future crawl
-insertion; use root repair/clear/reconciliation to clean older rows.
+Rules are evaluated before catalog insertion. Global exclusions are evaluated
+first, then root exclusions. Exclusions prevent future crawl insertion; use
+root repair/clear/reconciliation to clean older rows.
 
 Recommended default folder exclusions for office/NAS roots:
 
@@ -363,6 +378,22 @@ Recommended default folder exclusions for office/NAS roots:
 - `**/$RECYCLE.BIN/**`
 - `**/RECYCLER/**`
 - `**/.sync/**`
+
+These are now crawler-wide defaults and do not need to be duplicated on every
+root unless a root has additional local restrictions.
+
+### Per-root Enrichment Overrides
+
+The crawler-wide `content_extraction.exclude_extensions` and
+`ocr.exclude_extensions` lists are the defaults for every root. A root may set
+`content_exclude_extensions` or `ocr_exclude_extensions` to a line/list of
+extensions to replace that default for only that root. An explicit empty list
+means exclude no supported extension for that root; omit the field to inherit.
+
+```yaml
+content_exclude_extensions: ["pdf"]
+ocr_exclude_extensions: []
+```
 - `**/.qsync/**`
 - `**/.qsync_sn/**`
 

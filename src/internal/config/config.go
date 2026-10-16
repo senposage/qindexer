@@ -65,6 +65,8 @@ type CrawlerConfig struct {
 	MetadataWorkerCount          int                     `yaml:"metadata_worker_count" json:"metadata_worker_count"`
 	MetadataQueueSize            int                     `yaml:"metadata_queue_size" json:"metadata_queue_size"`
 	IndexBatchSize               int                     `yaml:"index_batch_size" json:"index_batch_size"`
+	ExcludeFilePatterns          []string                `yaml:"exclude_file_patterns" json:"exclude_file_patterns"`
+	ExcludeFolderPatterns        []string                `yaml:"exclude_folder_patterns" json:"exclude_folder_patterns"`
 	IgnoreHidden                 bool                    `yaml:"ignore_hidden" json:"ignore_hidden"`
 	FollowSymlinks               bool                    `yaml:"follow_symlinks" json:"follow_symlinks"`
 	CollectOwnership             bool                    `yaml:"collect_ownership" json:"collect_ownership"`
@@ -102,6 +104,8 @@ type OCRConfig struct {
 
 var defaultContentExcludeExtensions = []string{"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp", "tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"}
 var defaultOCRExcludeExtensions = []string{"tmp", "bak", "part", "partial", "crdownload", "download", "lnk", "url", "ds_store", "thumbs.db"}
+var defaultExcludeFilePatterns = []string{"~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*", "*.tmp", "*.temp", "*.bak", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo"}
+var defaultExcludeFolderPatterns = []string{"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**", "**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**", "**/AppData/Local/Temp/**"}
 
 type HashingConfig struct {
 	Enabled       bool  `yaml:"enabled" json:"enabled"`
@@ -150,8 +154,12 @@ type RootConfig struct {
 	PathAliases           []PathAlias `yaml:"path_aliases" json:"path_aliases,omitempty"`
 	ContentExtraction     *bool       `yaml:"content_extraction" json:"content_extraction,omitempty"`
 	OCR                   *bool       `yaml:"ocr" json:"ocr,omitempty"`
-	Hashing               *bool       `yaml:"hashing" json:"hashing,omitempty"`
-	CollectOwnership      *bool       `yaml:"collect_ownership" json:"collect_ownership,omitempty"`
+	// Nil inherits the global crawler exclusion list. An explicit empty list
+	// deliberately permits every otherwise supported extension for this root.
+	ContentExcludeExtensions *[]string `yaml:"content_exclude_extensions,omitempty" json:"content_exclude_extensions,omitempty"`
+	OCRExcludeExtensions     *[]string `yaml:"ocr_exclude_extensions,omitempty" json:"ocr_exclude_extensions,omitempty"`
+	Hashing                  *bool     `yaml:"hashing" json:"hashing,omitempty"`
+	CollectOwnership         *bool     `yaml:"collect_ownership" json:"collect_ownership,omitempty"`
 }
 
 type PathAlias struct {
@@ -174,6 +182,20 @@ func (r RootConfig) ContentExtractionEnabled(defaultValue bool) bool {
 
 func (r RootConfig) OCREnabled(defaultValue bool) bool {
 	return enabledOrDefault(r.OCR, defaultValue)
+}
+
+func (r RootConfig) ContentExcludedExtensions(defaults []string) []string {
+	if r.ContentExcludeExtensions == nil {
+		return defaults
+	}
+	return *r.ContentExcludeExtensions
+}
+
+func (r RootConfig) OCRExcludedExtensions(defaults []string) []string {
+	if r.OCRExcludeExtensions == nil {
+		return defaults
+	}
+	return *r.OCRExcludeExtensions
 }
 
 func (r RootConfig) HashingEnabled(defaultValue bool) bool {
@@ -286,6 +308,14 @@ func (c *Config) applyDefaults() {
 	if c.Crawler.IndexBatchSize <= 0 {
 		c.Crawler.IndexBatchSize = defaultIndexBatch
 	}
+	if c.Crawler.ExcludeFilePatterns == nil {
+		c.Crawler.ExcludeFilePatterns = append([]string(nil), defaultExcludeFilePatterns...)
+	}
+	if c.Crawler.ExcludeFolderPatterns == nil {
+		c.Crawler.ExcludeFolderPatterns = append([]string(nil), defaultExcludeFolderPatterns...)
+	}
+	c.Crawler.ExcludeFilePatterns = normalizePatterns(c.Crawler.ExcludeFilePatterns)
+	c.Crawler.ExcludeFolderPatterns = normalizePatterns(c.Crawler.ExcludeFolderPatterns)
 	if c.Crawler.MissingAfterSuccessfulCrawls <= 0 {
 		c.Crawler.MissingAfterSuccessfulCrawls = 3
 	}
@@ -333,6 +363,16 @@ func (c *Config) applyDefaults() {
 		c.Crawler.OCR.ExcludeExtensions = append([]string(nil), defaultOCRExcludeExtensions...)
 	}
 	c.Crawler.OCR.ExcludeExtensions = normalizeExtensions(c.Crawler.OCR.ExcludeExtensions)
+	for i := range c.Roots {
+		if c.Roots[i].ContentExcludeExtensions != nil {
+			values := normalizeExtensions(*c.Roots[i].ContentExcludeExtensions)
+			c.Roots[i].ContentExcludeExtensions = &values
+		}
+		if c.Roots[i].OCRExcludeExtensions != nil {
+			values := normalizeExtensions(*c.Roots[i].OCRExcludeExtensions)
+			c.Roots[i].OCRExcludeExtensions = &values
+		}
+	}
 	if c.Crawler.Hashing.WorkerCount <= 0 {
 		c.Crawler.Hashing.WorkerCount = 3
 	}
@@ -565,6 +605,8 @@ func Clone(source *Config) *Config {
 	}
 	copyConfig.Crawler.ContentExtraction.ExcludeExtensions = append([]string(nil), source.Crawler.ContentExtraction.ExcludeExtensions...)
 	copyConfig.Crawler.OCR.ExcludeExtensions = append([]string(nil), source.Crawler.OCR.ExcludeExtensions...)
+	copyConfig.Crawler.ExcludeFilePatterns = append([]string(nil), source.Crawler.ExcludeFilePatterns...)
+	copyConfig.Crawler.ExcludeFolderPatterns = append([]string(nil), source.Crawler.ExcludeFolderPatterns...)
 	copyConfig.Roots = make([]RootConfig, len(source.Roots))
 	for i, root := range source.Roots {
 		copyConfig.Roots[i] = root
@@ -577,8 +619,19 @@ func Clone(source *Config) *Config {
 		copyConfig.Roots[i].ExcludeFolderPatterns = append([]string(nil), root.ExcludeFolderPatterns...)
 		copyConfig.Roots[i].ExcludePatterns = append([]string(nil), root.ExcludePatterns...)
 		copyConfig.Roots[i].PathAliases = append([]PathAlias(nil), root.PathAliases...)
+		copyConfig.Roots[i].ContentExcludeExtensions = cloneStringSlicePointer(root.ContentExcludeExtensions)
+		copyConfig.Roots[i].OCRExcludeExtensions = cloneStringSlicePointer(root.OCRExcludeExtensions)
 	}
 	return &copyConfig
+}
+
+func cloneStringSlicePointer(source *[]string) *[]string {
+	if source == nil {
+		return nil
+	}
+	values := make([]string, len(*source))
+	copy(values, *source)
+	return &values
 }
 
 func normalizeExtensions(values []string) []string {
@@ -596,6 +649,23 @@ func normalizeExtensions(values []string) []string {
 		normalized = append(normalized, value)
 	}
 	return normalized
+}
+
+func normalizePatterns(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	seen := make(map[string]bool, len(values))
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		cleaned = append(cleaned, value)
+	}
+	return cleaned
 }
 
 func (a AuthConfig) ResolveToken(baseDir string) (string, error) {

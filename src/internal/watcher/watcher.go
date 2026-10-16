@@ -276,7 +276,7 @@ func (w *Watcher) addHotWatches(ctx context.Context, set *watchSet, cfg *config.
 	candidates := map[string][]string{}
 	for _, item := range hot {
 		root, ok := roots[item.RootID]
-		if !ok || !crawler.PathAllowed(root, item.Path, "", true) {
+		if !ok || !crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, item.Path, "", true) {
 			continue
 		}
 		candidates[item.RootID] = append(candidates[item.RootID], item.Path)

@@ -1116,3 +1116,20 @@ and are released without extraction if their type becomes excluded.
 and takes effect on the running scheduler when saved. The default and example
 configuration use six hours (`21600` seconds); watcher and manual crawls are
 unaffected. QSurfer has no search-protocol change to make for either feature.
+
+## 2026-10-15: Per-root Enrichment Overrides and Global Hygiene Filters
+
+QIndexer `v1.2.21` keeps `crawler.content_extraction.exclude_extensions` and
+`crawler.ocr.exclude_extensions` as global defaults, but root create/update
+requests may now include optional `content_exclude_extensions` and
+`ocr_exclude_extensions` arrays. Omit either field, or send `null`, to inherit
+the global list. Send an explicit empty array (`[]`) to allow every otherwise
+supported extension for that one root. Values are bare extensions, one per
+array item; no comma-delimited string is accepted or needed.
+
+This is an admin/root-rules capability only. QSurfer's search protocol and
+ordinary `POST /v1/search` payloads do not change. The admin UI also now owns
+global `crawler.exclude_file_patterns` and `crawler.exclude_folder_patterns`;
+they are process-wide hygiene filters for temporary files, recycle/snapshot
+trees, sync metadata, and similar noise, while root filters remain reserved for
+business-specific rules.

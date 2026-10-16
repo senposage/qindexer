@@ -476,10 +476,18 @@ Updates all rules for one root. The full payload is accepted:
   "exclude_patterns": [],
   "content_extraction": true,
   "ocr": false,
+  "content_exclude_extensions": ["pdf"],
+  "ocr_exclude_extensions": [],
   "hashing": true,
   "collect_ownership": true
 }
 ```
+
+`content_exclude_extensions` and `ocr_exclude_extensions` are optional
+per-root overrides for the crawler-wide extension lists. Omit either field (or
+send `null`) to inherit the global policy. Send `[]` to explicitly exclude no
+otherwise supported extensions for that root. Arrays use one bare extension per
+entry, without dots or comma-delimited strings.
 
 When the canonical root path changes, QIndexer rewrites existing indexed rows
 from the previous path to the new path and preserves the previous path as an

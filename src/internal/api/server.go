@@ -1147,24 +1147,26 @@ func (s *Server) validateRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 type rootRulesUpdate struct {
-	ID                    string             `json:"id"`
-	Name                  string             `json:"name"`
-	Path                  string             `json:"path"`
-	Enabled               bool               `json:"enabled"`
-	Labels                []string           `json:"labels"`
-	IncludeExtensions     []string           `json:"include_extensions"`
-	ExcludeExtensions     []string           `json:"exclude_extensions"`
-	IncludeFilePatterns   []string           `json:"include_file_patterns"`
-	ExcludeFilePatterns   []string           `json:"exclude_file_patterns"`
-	IncludeFolderPatterns []string           `json:"include_folder_patterns"`
-	ExcludeFolderPatterns []string           `json:"exclude_folder_patterns"`
-	ExcludePatterns       []string           `json:"exclude_patterns"`
-	CredentialRef         string             `json:"credential_ref"`
-	PathAliases           []config.PathAlias `json:"path_aliases"`
-	ContentExtraction     *bool              `json:"content_extraction"`
-	OCR                   *bool              `json:"ocr"`
-	Hashing               *bool              `json:"hashing"`
-	CollectOwnership      *bool              `json:"collect_ownership"`
+	ID                       string             `json:"id"`
+	Name                     string             `json:"name"`
+	Path                     string             `json:"path"`
+	Enabled                  bool               `json:"enabled"`
+	Labels                   []string           `json:"labels"`
+	IncludeExtensions        []string           `json:"include_extensions"`
+	ExcludeExtensions        []string           `json:"exclude_extensions"`
+	IncludeFilePatterns      []string           `json:"include_file_patterns"`
+	ExcludeFilePatterns      []string           `json:"exclude_file_patterns"`
+	IncludeFolderPatterns    []string           `json:"include_folder_patterns"`
+	ExcludeFolderPatterns    []string           `json:"exclude_folder_patterns"`
+	ExcludePatterns          []string           `json:"exclude_patterns"`
+	CredentialRef            string             `json:"credential_ref"`
+	PathAliases              []config.PathAlias `json:"path_aliases"`
+	ContentExtraction        *bool              `json:"content_extraction"`
+	OCR                      *bool              `json:"ocr"`
+	ContentExcludeExtensions *[]string          `json:"content_exclude_extensions"`
+	OCRExcludeExtensions     *[]string          `json:"ocr_exclude_extensions"`
+	Hashing                  *bool              `json:"hashing"`
+	CollectOwnership         *bool              `json:"collect_ownership"`
 }
 
 func (s *Server) createRoot(w http.ResponseWriter, r *http.Request) {
@@ -1203,6 +1205,7 @@ func (s *Server) createRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "config_save_failed", err.Error())
 		return
 	}
+	s.cat.InvalidateBackgroundBacklog()
 	s.log.Info("root create completed", "root", rootID, "path", root.Path, "aliases", len(root.PathAliases))
 	writeJSON(w, http.StatusCreated, map[string]any{"status": "created", "root": root})
 }
@@ -1222,12 +1225,14 @@ func rootConfigFromUpdate(rootID string, req rootRulesUpdate) config.RootConfig 
 		IncludeExtensions: cleanExtensions(req.IncludeExtensions), ExcludeExtensions: cleanExtensions(req.ExcludeExtensions),
 		IncludeFilePatterns: cleanList(req.IncludeFilePatterns, false), ExcludeFilePatterns: excludeFiles,
 		IncludeFolderPatterns: cleanList(req.IncludeFolderPatterns, false), ExcludeFolderPatterns: excludeFolders,
-		ExcludePatterns:   cleanList(req.ExcludePatterns, false),
-		PathAliases:       cleanPathAliases(req.PathAliases),
-		ContentExtraction: req.ContentExtraction,
-		OCR:               req.OCR,
-		Hashing:           req.Hashing,
-		CollectOwnership:  req.CollectOwnership,
+		ExcludePatterns:          cleanList(req.ExcludePatterns, false),
+		PathAliases:              cleanPathAliases(req.PathAliases),
+		ContentExtraction:        req.ContentExtraction,
+		OCR:                      req.OCR,
+		ContentExcludeExtensions: cleanExtensionOverride(req.ContentExcludeExtensions),
+		OCRExcludeExtensions:     cleanExtensionOverride(req.OCRExcludeExtensions),
+		Hashing:                  req.Hashing,
+		CollectOwnership:         req.CollectOwnership,
 	}
 }
 
@@ -1281,6 +1286,8 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 		candidate.Roots[i].PathAliases = preservePreviousRootPath(previousPath, candidate.Roots[i].Path, cleanPathAliases(req.PathAliases))
 		candidate.Roots[i].ContentExtraction = req.ContentExtraction
 		candidate.Roots[i].OCR = req.OCR
+		candidate.Roots[i].ContentExcludeExtensions = cleanExtensionOverride(req.ContentExcludeExtensions)
+		candidate.Roots[i].OCRExcludeExtensions = cleanExtensionOverride(req.OCRExcludeExtensions)
 		candidate.Roots[i].Hashing = req.Hashing
 		candidate.Roots[i].CollectOwnership = req.CollectOwnership
 		if err := candidate.Validate(); err != nil {
@@ -1323,12 +1330,13 @@ func (s *Server) updateRootRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Unlock()
+		s.cat.InvalidateBackgroundBacklog()
 		var documentsRemoved int64
 		var cleanupError string
 		if pruneExisting {
 			var err error
 			documentsRemoved, err = s.cat.PruneDocuments(r.Context(), rootID, func(path, extension string, isFolder bool) bool {
-				return crawler.PathAllowed(updated, path, extension, isFolder)
+				return crawler.PathAllowedWithGlobalRules(updated, latest.Crawler, path, extension, isFolder)
 			})
 			if err != nil {
 				cleanupError = err.Error()
@@ -1557,8 +1565,12 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	dataDir := config.ResolveDataDir(s.configPath, s.cfg.Index.DataDir)
 	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
-	contentExcluded := append([]string(nil), s.cfg.Crawler.ContentExtraction.ExcludeExtensions...)
-	ocrExcluded := append([]string(nil), s.cfg.Crawler.OCR.ExcludeExtensions...)
+	contentExcluded := make(map[string][]string, len(s.cfg.Roots))
+	ocrExcluded := make(map[string][]string, len(s.cfg.Roots))
+	for _, root := range s.cfg.Roots {
+		contentExcluded[root.ID] = append([]string(nil), root.ContentExcludedExtensions(s.cfg.Crawler.ContentExtraction.ExcludeExtensions)...)
+		ocrExcluded[root.ID] = append([]string(nil), root.OCRExcludedExtensions(s.cfg.Crawler.OCR.ExcludeExtensions)...)
+	}
 	watch := s.watcher
 	s.mu.RUnlock()
 	size, err := indexSizeBytes(dataDir)
@@ -1719,18 +1731,20 @@ func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("crawler settings update requested")
 	var req struct {
-		ScanIntervalSeconds  int                            `json:"scan_interval_seconds"`
-		RootParallelism      int                            `json:"root_parallelism"`
-		DirectoryWorkerCount int                            `json:"directory_worker_count"`
-		MetadataWorkerCount  int                            `json:"metadata_worker_count"`
-		MetadataQueueSize    int                            `json:"metadata_queue_size"`
-		IndexBatchSize       int                            `json:"index_batch_size"`
-		CollectOwnership     bool                           `json:"collect_ownership"`
-		AdaptiveThrottle     config.AdaptiveThrottleConfig  `json:"adaptive_throttle"`
-		ContentExtraction    config.ContentExtractionConfig `json:"content_extraction"`
-		OCR                  config.OCRConfig               `json:"ocr"`
-		Hashing              config.HashingConfig           `json:"hashing"`
-		Watcher              config.WatcherConfig           `json:"watcher"`
+		ScanIntervalSeconds   int                            `json:"scan_interval_seconds"`
+		RootParallelism       int                            `json:"root_parallelism"`
+		DirectoryWorkerCount  int                            `json:"directory_worker_count"`
+		MetadataWorkerCount   int                            `json:"metadata_worker_count"`
+		MetadataQueueSize     int                            `json:"metadata_queue_size"`
+		IndexBatchSize        int                            `json:"index_batch_size"`
+		ExcludeFilePatterns   []string                       `json:"exclude_file_patterns"`
+		ExcludeFolderPatterns []string                       `json:"exclude_folder_patterns"`
+		CollectOwnership      bool                           `json:"collect_ownership"`
+		AdaptiveThrottle      config.AdaptiveThrottleConfig  `json:"adaptive_throttle"`
+		ContentExtraction     config.ContentExtractionConfig `json:"content_extraction"`
+		OCR                   config.OCRConfig               `json:"ocr"`
+		Hashing               config.HashingConfig           `json:"hashing"`
+		Watcher               config.WatcherConfig           `json:"watcher"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -1739,6 +1753,8 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	candidate := config.Clone(s.cfg)
+	previousGlobalFileExcludes := append([]string(nil), candidate.Crawler.ExcludeFilePatterns...)
+	previousGlobalFolderExcludes := append([]string(nil), candidate.Crawler.ExcludeFolderPatterns...)
 	if req.ScanIntervalSeconds > 0 {
 		candidate.Crawler.ScanIntervalSeconds = req.ScanIntervalSeconds
 	}
@@ -1757,6 +1773,8 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 	if req.IndexBatchSize > 0 {
 		candidate.Crawler.IndexBatchSize = req.IndexBatchSize
 	}
+	candidate.Crawler.ExcludeFilePatterns = cleanList(req.ExcludeFilePatterns, false)
+	candidate.Crawler.ExcludeFolderPatterns = cleanList(req.ExcludeFolderPatterns, false)
 	candidate.Crawler.CollectOwnership = req.CollectOwnership
 	candidate.Crawler.AdaptiveThrottle = req.AdaptiveThrottle
 	candidate.Crawler.ContentExtraction = req.ContentExtraction
@@ -1774,8 +1792,32 @@ func (s *Server) updateCrawlerSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cat.InvalidateBackgroundBacklog()
+	globalRulesChanged := !reflect.DeepEqual(previousGlobalFileExcludes, s.cfg.Crawler.ExcludeFilePatterns) || !reflect.DeepEqual(previousGlobalFolderExcludes, s.cfg.Crawler.ExcludeFolderPatterns)
+	if globalRulesChanged {
+		roots := append([]config.RootConfig(nil), s.cfg.Roots...)
+		global := s.cfg.Crawler
+		go s.pruneGlobalRuleExclusions(roots, global)
+	}
 	s.log.Info("crawler settings update completed", "scan_interval", s.cfg.Crawler.ScanInterval(), "root_parallelism", s.cfg.Crawler.RootParallelism, "directory_worker_limit", s.cfg.Crawler.DirectoryWorkerCount, "metadata_worker_limit", s.cfg.Crawler.MetadataWorkerCount, "metadata_queue_size", s.cfg.Crawler.MetadataQueueSize, "index_batch_size", s.cfg.Crawler.IndexBatchSize, "content_workers", s.cfg.Crawler.ContentExtraction.WorkerCount, "ocr_workers", s.cfg.Crawler.OCR.WorkerCount, "hash_workers", s.cfg.Crawler.Hashing.WorkerCount, "content_extraction", s.cfg.Crawler.ContentExtraction.Enabled, "ocr", s.cfg.Crawler.OCR.Enabled, "hashing", s.cfg.Crawler.Hashing.Enabled, "ownership", s.cfg.Crawler.CollectOwnership, "adaptive_throttle", s.cfg.Crawler.AdaptiveThrottle.Enabled, "cpu_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.CPUPercentThreshold, "disk_busy_percent_threshold", s.cfg.Crawler.AdaptiveThrottle.DiskBusyPercentThreshold, "max_watched_directories", s.cfg.Watcher.MaxWatchedDirectories)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "crawler": s.cfg.Crawler, "watcher": s.cfg.Watcher})
+}
+
+func (s *Server) pruneGlobalRuleExclusions(roots []config.RootConfig, global config.CrawlerConfig) {
+	for _, root := range roots {
+		if !root.Enabled {
+			continue
+		}
+		removed, err := s.cat.PruneDocuments(context.Background(), root.ID, func(path, extension string, isFolder bool) bool {
+			return crawler.PathAllowedWithGlobalRules(root, global, path, extension, isFolder)
+		})
+		if err != nil {
+			s.log.Warn("global rule cleanup failed", "root", root.ID, "error", err)
+			continue
+		}
+		if removed > 0 {
+			s.log.Info("global rule cleanup removed indexed entries", "root", root.ID, "documents", removed)
+		}
+	}
 }
 
 func (s *Server) sidecars(w http.ResponseWriter, r *http.Request) {
@@ -2282,6 +2324,14 @@ func cleanExtensions(values []string) []string {
 		cleaned[i] = strings.TrimPrefix(value, ".")
 	}
 	return cleaned
+}
+
+func cleanExtensionOverride(values *[]string) *[]string {
+	if values == nil {
+		return nil
+	}
+	cleaned := cleanExtensions(*values)
+	return &cleaned
 }
 
 func cleanList(values []string, lower bool) []string {

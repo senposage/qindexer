@@ -65,6 +65,30 @@ func TestExcludedImageIsNominatedForOCRWithoutContentExtraction(t *testing.T) {
 	}
 }
 
+func TestRootOverrideSupersedesGlobalEnrichmentExclusions(t *testing.T) {
+	empty := []string{}
+	cfg := &config.Config{Crawler: config.CrawlerConfig{
+		ContentExtraction: config.ContentExtractionConfig{ExcludeExtensions: []string{"jpg"}},
+		OCR:               config.OCRConfig{ExcludeExtensions: []string{"pdf"}},
+	}, Roots: []config.RootConfig{{
+		ID: "inherit"}, {
+		ID: "override", ContentExcludeExtensions: &empty, OCRExcludeExtensions: &empty,
+	}}}
+	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := c.contentExcludedExtensions("inherit"); len(got) != 1 || got[0] != "jpg" {
+		t.Fatalf("inherited content exclusions = %#v", got)
+	}
+	if got := c.ocrExcludedExtensions("inherit"); len(got) != 1 || got[0] != "pdf" {
+		t.Fatalf("inherited OCR exclusions = %#v", got)
+	}
+	if got := c.contentExcludedExtensions("override"); got == nil || len(got) != 0 {
+		t.Fatalf("content override = %#v", got)
+	}
+	if got := c.ocrExcludedExtensions("override"); got == nil || len(got) != 0 {
+		t.Fatalf("OCR override = %#v", got)
+	}
+}
+
 func TestRootWorkProfileCapsHighLatencyRoots(t *testing.T) {
 	profile := capRootWorkProfile(rootWorkProfile{
 		Latency:          150 * time.Millisecond,
@@ -231,6 +255,23 @@ func TestPathAllowedRejectsRecordsUnderExcludedFolder(t *testing.T) {
 	}
 	if !PathAllowed(root, `X:\Cases\Public\brief.docx`, "docx", false) {
 		t.Fatal("unrelated file was unexpectedly excluded")
+	}
+}
+
+func TestPathAllowedWithGlobalRulesKeepsRootRulesClean(t *testing.T) {
+	global := config.CrawlerConfig{
+		ExcludeFilePatterns:   []string{"*.tmp"},
+		ExcludeFolderPatterns: []string{"**/$RECYCLE.BIN/**"},
+	}
+	root := config.RootConfig{}
+	if PathAllowedWithGlobalRules(root, global, `X:\$RECYCLE.BIN\gone.docx`, "docx", false) {
+		t.Fatal("global folder exclusion did not apply to descendant")
+	}
+	if PathAllowedWithGlobalRules(root, global, `X:\Cases\draft.tmp`, "tmp", false) {
+		t.Fatal("global file exclusion did not apply")
+	}
+	if !PathAllowedWithGlobalRules(root, global, `X:\Cases\brief.docx`, "docx", false) {
+		t.Fatal("ordinary file was unexpectedly excluded")
 	}
 }
 

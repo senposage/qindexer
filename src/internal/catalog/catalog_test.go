@@ -229,7 +229,7 @@ func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 		t.Fatalf("unexpected backlog: %#v", backlog)
 	}
 	cat.InvalidateBackgroundBacklog()
-	backlog, err = cat.BackgroundBacklog(ctx, []string{"pdf"}, nil)
+	backlog, err = cat.BackgroundBacklog(ctx, map[string][]string{"root": {"pdf"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

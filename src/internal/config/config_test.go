@@ -99,6 +99,26 @@ func TestEnrichmentExclusionsNormalizeAsLineEntries(t *testing.T) {
 	}
 }
 
+func TestRootEnrichmentExclusionOverridesRemainIndependent(t *testing.T) {
+	content := []string{" JPG ", ".pdf", "jpg"}
+	ocr := []string{}
+	cfg := Config{Roots: []RootConfig{{
+		ID: "root", ContentExcludeExtensions: &content, OCRExcludeExtensions: &ocr,
+	}}}
+	cfg.ApplyDefaults()
+	root := cfg.Roots[0]
+	if got := root.ContentExcludedExtensions(cfg.Crawler.ContentExtraction.ExcludeExtensions); len(got) != 2 || got[0] != "jpg" || got[1] != "pdf" {
+		t.Fatalf("content root override = %#v", got)
+	}
+	if got := root.OCRExcludedExtensions(cfg.Crawler.OCR.ExcludeExtensions); got == nil || len(got) != 0 {
+		t.Fatalf("empty OCR root override must stay explicit: %#v", got)
+	}
+	inherited := RootConfig{}
+	if got := inherited.ContentExcludedExtensions([]string{"png"}); len(got) != 1 || got[0] != "png" {
+		t.Fatalf("inherited content exclusions = %#v", got)
+	}
+}
+
 func TestLegacyCrawlerDefaultProfileUpgradesToHostSizedValues(t *testing.T) {
 	baseline := Config{}
 	baseline.ApplyDefaults()

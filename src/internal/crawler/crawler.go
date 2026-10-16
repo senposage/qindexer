@@ -1157,13 +1157,13 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled)
 	}); len(rootIDs) > 0 {
-		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content", content.ExcludeExtensions)
+		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content", c.contentExcludedExtensions)
 	}
 	ocr := c.snapshot().Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
-		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR", ocr.ExcludeExtensions)
+		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR", c.ocrExcludedExtensions)
 	}
 	hashing := c.snapshot().Crawler.Hashing
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
@@ -1187,17 +1187,36 @@ func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) er
 }
 
 type backgroundClaim func(context.Context, []string, int, int64, []string) ([]catalog.BackgroundCandidate, error)
+type backgroundExclusions func(string) []string
+
+func (c *Crawler) contentExcludedExtensions(rootID string) []string {
+	cfg := c.snapshot()
+	root, ok := c.rootByID(rootID)
+	if !ok {
+		return cfg.Crawler.ContentExtraction.ExcludeExtensions
+	}
+	return root.ContentExcludedExtensions(cfg.Crawler.ContentExtraction.ExcludeExtensions)
+}
+
+func (c *Crawler) ocrExcludedExtensions(rootID string) []string {
+	cfg := c.snapshot()
+	root, ok := c.rootByID(rootID)
+	if !ok {
+		return cfg.Crawler.OCR.ExcludeExtensions
+	}
+	return root.OCRExcludedExtensions(cfg.Crawler.OCR.ExcludeExtensions)
+}
 
 // fillBackground shares capacity across roots so a sprawling root cannot starve
 // a smaller root's extraction, OCR, or hashing backlog.
-func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, excludedExtensions []string) {
-	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, claim, kind, cap(jobs)-len(jobs), excludedExtensions)
+func (c *Crawler) fillBackground(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, exclusions backgroundExclusions) {
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, claim, kind, cap(jobs)-len(jobs), exclusions)
 }
 
 // fillBackgroundWithRetries reserves a small fraction of capacity for delayed
 // retries. Fresh work always gets the majority of the queue, so an unreadable
 // document cannot crowd out the ordinary indexing backlog.
-func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, primary, retry backgroundClaim, kind string, excludedExtensions []string) {
+func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, primary, retry backgroundClaim, kind string, exclusions backgroundExclusions) {
 	available := cap(jobs) - len(jobs)
 	if available <= 0 {
 		return
@@ -1208,15 +1227,15 @@ func (c *Crawler) fillBackgroundWithRetries(ctx context.Context, rootIDs []strin
 	}
 	primaryCapacity := available - retryCapacity
 	before := len(jobs)
-	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, primary, kind, primaryCapacity, excludedExtensions)
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, primary, kind, primaryCapacity, exclusions)
 	// If there is no fresh work, do not leave workers idle simply because the
 	// retry lane was intentionally small. The lane remains reserved only while
 	// normal work can actually use the capacity.
 	unusedPrimary := primaryCapacity - (len(jobs) - before)
-	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, retry, kind+" retry", retryCapacity+max(0, unusedPrimary), excludedExtensions)
+	c.fillBackgroundLimited(ctx, rootIDs, jobs, maxSize, retry, kind+" retry", retryCapacity+max(0, unusedPrimary), exclusions)
 }
 
-func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, limit int, excludedExtensions []string) {
+func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, jobs chan<- backgroundJob, maxSize int64, claim backgroundClaim, kind string, limit int, exclusions backgroundExclusions) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -1231,7 +1250,11 @@ func (c *Crawler) fillBackgroundLimited(ctx context.Context, rootIDs []string, j
 			return
 		}
 		limit := min(perRoot, available)
-		items, err := claim(ctx, []string{rootID}, limit, maxSize, excludedExtensions)
+		var excluded []string
+		if exclusions != nil {
+			excluded = exclusions(rootID)
+		}
+		items, err := claim(ctx, []string{rootID}, limit, maxSize, excluded)
 		if err != nil {
 			c.log.Debug(kind+" queue refill failed", "root", rootID, "error", err)
 			continue
@@ -1486,9 +1509,10 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 			run.ErrorMessage = walkErr.Error()
 		}
 	} else {
-		ignoreHidden := c.snapshot().Crawler.IgnoreHidden
+		crawlerSettings := c.snapshot().Crawler
+		ignoreHidden := crawlerSettings.IgnoreHidden
 		pruned, err := c.cat.PruneDocuments(ctx, root.ID, func(path, extension string, isFolder bool) bool {
-			return !(ignoreHidden && strings.HasPrefix(filepath.Base(path), ".")) && PathAllowed(root, path, extension, isFolder)
+			return !(ignoreHidden && strings.HasPrefix(filepath.Base(path), ".")) && PathAllowedWithGlobalRules(root, crawlerSettings, path, extension, isFolder)
 		})
 		if err != nil {
 			run.Status = "failed"
@@ -2300,7 +2324,8 @@ func (c *Crawler) describePath(root config.RootConfig, path string, generation i
 	if !isFolder {
 		ext = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	}
-	if (c.snapshot().Crawler.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) || !PathAllowed(root, path, ext, isFolder) {
+	crawlerSettings := c.snapshot().Crawler
+	if (crawlerSettings.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) || !PathAllowedWithGlobalRules(root, crawlerSettings, path, ext, isFolder) {
 		return catalog.Document{}, false, nil
 	}
 	doc := catalog.Document{
@@ -2317,8 +2342,10 @@ func (c *Crawler) describePath(root config.RootConfig, path string, generation i
 		Signature:          catalog.Signature(info.Size(), info.ModTime()),
 		AccessStatus:       "metadata_readable",
 	}
-	settings := c.snapshot().Crawler
-	if !isFolder && root.ContentExtractionEnabled(settings.ContentExtraction.Enabled) && root.OCREnabled(settings.OCR.Enabled) && extract.OCREligible(path) && extensionExcluded(ext, settings.ContentExtraction.ExcludeExtensions) && !extensionExcluded(ext, settings.OCR.ExcludeExtensions) {
+	settings := crawlerSettings
+	contentExcluded := root.ContentExcludedExtensions(settings.ContentExtraction.ExcludeExtensions)
+	ocrExcluded := root.OCRExcludedExtensions(settings.OCR.ExcludeExtensions)
+	if !isFolder && root.ContentExtractionEnabled(settings.ContentExtraction.Enabled) && root.OCREnabled(settings.OCR.Enabled) && extract.OCREligible(path) && extensionExcluded(ext, contentExcluded) && !extensionExcluded(ext, ocrExcluded) {
 		// Images are excluded from ordinary text extraction by default, but still
 		// need a direct OCR nomination rather than relying on an empty extraction.
 		doc.OCRStatus = "pending"
@@ -2380,11 +2407,11 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				continue
 			}
 			extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
-			if extensionExcluded(extension, settings.ExcludeExtensions) {
+			if extensionExcluded(extension, root.ContentExcludedExtensions(settings.ExcludeExtensions)) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
 					ocr := c.snapshot().Crawler.OCR
-					if extract.OCREligible(job.path) && root.OCREnabled(ocr.Enabled) && !extensionExcluded(extension, ocr.ExcludeExtensions) {
+					if extract.OCREligible(job.path) && root.OCREnabled(ocr.Enabled) && !extensionExcluded(extension, root.OCRExcludedExtensions(ocr.ExcludeExtensions)) {
 						_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
 					}
 				}
@@ -2457,7 +2484,7 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 				continue
 			}
 			extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
-			if extensionExcluded(extension, settings.ExcludeExtensions) {
+			if extensionExcluded(extension, root.OCRExcludedExtensions(settings.ExcludeExtensions)) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
 				}
@@ -2650,11 +2677,18 @@ func filePatternAllowed(root config.RootConfig, path string) bool {
 // a root's current rules. The management API uses it to retire records that a
 // rule change deliberately excludes, rather than treating them as missing.
 func PathAllowed(root config.RootConfig, path, extension string, isFolder bool) bool {
+	return PathAllowedWithGlobalRules(root, config.CrawlerConfig{}, path, extension, isFolder)
+}
+
+// PathAllowedWithGlobalRules applies process-wide noise exclusions before a
+// root's own filters. Root rules are additive: administrators only need to put
+// exceptions and business-specific filters on each root.
+func PathAllowedWithGlobalRules(root config.RootConfig, global config.CrawlerConfig, path, extension string, isFolder bool) bool {
 	if matchesAny(path, root.ExcludePatterns) {
 		return false
 	}
 	if isFolder {
-		return !matchesAny(path, root.ExcludeFolderPatterns) && !isOperationalPath(root, path)
+		return !matchesAny(path, global.ExcludeFolderPatterns) && !matchesAny(path, root.ExcludeFolderPatterns) && !isOperationalPath(root, path)
 	}
 	// Traversal omits built-in operational trees such as Windows and Program
 	// Files. Apply the same rule to historical descendants during reconciliation
@@ -2662,10 +2696,16 @@ func PathAllowed(root config.RootConfig, path, extension string, isFolder bool) 
 	if isOperationalPath(root, filepath.Dir(path)) {
 		return false
 	}
+	if matchesAny(filepath.Dir(path), global.ExcludeFolderPatterns) {
+		return false
+	}
 	if strings.HasPrefix(strings.TrimLeft(filepath.Base(path), `\\/`), "~$") {
 		return false
 	}
 	if !extensionAllowed(root, extension) {
+		return false
+	}
+	if matchesAny(path, global.ExcludeFilePatterns) {
 		return false
 	}
 	return filePatternAllowed(root, path)

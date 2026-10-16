@@ -302,6 +302,20 @@
             <label class="check-row"><input id="rules-hashing" type="checkbox"><span>Calculate SHA-256 hashes</span></label>
             <label class="check-row"><input id="rules-ownership" type="checkbox"><span>Collect filesystem owner metadata</span></label>
           </div>
+          <div class="rules-grid enrichment-overrides">
+            <label class="check-row"><input id="rules-content-exclude-override" type="checkbox"><span>Override global content exclusions</span></label>
+            <label class="check-row"><input id="rules-ocr-exclude-override" type="checkbox"><span>Override global OCR exclusions</span></label>
+            <label>
+              Content extraction exclusions
+              <textarea id="rules-content-exclude-extensions" spellcheck="false" placeholder="pdf&#10;jpg"></textarea>
+              <small>One extension per line. Disabled values inherit the global list.</small>
+            </label>
+            <label>
+              OCR exclusions
+              <textarea id="rules-ocr-exclude-extensions" spellcheck="false" placeholder="pdf&#10;png"></textarea>
+              <small>One extension per line. An enabled empty list excludes nothing.</small>
+            </label>
+          </div>
         </section>
 
         <details class="advanced-rules">
@@ -382,44 +396,65 @@
           <div class="form-actions"><button type="submit">Save network settings</button></div>
         </form>
         <form id="indexing-settings-form" class="settings-form">
-          <div class="form-section-title">
-            <p class="eyebrow">Adaptive resource throttle</p>
-            <p>Pause background indexing when other work is using the machine. QIndexer excludes its own CPU use from this check.</p>
-          </div>
-          <div class="rules-grid">
+          <div class="settings-columns">
+            <div class="settings-column">
+              <section class="settings-section">
+                <div class="form-section-title">
+                  <p class="eyebrow">Adaptive resource throttle</p>
+                  <p>Pause background indexing when other work is using the machine. QIndexer excludes its own CPU use from this check.</p>
+                </div>
+                <div class="rules-grid">
             <label class="check-row"><input id="settings-throttle-enabled" type="checkbox"><span>Pause indexing under system pressure</span></label>
             <label>CPU threshold (%)<input id="settings-throttle-cpu" type="number" min="1" max="100" step="1"></label>
             <label>Disk busy threshold (%)<input id="settings-throttle-disk" type="number" min="1" max="100" step="1"></label>
             <label>Sample interval (seconds)<input id="settings-throttle-sample" type="number" min="1" max="3600" step="1"></label>
             <label>Healthy samples before resuming<input id="settings-throttle-recovery" type="number" min="1" max="3600" step="1"></label>
-          </div>
-          <div class="form-section-title">
+                </div>
+              </section>
+              <section class="settings-section">
+                <div class="form-section-title">
             <p class="eyebrow">Filesystem watcher</p>
             <p>Uses OS change notifications for active folders; the periodic crawl remains the source of truth.</p>
-          </div>
-          <div class="rules-grid">
+                </div>
+                <div class="rules-grid">
             <label class="check-row"><input id="settings-watcher-enabled" type="checkbox"><span>Use filesystem change notifications</span></label>
             <label>Watched folder limit<input id="settings-watcher-limit" type="number" min="1" max="250000" step="1"></label>
             <label>Activity retention (days)<input id="settings-watcher-half-life" type="number" min="1" max="3650" step="1"></label>
             <label>Watch rebalance interval (minutes)<input id="settings-watcher-rebalance" type="number" min="1" max="1440" step="1"></label>
-          </div>
-          <div class="form-section-title">
+                </div>
+              </section>
+              <section class="settings-section">
+			<div class="form-section-title">
+			  <p class="eyebrow">Global crawl exclusions</p>
+			  <p>Common temporary, OS, recycle, and sync clutter is preloaded here. Root rules only need local exceptions.</p>
+			</div>
+			<div class="rules-grid">
+			  <label>Exclude file wildcards<textarea id="settings-global-exclude-file" spellcheck="false" placeholder="~$*&#10;*.tmp"></textarea></label>
+			  <label>Exclude folder wildcards<textarea id="settings-global-exclude-folder" spellcheck="false" placeholder="**/.git/**&#10;**/$RECYCLE.BIN/**"></textarea></label>
+			</div>
+              </section>
+            </div>
+            <div class="settings-column">
+              <section class="settings-section">
+			<div class="form-section-title">
 			<p class="eyebrow">Crawl concurrency</p>
 			<p>These are upper limits. Each root is measured at the start of a crawl; high-latency roots receive a lower per-root cap.</p>
-		  </div>
-		  <div class="rules-grid">
+			</div>
+			<div class="rules-grid">
 			<label>Full reconciliation interval (minutes)<input id="settings-scan-interval" type="number" min="1" max="43200" step="1"></label>
 			<label>Concurrent roots<input id="settings-root-parallelism" type="number" min="1" max="32" step="1"></label>
 			<label>Directory worker limit<input id="settings-directory-workers" type="number" min="1" max="256" step="1"></label>
 			<label>Metadata worker limit<input id="settings-metadata-workers" type="number" min="1" max="256" step="1"></label>
 			<label>Metadata queue size<input id="settings-metadata-queue" type="number" min="100" max="1000000" step="100"></label>
 			<label>Database batch size<input id="settings-index-batch" type="number" min="1" max="1000000" step="100"></label>
-		  </div>
-		  <div class="form-section-title">
+			</div>
+              </section>
+              <section class="settings-section">
+			<div class="form-section-title">
             <p class="eyebrow">Optional indexing work</p>
             <p>Extraction, OCR, and hashing run in parallel background pools and obey crawler throttling. Enter one extension per line in exclusion lists.</p>
-          </div>
-          <div class="rules-grid">
+                </div>
+                <div class="rules-grid">
             <label class="check-row"><input id="settings-extraction" type="checkbox"><span>Extract Office, PDF, and text content</span></label>
 			<label>Extraction workers<input id="settings-extraction-workers" type="number" min="1" max="256" step="1"></label>
             <label>Extraction file limit (MB)<input id="settings-extraction-size" type="number" min="1" step="1"></label>
@@ -439,6 +474,9 @@
 			<label>Hash workers<input id="settings-hashing-workers" type="number" min="1" max="256" step="1"></label>
             <label>Hash file limit (MB)<input id="settings-hashing-size" type="number" min="1" step="1"></label>
             <label class="check-row"><input id="settings-ownership" type="checkbox"><span>Collect filesystem owner metadata</span></label>
+                </div>
+              </section>
+            </div>
           </div>
           <div class="form-actions"><button type="submit">Save indexing settings</button></div>
         </form>

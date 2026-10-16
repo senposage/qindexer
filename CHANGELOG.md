@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.21 - 2026-10-15
+
+- Add per-root content and OCR extension overrides. Roots inherit the global
+  exclusion lists by default, or may replace either list, including with an
+  explicit empty list.
+- Apply global crawler file and folder hygiene exclusions to traversal,
+  reconciliation, watcher selection, and root cleanup. Default filters now
+  cover common temporary files, shell metadata, recycle trees, snapshots, sync
+  metadata, and local development folders without duplicating those rules per
+  root.
+- Reflow the admin configuration view into responsive two-column operational
+  sections, and make inherited versus overridden enrichment exclusions clear in
+  each root's Rules panel.
+
 ## 1.2.20 - 2026-10-15
 
 - Add global, line-based file-type exclusions for ordinary content extraction
