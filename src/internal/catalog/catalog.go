@@ -357,15 +357,13 @@ func (c *Catalog) Close() error {
 	return c.db.Close()
 }
 
-// Checkpoint copies committed WAL frames back into the main database without
-// interrupting readers. The passive phase is safe while catalog writers are
-// active, so it must not be gated on writeMu: sustained enrichment otherwise
-// prevents every maintenance cycle from doing any work. Truncation still waits
-// for a quiet write window because it needs a stronger SQLite lock.
+// Checkpoint copies committed SQLite WAL frames back into the main database
+// without interrupting readers. PostgreSQL owns WAL checkpoints and statistics
+// internally; issuing ANALYZE on every application maintenance tick competes
+// with autovacuum on a large documents table.
 func (c *Catalog) Checkpoint(ctx context.Context) error {
 	if c.db.backend == backendPostgres {
-		_, err := c.db.ExecContext(ctx, `ANALYZE documents`)
-		return err
+		return nil
 	}
 	var busy, frames, checkpointed int64
 	if err := c.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &checkpointed); err != nil {
@@ -500,10 +498,10 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 		}
 	}
 	if c.db.backend == backendPostgres {
-		// PostgreSQL's autovacuum owns physical-space reclamation. A manual
-		// VACUUM is both disruptive on a busy catalog and does not shrink the
-		// database file; refresh planner statistics instead.
-		if _, err := c.db.ExecContext(ctx, `ANALYZE documents`); err != nil {
+		// Standard VACUUM is safe for a quiesced catalog and makes dead tuples
+		// reusable. It deliberately does not use VACUUM FULL, which would take
+		// an exclusive lock and rewrite the live catalog.
+		if _, err := c.db.ExecContext(ctx, `VACUUM (ANALYZE) documents`); err != nil {
 			return result, err
 		}
 	} else {

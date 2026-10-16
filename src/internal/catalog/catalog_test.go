@@ -460,6 +460,13 @@ func TestCheckpointSkipsWhileCatalogWriterIsActive(t *testing.T) {
 	}
 }
 
+func TestCheckpointLeavesPostgresMaintenanceToPostgres(t *testing.T) {
+	cat := &Catalog{db: &catalogDB{backend: backendPostgres}}
+	if err := cat.Checkpoint(context.Background()); err != nil {
+		t.Fatalf("PostgreSQL periodic checkpoint = %v, want no-op", err)
+	}
+}
+
 func TestSearchMatchesFilenamePrefix(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

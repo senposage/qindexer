@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.30 - 2026-10-15
+
+- Stop issuing `ANALYZE documents` every five seconds in PostgreSQL mode;
+  PostgreSQL now handles routine checkpoint, analyze, and autovacuum work on
+  its own cadence.
+- Make the explicit Compact Index maintenance action run standard PostgreSQL
+  `VACUUM (ANALYZE)`, reclaiming dead tuples for reuse without an exclusive
+  `VACUUM FULL` rewrite.
+
 ## 1.2.29 - 2026-10-15
 
 - Keep PostgreSQL search-vector input below its hard 1 MiB limit, avoiding
