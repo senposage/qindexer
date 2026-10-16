@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.32 - 2026-10-16
+
+- Coalesce repeat filesystem hints for the same path for 15 minutes by default,
+  preventing a busy application directory from becoming a continuous crawl.
+- Treat only genuinely new directories as recursive watcher work; existing
+  watched directories and files receive targeted refreshes.
+- Defer content extraction, OCR, and hashing until every structural crawl is
+  complete, and retain watcher hints while CPU or disk pressure pauses work.
+- Show queued background work in the admin operations panel rather than
+  presenting it as idle.
+
 ## 1.2.31 - 2026-10-16
 
 - Make administrative crawler stop a hard boundary: queued, watcher, scheduled,

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPinnedWatchLimitReservesCapacityForHotFolders(t *testing.T) {
@@ -55,5 +56,23 @@ func TestMergeDirtyPathsCoalescesLatestEvent(t *testing.T) {
 	})
 	if len(pending["root"]) != 2 || !pending["root"]["one"].removed {
 		t.Fatalf("coalesced dirty paths = %#v", pending["root"])
+	}
+}
+
+func TestFilterRecentHintsSuppressesRepeatedPathUntilCooldownExpires(t *testing.T) {
+	w := &Watcher{hintsAt: map[string]time.Time{}}
+	paths := map[string]dirtyPath{"C:/work/example.txt": {path: "C:/work/example.txt"}}
+	first := w.filterRecentHints("root", paths, 15*time.Minute)
+	if len(first) != 1 {
+		t.Fatalf("first hint count = %d, want 1", len(first))
+	}
+	second := w.filterRecentHints("root", paths, 15*time.Minute)
+	if len(second) != 0 {
+		t.Fatalf("repeat hint count = %d, want 0", len(second))
+	}
+	w.releaseHint("root", "C:/work/example.txt")
+	third := w.filterRecentHints("root", paths, 15*time.Minute)
+	if len(third) != 1 {
+		t.Fatalf("released hint count = %d, want 1", len(third))
 	}
 }

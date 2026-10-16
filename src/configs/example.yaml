@@ -102,6 +102,7 @@ crawler:
 watcher:
   enabled: true
   debounce_milliseconds: 1500
+  hint_cooldown_seconds: 900
   max_watched_directories: 25000
   max_dirty_paths_per_flush: 500
   activity_half_life_days: 60

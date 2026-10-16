@@ -19,15 +19,18 @@ import (
 )
 
 type Watcher struct {
-	cfg     *config.Config
-	cfgMu   sync.RWMutex
-	crawler *crawler.Crawler
-	log     *slog.Logger
-	ignore  string
-	reload  chan struct{}
-	hints   *hintQueue
-	statsMu sync.RWMutex
-	stats   Stats
+	cfg      *config.Config
+	cfgMu    sync.RWMutex
+	crawler  *crawler.Crawler
+	log      *slog.Logger
+	ignore   string
+	reload   chan struct{}
+	hints    *hintQueue
+	statsMu  sync.RWMutex
+	stats    Stats
+	hintMu   sync.Mutex
+	hintsAt  map[string]time.Time
+	prunedAt time.Time
 }
 
 type Stats struct {
@@ -66,7 +69,7 @@ const watchRootLookupTimeout = 5 * time.Second
 const watchSeedAddTimeout = 5 * time.Second
 
 func New(cfg *config.Config, cr *crawler.Crawler, log *slog.Logger, ignorePath string) *Watcher {
-	w := &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1)}
+	w := &Watcher{cfg: config.Clone(cfg), crawler: cr, log: log, ignore: filepath.Clean(ignorePath), reload: make(chan struct{}, 1), hintsAt: map[string]time.Time{}}
 	w.hints = newHintQueue(w)
 	return w
 }
@@ -205,9 +208,12 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 				continue
 			}
 			removed := event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)
-			recursive := event.Has(fsnotify.Create)
+			recursive := false
 			if event.Has(fsnotify.Create) {
-				_ = w.tryWatchCreatedDirectory(ctx, set, event.Name, rootID)
+				// Windows can report CREATE for a directory that is already being
+				// watched. Only a truly new directory needs a recursive discovery
+				// pass; an existing watched directory is a shallow metadata refresh.
+				recursive = w.tryWatchCreatedDirectory(ctx, set, event.Name, rootID)
 			}
 			w.recordEvent()
 			mu.Lock()
@@ -563,12 +569,20 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (w *Watcher) tryWatchCreatedDirectory(ctx context.Context, set *watchSet, path string, rootID string) error {
+func (w *Watcher) tryWatchCreatedDirectory(ctx context.Context, set *watchSet, path string, rootID string) bool {
 	if w.shouldIgnore(path) {
-		return nil
+		return false
+	}
+	path = filepath.Clean(path)
+	if set.paths[path] != "" {
+		return false
+	}
+	info, err := statDirectoryWithTimeout(ctx, path)
+	if err != nil || !info.IsDir() {
+		return false
 	}
 	set.add(ctx, path, rootID, false)
-	return nil
+	return true
 }
 
 func (w *Watcher) flush(ctx context.Context, batch map[string]map[string]dirtyPath) {
@@ -576,7 +590,14 @@ func (w *Watcher) flush(ctx context.Context, batch map[string]map[string]dirtyPa
 }
 
 func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[string]dirtyPath) bool {
+	if w.crawler.IsAdaptivePaused() {
+		return false
+	}
 	cfg := w.snapshot()
+	paths = w.filterRecentHints(rootID, paths, cfg.Watcher.HintCooldown())
+	if len(paths) == 0 {
+		return true
+	}
 	limit := cfg.Watcher.MaxDirtyPathsPerFlush
 	activity := make([]string, 0, len(paths))
 	for _, dirty := range paths {
@@ -616,16 +637,69 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 		run, err := crawlHint(ctx, rootID, dirty.path, dirty.removed)
 		if err != nil {
 			if isCancellation(ctx, err) {
+				w.releaseHints(rootID, paths)
 				return false
 			}
+			w.releaseHint(rootID, dirty.path)
 			w.log.Warn("hint crawl failed", "root", rootID, "path", dirty.path, "error", err)
 			continue
 		}
 		if run.Status == "already_running" || run.Status == "maintenance_paused" || run.Status == "paused" {
+			w.releaseHints(rootID, paths)
+			return false
+		}
+		if run.Status == "pressure_paused" {
+			w.releaseHints(rootID, paths)
 			return false
 		}
 	}
 	return true
+}
+
+func (w *Watcher) filterRecentHints(rootID string, paths map[string]dirtyPath, cooldown time.Duration) map[string]dirtyPath {
+	if cooldown <= 0 || len(paths) == 0 {
+		return paths
+	}
+	now := time.Now()
+	accepted := make(map[string]dirtyPath, len(paths))
+	w.hintMu.Lock()
+	if w.prunedAt.IsZero() || now.Sub(w.prunedAt) >= cooldown {
+		cutoff := now.Add(-cooldown)
+		for key, seen := range w.hintsAt {
+			if seen.Before(cutoff) {
+				delete(w.hintsAt, key)
+			}
+		}
+		w.prunedAt = now
+	}
+	for path, dirty := range paths {
+		key := hintKey(rootID, path)
+		if seen, exists := w.hintsAt[key]; exists && now.Sub(seen) < cooldown {
+			continue
+		}
+		w.hintsAt[key] = now
+		accepted[path] = dirty
+	}
+	w.hintMu.Unlock()
+	return accepted
+}
+
+func (w *Watcher) releaseHint(rootID, path string) {
+	w.hintMu.Lock()
+	delete(w.hintsAt, hintKey(rootID, path))
+	w.hintMu.Unlock()
+}
+
+func (w *Watcher) releaseHints(rootID string, paths map[string]dirtyPath) {
+	w.hintMu.Lock()
+	for path := range paths {
+		delete(w.hintsAt, hintKey(rootID, path))
+	}
+	w.hintMu.Unlock()
+}
+
+func hintKey(rootID, path string) string {
+	return rootID + "\x00" + filepath.Clean(path)
 }
 
 // hintQueue decouples native filesystem-event intake from crawl work. A busy
@@ -683,7 +757,7 @@ func (q *hintQueue) run(ctx context.Context, rootID string) {
 		// A timed stop has no active root to wait on. Keep the coalesced hints
 		// for later, but do not poll the paused crawler in a hot loop.
 		delay := time.Second
-		if q.watcher.crawler.IsPaused() {
+		if q.watcher.crawler.IsPaused() || q.watcher.crawler.IsAdaptivePaused() {
 			delay = 5 * time.Second
 		}
 		timer := time.NewTimer(delay)

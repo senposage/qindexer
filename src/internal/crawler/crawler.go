@@ -1182,9 +1182,10 @@ func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
 }
 
 func (c *Crawler) refillBackground(ctx context.Context) {
-	// Structural indexing takes priority only within its own root. A crawl of
-	// one share must not stall OCR, content extraction, or hashing for another.
-	if c.InMaintenance() || c.IsPaused() || c.adaptiveStatus().Paused {
+	// Structural indexing has priority over every enrichment queue. This keeps
+	// initial and reconciliation crawls focused on making the index searchable
+	// before competing for I/O with content extraction, OCR, or hashing.
+	if c.InMaintenance() || c.IsPaused() || c.IsAdaptivePaused() || c.HasActiveCrawls() {
 		return
 	}
 	content := c.snapshot().Crawler.ContentExtraction
@@ -1208,7 +1209,7 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 }
 
 func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) error {
-	for c.IsRootRunning(rootID) || c.InMaintenance() {
+	for c.HasActiveCrawls() || c.InMaintenance() {
 		timer := time.NewTimer(250 * time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -1218,6 +1219,18 @@ func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) er
 		}
 	}
 	return c.waitIfPaused(ctx, true)
+}
+
+// HasActiveCrawls reports structural crawl work only; enrichment work is
+// deliberately excluded so it can wait for every root to become quiescent.
+func (c *Crawler) HasActiveCrawls() bool {
+	return atomic.LoadInt64(&c.activeCrawls) > 0
+}
+
+// IsAdaptivePaused lets the watcher retain native change hints while system
+// pressure is high instead of turning those hints into database writes.
+func (c *Crawler) IsAdaptivePaused() bool {
+	return c.adaptiveStatus().Paused
 }
 
 type backgroundClaim func(context.Context, []string, int, int64, []string) ([]catalog.BackgroundCandidate, error)
@@ -1355,6 +1368,9 @@ func (c *Crawler) crawl(ctx context.Context, root config.RootConfig, initial boo
 	}
 	if c.IsPaused() {
 		return catalog.CrawlRun{RootID: root.ID, Status: "paused", ErrorMessage: "crawler is paused"}, nil
+	}
+	if c.IsAdaptivePaused() {
+		return catalog.CrawlRun{RootID: root.ID, Status: "pressure_paused", ErrorMessage: "crawler is paused by system pressure"}, nil
 	}
 	var started bool
 	ctx, finish, started := c.beginRootWork(ctx, root.ID)
@@ -1609,6 +1625,9 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	}
 	if c.IsPaused() {
 		return catalog.CrawlRun{RootID: root.ID, Status: "paused", ErrorMessage: "crawler is paused"}, nil
+	}
+	if c.IsAdaptivePaused() {
+		return catalog.CrawlRun{RootID: root.ID, Status: "pressure_paused", ErrorMessage: "crawler is paused by system pressure"}, nil
 	}
 	var started bool
 	ctx, finish, started := c.beginRootWork(ctx, root.ID)

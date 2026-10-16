@@ -513,21 +513,22 @@ function renderOpsSummary(metrics, progress) {
   document.querySelector("#ops-watcher").textContent = watcherStatus;
   const watchDetails = [watch.error, watch.last_event_unix ? `Last event ${formatActivityAge(watch.last_event_unix)}` : "", watch.last_rebalance_unix ? `Last rebalance ${formatActivityAge(watch.last_rebalance_unix)}` : ""].filter(Boolean);
   document.querySelector("#ops-watcher").title = watchDetails.join(" | ");
-  renderBackgroundActivity("#ops-content", metrics.content_activity, "Content", Boolean(metrics.active_crawls));
-  renderBackgroundActivity("#ops-ocr", metrics.ocr_activity, "OCR", Boolean(metrics.active_crawls));
-  renderBackgroundActivity("#ops-hash", metrics.hash_activity, "Hashing", Boolean(metrics.active_crawls));
+  renderBackgroundActivity("#ops-content", metrics.content_activity, "Content", Boolean(metrics.active_crawls), metrics.content_queue_depth);
+  renderBackgroundActivity("#ops-ocr", metrics.ocr_activity, "OCR", Boolean(metrics.active_crawls), metrics.ocr_queue_depth);
+  renderBackgroundActivity("#ops-hash", metrics.hash_activity, "Hashing", Boolean(metrics.active_crawls), metrics.hash_queue_depth);
 }
 
-function renderBackgroundActivity(selector, activity, label, deferred) {
+function renderBackgroundActivity(selector, activity, label, deferred, backlog) {
   const target = document.querySelector(selector);
   const current = activity || {};
   const path = current.current_path || current.last_path || "";
   const filename = path ? path.replace(/\\/g, "/").split("/").pop() : "";
   const active = Number(current.active_count || 0) > 0;
-  const state = active ? `Processing${Number(current.active_count) > 1 ? ` (${current.active_count})` : ""}` : (deferred ? "Deferred" : "Idle");
+  const queued = Number(backlog || 0);
+  const state = active ? `Processing${Number(current.active_count) > 1 ? ` (${current.active_count})` : ""}` : (deferred ? "Deferred" : (queued > 0 ? `Queued (${queued.toLocaleString()})` : "Idle"));
   const labelText = active ? state : (current.last_error ? "Failed" : (filename ? "Last" : state));
   target.textContent = filename ? `${labelText}: ${filename}` : state;
-  target.title = current.last_error || path || `${label} ${state.toLowerCase()}`;
+  target.title = current.last_error || path || (queued > 0 ? `${label} backlog waits until structural crawling is complete.` : `${label} ${state.toLowerCase()}`);
 }
 
 function renderOps(title) {
@@ -728,6 +729,7 @@ function renderIndexingSettings(crawler, watcher = {}) {
   document.querySelector("#settings-throttle-recovery").value = throttle.recovery_samples || 3;
   document.querySelector("#settings-watcher-enabled").checked = watcher.enabled !== false;
   document.querySelector("#settings-watcher-limit").value = watcher.max_watched_directories || 5000;
+	document.querySelector("#settings-watcher-cooldown").value = watcher.hint_cooldown_seconds || 900;
   document.querySelector("#settings-watcher-half-life").value = watcher.activity_half_life_days || 60;
   document.querySelector("#settings-watcher-rebalance").value = watcher.rebalance_minutes || 15;
 	  document.querySelector("#settings-directory-workers").value = crawler.directory_worker_count || 16;
@@ -783,7 +785,7 @@ async function saveIndexingSettings(event) {
 	const content = { ...(crawler.content_extraction || {}), enabled: document.querySelector("#settings-extraction").checked || ocr.enabled, worker_count: Number(document.querySelector("#settings-extraction-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-extraction-size").value) || 64, max_stored_text_kb: Number(document.querySelector("#settings-stored-text").value) || 1024, exclude_extensions: splitExtensions(document.querySelector("#settings-extraction-exclude-extensions").value) };
   const hashing = { ...(crawler.hashing || {}), enabled: document.querySelector("#settings-hashing").checked, worker_count: Number(document.querySelector("#settings-hashing-workers").value) || 3, max_file_size_mb: Number(document.querySelector("#settings-hashing-size").value) || 2048 };
   const throttle = { ...(crawler.adaptive_throttle || {}), enabled: document.querySelector("#settings-throttle-enabled").checked, cpu_percent_threshold: Number(document.querySelector("#settings-throttle-cpu").value) || 80, disk_busy_percent_threshold: Number(document.querySelector("#settings-throttle-disk").value) || 70, sample_interval_seconds: Number(document.querySelector("#settings-throttle-sample").value) || 5, pressure_samples: Number(document.querySelector("#settings-throttle-pressure").value) || 3, recovery_samples: Number(document.querySelector("#settings-throttle-recovery").value) || 3 };
-  const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
+  const watcher = { ...(state.watcher || {}), enabled: document.querySelector("#settings-watcher-enabled").checked, max_watched_directories: Number(document.querySelector("#settings-watcher-limit").value) || 5000, hint_cooldown_seconds: Number(document.querySelector("#settings-watcher-cooldown").value) || 900, activity_half_life_days: Number(document.querySelector("#settings-watcher-half-life").value) || 60, rebalance_minutes: Number(document.querySelector("#settings-watcher-rebalance").value) || 15 };
   try {
 	await api("/admin/v1/crawler/settings", { method: "PUT", body: JSON.stringify({ scan_interval_seconds: (Number(document.querySelector("#settings-scan-interval").value) || 360) * 60, root_parallelism: Number(document.querySelector("#settings-root-parallelism").value) || 1, directory_worker_count: Number(document.querySelector("#settings-directory-workers").value) || 16, metadata_worker_count: Number(document.querySelector("#settings-metadata-workers").value) || 32, metadata_queue_size: Number(document.querySelector("#settings-metadata-queue").value) || 5000, index_batch_size: Number(document.querySelector("#settings-index-batch").value) || 1000, exclude_file_patterns: splitLines(document.querySelector("#settings-global-exclude-file").value), exclude_folder_patterns: splitLines(document.querySelector("#settings-global-exclude-folder").value), collect_ownership: document.querySelector("#settings-ownership").checked, adaptive_throttle: throttle, content_extraction: content, ocr, hashing, watcher }) });
 	await refresh({ quiet: true, message: "Indexing settings saved; worker-count changes apply after restart" });

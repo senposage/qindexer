@@ -83,6 +83,9 @@ func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
 	if len(cfg.Crawler.ContentExtraction.ExcludeExtensions) == 0 || len(cfg.Crawler.OCR.ExcludeExtensions) == 0 {
 		t.Fatalf("enrichment exclusions were not populated: %#v", cfg.Crawler)
 	}
+	if cfg.Watcher.HintCooldownSeconds != 900 {
+		t.Fatalf("watcher hint cooldown = %d, want 900", cfg.Watcher.HintCooldownSeconds)
+	}
 }
 
 func TestEnrichmentExclusionsNormalizeAsLineEntries(t *testing.T) {
