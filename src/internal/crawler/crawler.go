@@ -1467,7 +1467,7 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 		// not that every queued descendant completed. The pending queue is not
 		// persisted, so skipping a checkpointed parent after restart can strand
 		// whole branches. Rebuild traversal from the root every time.
-		walkErr = c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, false, true, !initial, profile.DirectoryWorkers)
+		walkErr = c.walkPaths(ctx, root, paths, jobs, &errorsCount, generation, false, true, true, profile.DirectoryWorkers)
 	}
 	close(jobs)
 	workers.Wait()

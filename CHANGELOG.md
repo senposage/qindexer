@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.23 - 2026-10-15
+
+- Apply adaptive-pressure pausing to an initial crawl that is already in
+  progress, not only to later reconciliation passes.
+
 ## 1.2.22 - 2026-10-15
 
 - Decouple filesystem notification intake from hint crawls. Changed paths now

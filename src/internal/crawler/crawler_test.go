@@ -440,11 +440,11 @@ func TestAdaptivePressureRecoversAfterHealthySamples(t *testing.T) {
 	}
 }
 
-func TestInitialCrawlIgnoresAdaptivePause(t *testing.T) {
+func TestExplicitAdaptiveBypassSkipsPause(t *testing.T) {
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.updateAdaptivePressure("disk", 0, 90, 1, 3)
 	if err := c.waitIfPaused(context.Background(), false); err != nil {
-		t.Fatalf("initial crawl should ignore adaptive pause: %v", err)
+		t.Fatalf("explicit adaptive bypass should ignore pause: %v", err)
 	}
 }
 
