@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.24 - 2026-10-15
+
+- Fix admin numeric validation for metadata queue and database batch settings.
+  Host-sized values such as `4096` are valid integer configuration values and
+  no longer fail the browser's incorrect `step=100` constraint.
+
 ## 1.2.23 - 2026-10-15
 
 - Apply adaptive-pressure pausing to an initial crawl that is already in
