@@ -21,6 +21,7 @@ const state = {
   creatingRoot: false,
   crawler: {},
   network: {},
+  logFilters: { level: "attention", source: "all", query: "" },
 };
 
 let liveMetricsTimer = null;
@@ -63,6 +64,25 @@ function logoutAdmin() {
 
 document.querySelector("#refresh").addEventListener("click", refresh);
 document.querySelector("#refresh-logs").addEventListener("click", refreshLogs);
+document.querySelector(".log-levels").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-log-level]");
+  if (!button) return;
+  state.logFilters.level = button.dataset.logLevel;
+  document.querySelectorAll("[data-log-level]").forEach((item) => item.classList.toggle("active", item === button));
+  void refreshLogs();
+});
+document.querySelector("#log-source").addEventListener("change", (event) => {
+  state.logFilters.source = event.target.value;
+  void refreshLogs();
+});
+let logSearchTimer = null;
+document.querySelector("#log-search").addEventListener("input", (event) => {
+  window.clearTimeout(logSearchTimer);
+  logSearchTimer = window.setTimeout(() => {
+    state.logFilters.query = event.target.value.trim();
+    void refreshLogs();
+  }, 250);
+});
 document.querySelector("#clear-crawls").addEventListener("click", clearCrawlHistory);
 document.querySelector("#validate-config").addEventListener("click", validateConfig);
 document.querySelector("#pause-crawler").addEventListener("click", pauseCrawler);
@@ -88,6 +108,8 @@ document.querySelector("#indexing-settings-form").addEventListener("submit", sav
 document.querySelector("#settings-ocr").addEventListener("change", ensureOCRDependencies);
 document.querySelector("#install-ocr-sidecars").addEventListener("click", () => installOCRDependencies());
 document.querySelector("#compact-index").addEventListener("click", compactIndex);
+document.querySelector("#load-editable-config").addEventListener("click", loadEditableConfig);
+document.querySelector("#save-editable-config").addEventListener("click", saveEditableConfig);
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -237,7 +259,7 @@ async function refresh(options = {}) {
       api("/admin/v1/roots", { timeoutMs: 10000 }),
       api("/admin/v1/crawls", { timeoutMs: 8000 }),
       api("/admin/v1/config", { timeoutMs: 8000 }),
-      api("/admin/v1/logs?limit=160", { timeoutMs: 8000 }),
+      api(logEndpoint(), { timeoutMs: 8000 }),
     ]);
     const authenticationFailure = results.find((item) => item.status === "rejected" && (item.reason?.code === "unauthorized" || item.reason?.code === "admin_setup_required"));
     if (authenticationFailure) throw authenticationFailure.reason;
@@ -256,7 +278,6 @@ async function refresh(options = {}) {
       state.network = { server: config.server || {}, management: config.management || {} };
       renderNetworkSettings(state.network);
       renderIndexingSettings(state.crawler, state.watcher);
-      document.querySelector("#config").textContent = JSON.stringify(config, null, 2);
     }
     setAdminVisibility(true);
     const failures = results.filter((item) => item.status === "rejected");
@@ -309,7 +330,7 @@ async function refreshLiveDashboard() {
       api("/admin/v1/service"),
       api("/admin/v1/roots"),
       api("/admin/v1/crawls"),
-      api("/admin/v1/logs?limit=160").catch((err) => ({ error: err.message, lines: [] })),
+      api(logEndpoint()).catch((err) => ({ error: err.message, lines: [] })),
     ]);
     renderService(service);
     renderRoots(roots.roots || []);
@@ -383,7 +404,10 @@ function resetPrivateDashboard() {
   document.querySelector("#crawls").innerHTML = "";
   document.querySelector("#root-errors").innerHTML = "";
   document.querySelector("#logs").innerHTML = "";
-  document.querySelector("#config").textContent = "{}";
+  document.querySelector("#log-summary").textContent = "";
+  document.querySelector("#editable-config").value = "";
+  document.querySelector("#save-editable-config").disabled = true;
+  document.querySelector("#config-save-status").textContent = "";
   document.querySelector("#rules-panel").classList.add("hidden");
   document.querySelector("#validation-panel").classList.add("hidden");
 }
@@ -943,7 +967,7 @@ function renderRootErrors(roots) {
 
 async function refreshLogs() {
   try {
-    const logs = await api("/admin/v1/logs?limit=240");
+    const logs = await api(logEndpoint());
     renderLogs(logs);
     setMessage("Logs refreshed");
   } catch (err) {
@@ -951,23 +975,85 @@ async function refreshLogs() {
   }
 }
 
+function logEndpoint() {
+  const params = new URLSearchParams({ limit: "240", level: state.logFilters.level, source: state.logFilters.source });
+  if (state.logFilters.query) params.set("query", state.logFilters.query);
+  return `/admin/v1/logs?${params.toString()}`;
+}
+
 function renderLogs(data) {
   const list = document.querySelector("#logs");
+  const summary = document.querySelector("#log-summary");
   if (data?.error) {
     list.innerHTML = `<div class="log-empty">Logs unavailable: ${escapeHtml(data.error)}</div>`;
+    summary.textContent = "Unavailable";
     return;
   }
-  const lines = array(data?.lines).slice(-160);
+  const lines = array(data?.lines);
+  summary.textContent = `${Number(data?.matched || lines.length).toLocaleString()} shown`;
   if (!lines.length) {
     list.innerHTML = `<div class="log-empty">No log lines yet.</div>`;
     return;
   }
+  const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
   list.innerHTML = lines.map((line) => {
     const lower = line.toLowerCase();
     const tone = lower.includes("level=error") || lower.includes(" panic ") || lower.includes("panic=") ? "error" : lower.includes("level=warn") ? "warn" : "info";
     return `<div class="log-line ${tone}">${escapeHtml(line)}</div>`;
   }).join("");
-  list.scrollTop = list.scrollHeight;
+  if (nearBottom) list.scrollTop = list.scrollHeight;
+}
+
+async function loadEditableConfig() {
+  const button = document.querySelector("#load-editable-config");
+  const editor = document.querySelector("#editable-config");
+  const status = document.querySelector("#config-save-status");
+  button.disabled = true;
+  status.className = "save-status";
+  status.textContent = "Loading...";
+  try {
+    const data = await api("/admin/v1/config/export", { timeoutMs: 8000 });
+    editor.value = JSON.stringify(data, null, 2);
+    document.querySelector("#save-editable-config").disabled = false;
+    status.className = "save-status success";
+    status.textContent = "Loaded";
+  } catch (err) {
+    status.className = "save-status error";
+    status.textContent = "Load failed";
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveEditableConfig() {
+  const editor = document.querySelector("#editable-config");
+  const button = document.querySelector("#save-editable-config");
+  const status = document.querySelector("#config-save-status");
+  let payload;
+  try {
+    payload = JSON.parse(editor.value);
+  } catch {
+    status.className = "save-status error";
+    status.textContent = "Invalid JSON";
+    return;
+  }
+  if (!window.confirm("Save the advanced configuration? Root or database changes may require a service restart.")) return;
+  button.disabled = true;
+  status.className = "save-status";
+  status.textContent = "Saving...";
+  try {
+    const data = await api("/admin/v1/config/import", { method: "POST", body: JSON.stringify(payload) });
+    status.className = "save-status success";
+    status.textContent = data.restart_recommended ? "Saved; restart recommended" : "Saved";
+    await refresh({ quiet: true, message: status.textContent });
+  } catch (err) {
+    status.className = "save-status error";
+    status.textContent = "Save failed";
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function crawlStat(label, value) {

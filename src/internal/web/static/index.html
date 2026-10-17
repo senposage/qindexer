@@ -12,7 +12,7 @@
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
         <h1>QIndexer</h1>
-        <p>Search service administration <span class="build">UI 1.1.0</span></p>
+        <p>Search service administration <span class="build">UI 1.2.40</span></p>
       </div>
     </div>
     <div class="auth">
@@ -363,6 +363,26 @@
           <button id="refresh-logs" type="button" class="secondary">Refresh logs</button>
         </div>
         <div id="root-errors" class="root-errors"></div>
+        <div class="log-controls">
+          <div class="log-levels" role="group" aria-label="Log severity">
+            <button type="button" class="secondary active" data-log-level="attention">Attention</button>
+            <button type="button" class="secondary" data-log-level="all">All</button>
+            <button type="button" class="secondary" data-log-level="error">Errors</button>
+            <button type="button" class="secondary" data-log-level="warn">Warnings</button>
+            <button type="button" class="secondary" data-log-level="info">Info</button>
+            <button type="button" class="secondary" data-log-level="debug">Debug</button>
+          </div>
+          <select id="log-source" aria-label="Log source">
+            <option value="all">All sources</option>
+            <option value="crawler">Crawler</option>
+            <option value="watcher">Watcher</option>
+            <option value="api">API</option>
+            <option value="catalog">Catalog</option>
+            <option value="service">Service</option>
+          </select>
+          <input id="log-search" type="search" placeholder="Filter log text" aria-label="Filter log text">
+          <span id="log-summary" class="log-summary" role="status"></span>
+        </div>
         <div id="logs" class="log-list"></div>
       </div>
 
@@ -493,7 +513,18 @@
 		  </div>
 		  <div class="form-actions"><button id="compact-index" type="button" class="secondary">Optimize index storage</button></div>
 		</div>
-        <pre id="config">{}</pre>
+        <section class="settings-form advanced-config">
+          <div class="form-section-title">
+            <p class="eyebrow">Advanced configuration</p>
+            <p>Edit the portable JSON configuration. Database credentials remain hidden and are preserved on save; network settings stay in the form above.</p>
+          </div>
+          <textarea id="editable-config" spellcheck="false" aria-label="Editable configuration"></textarea>
+          <div class="form-actions">
+            <span id="config-save-status" class="save-status" role="status" aria-live="polite"></span>
+            <button id="load-editable-config" type="button" class="secondary">Load configuration</button>
+            <button id="save-editable-config" type="button" disabled>Save configuration</button>
+          </div>
+        </section>
       </div>
     </section>
     </section>

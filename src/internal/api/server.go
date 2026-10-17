@@ -1453,6 +1453,12 @@ func (s *Server) importConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	candidate := config.Clone(s.cfg)
+	// Exported configuration deliberately omits the database DSN. Keep the
+	// service's current credential when that redacted payload is edited in the
+	// admin UI and imported again.
+	if strings.TrimSpace(backup.Index.Database.DSN) == "" {
+		backup.Index.Database.DSN = candidate.Index.Database.DSN
+	}
 	candidate.Index = backup.Index
 	candidate.Crawler = backup.Crawler
 	candidate.Watcher = backup.Watcher
@@ -1506,12 +1512,73 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 			limit = min(parsed, 2000)
 		}
 	}
-	lines, err := s.readLogTail(limit, 512*1024)
+	level := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("level")))
+	source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	if !validLogLevel(level) {
+		writeError(w, http.StatusBadRequest, "invalid_log_level", "level must be all, attention, error, warn, info, or debug")
+		return
+	}
+	if !validLogSource(source) {
+		writeError(w, http.StatusBadRequest, "invalid_log_source", "source must be all, crawler, watcher, api, catalog, or service")
+		return
+	}
+	// Read a generously sized tail before filtering so an error is not hidden
+	// merely because a busy service emitted many lower-value debug entries.
+	lines, err := s.readLogTail(2000, 512*1024)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "logs_unavailable", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": s.currentLogPath(), "lines": lines})
+	filtered := filterLogLines(lines, level, source, query)
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": s.currentLogPath(), "lines": filtered, "total": len(lines), "matched": len(filtered), "filters": map[string]string{"level": level, "source": source, "query": query}})
+}
+
+func validLogLevel(level string) bool {
+	switch level {
+	case "", "all", "attention", "error", "warn", "info", "debug":
+		return true
+	default:
+		return false
+	}
+}
+
+func validLogSource(source string) bool {
+	switch source {
+	case "", "all", "crawler", "watcher", "api", "catalog", "service":
+		return true
+	default:
+		return false
+	}
+}
+
+func filterLogLines(lines []string, level, source, query string) []string {
+	matched := make([]string, 0, len(lines))
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if query != "" && !strings.Contains(lower, query) {
+			continue
+		}
+		if source != "" && source != "all" && !strings.Contains(lower, "source=qindexer/internal/"+source+"/") {
+			continue
+		}
+		switch level {
+		case "", "all":
+		case "attention":
+			if !strings.Contains(lower, "level=warn") && !strings.Contains(lower, "level=error") {
+				continue
+			}
+		default:
+			if !strings.Contains(lower, "level="+level) {
+				continue
+			}
+		}
+		matched = append(matched, line)
+	}
+	return matched
 }
 
 func (s *Server) currentLogPath() string {

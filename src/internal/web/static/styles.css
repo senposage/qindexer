@@ -287,6 +287,12 @@ td.rules { color: var(--muted); font-size: 12px; line-height: 1.55; }
   overflow: auto;
   background: #101820;
 }
+.log-controls { display: grid; grid-template-columns: minmax(0, 1fr) 150px minmax(180px, 0.8fr) auto; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
+.log-levels { display: flex; flex-wrap: wrap; gap: 5px; }
+.log-levels button { min-height: 30px; padding: 5px 9px; font-size: 12px; }
+.log-levels button.active { color: #fff; border-color: var(--accent); background: var(--accent); }
+.log-controls input, .log-controls select { min-height: 32px; }
+.log-summary { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .log-line {
   padding: 5px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.06);
@@ -310,7 +316,7 @@ pre { max-height: 480px; margin: 0; padding: 16px; overflow: auto; color: #24313
   .toolbar { align-items: stretch; }
   .view-toggle, .pause-control { padding: 0; border: 0; }
   .section-heading { align-items: start; flex-direction: column; }
-  .status-grid, .rules-grid, .root-settings-grid, .split, .operations, .ops-metrics, .ops-summary, .settings-columns { grid-template-columns: 1fr; }
+  .status-grid, .rules-grid, .root-settings-grid, .split, .operations, .ops-metrics, .ops-summary, .settings-columns, .log-controls { grid-template-columns: 1fr; }
   .activity-item { grid-template-columns: 1fr; align-items: start; }
   .activity-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bootstrap-form { grid-template-columns: 1fr; }

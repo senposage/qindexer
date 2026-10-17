@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.40 - 2026-10-17
+
+- Add severity, source, and text filters to the admin log view. The default
+  attention filter reduces routine debug noise while retaining errors and
+  warnings; live refresh no longer forces a reader back to the bottom.
+- Add an advanced JSON configuration editor to the admin UI. It uses the
+  portable export/import format, validates changes before save, and preserves
+  redacted database credentials.
+
 ## 1.2.39 - 2026-10-17
 
 - Batch coalesced filesystem hints per root into durable metadata writes,

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -153,6 +154,79 @@ func TestConfigViewAndExportRedactDatabaseDSN(t *testing.T) {
 		if bytes.Contains(result.Body.Bytes(), []byte(secretDSN)) {
 			t.Fatalf("%s leaked database DSN: %s", endpoint, result.Body.String())
 		}
+	}
+}
+
+func TestConfigImportPreservesRedactedDatabaseDSN(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	secretDSN := "postgres://qindexer:private-password@db.example/qindexer"
+	cfg := &config.Config{
+		Index:      config.IndexConfig{Database: config.DatabaseConfig{Driver: "postgres", DSN: secretDSN, MaxOpenConns: 8, MaxIdleConns: 4}},
+		Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}},
+	}
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, configPath, cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	backup := server.redactedConfigBackup()
+	if backup.Index.Database.DSN != "" {
+		t.Fatal("editable config unexpectedly contains the database DSN")
+	}
+	backup.Index.MaxResults = 321
+	body, err := json.Marshal(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/config/import", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("config import returned %d: %s", result.Code, result.Body.String())
+	}
+	if cfg.Index.Database.DSN != secretDSN {
+		t.Fatalf("database DSN changed to %q after redacted import", cfg.Index.Database.DSN)
+	}
+	if cfg.Index.MaxResults != 321 {
+		t.Fatalf("editable index setting = %d, want 321", cfg.Index.MaxResults)
+	}
+}
+
+func TestAdminLogsFilterByLevelSourceAndText(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	logPath := filepath.Join(t.TempDir(), "qindexer.log")
+	lines := strings.Join([]string{
+		"time=2026-10-17T00:00:00Z level=INFO source=qindexer/internal/crawler/crawler.go:1 msg=started",
+		"time=2026-10-17T00:00:01Z level=WARN source=qindexer/internal/watcher/watcher.go:2 msg=overload",
+		"time=2026-10-17T00:00:02Z level=ERROR source=qindexer/internal/api/server.go:3 msg=failed",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Index: sqliteTestIndex(), Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "", "sixteen-character-token")
+	server.logPath = logPath
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/logs?level=attention&source=watcher&query=overload", nil)
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("filtered logs returned %d: %s", result.Code, result.Body.String())
+	}
+	if !bytes.Contains(result.Body.Bytes(), []byte("overload")) || bytes.Contains(result.Body.Bytes(), []byte("msg=failed")) || bytes.Contains(result.Body.Bytes(), []byte("msg=started")) {
+		t.Fatalf("unexpected filtered logs: %s", result.Body.String())
 	}
 }
 
