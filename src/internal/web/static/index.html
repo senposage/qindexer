@@ -12,7 +12,7 @@
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
         <h1>QIndexer</h1>
-        <p>Search service administration <span class="build">UI 1.2.41</span></p>
+        <p>Search service administration <span class="build">UI 1.2.42</span></p>
       </div>
     </div>
     <div class="auth">
@@ -511,7 +511,10 @@
 			<p class="eyebrow">Index storage</p>
 			<p id="storage-maintenance-description">Trims legacy text and runs storage maintenance. Crawls pause and resume automatically.</p>
 		  </div>
-		  <div class="form-actions"><button id="compact-index" type="button" class="secondary">Optimize index storage</button></div>
+		  <div class="form-actions">
+			<button id="compact-index" type="button" class="secondary">Optimize index storage</button>
+			<button id="reclaim-index" type="button" class="danger hidden">Reclaim PostgreSQL disk space</button>
+		  </div>
 		</div>
         <section class="settings-form advanced-config">
           <div class="form-section-title">

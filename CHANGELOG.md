@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.42 - 2026-10-17
+
+- Add a PostgreSQL-only **Reclaim PostgreSQL disk space** action. It pauses
+  crawls and runs `VACUUM (FULL, ANALYZE)` to return unused storage to the
+  filesystem, then resumes previously active roots.
+
 ## 1.2.41 - 2026-10-17
 
 - Populate the advanced JSON configuration editor automatically after a valid

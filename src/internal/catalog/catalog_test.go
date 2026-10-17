@@ -433,6 +433,21 @@ func TestCompactKeepsContentSearchAndTrimsStoredText(t *testing.T) {
 	}
 }
 
+func TestFullStorageReclaimIsPostgresOnly(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	if cat.SupportsFullStorageReclaim() {
+		t.Fatal("SQLite catalog unexpectedly supports PostgreSQL full reclaim")
+	}
+	if _, err := cat.ReclaimStorage(ctx, 64<<10); err == nil {
+		t.Fatal("SQLite full reclaim unexpectedly succeeded")
+	}
+}
+
 func TestUpdateExtractedContentRepairsInvalidUTF8(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())

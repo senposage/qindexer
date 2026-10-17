@@ -52,6 +52,7 @@ type Server struct {
 	resumeRoots    map[string]struct{}
 	repairMu       sync.RWMutex
 	repair         repairProgress
+	maintenanceMu  sync.Mutex
 	sidecarInstall sidecarInstallProgress
 }
 
@@ -202,6 +203,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("POST /admin/v1/config/validate", s.withAdminAuth(s.configValidate))
 	mux.HandleFunc("GET /admin/v1/metrics", s.withAdminAuth(s.metrics))
 	mux.HandleFunc("POST /admin/v1/index/compact", s.withAdminAuth(s.compactIndex))
+	mux.HandleFunc("POST /admin/v1/index/reclaim", s.withAdminAuth(s.reclaimIndexStorage))
 	mux.HandleFunc("GET /admin/v1/diagnostics", s.withAdminAuth(s.diagnostics))
 	mux.HandleFunc("GET /admin/v1/logs", s.withAdminAuth(s.logs))
 	mux.HandleFunc("POST /admin/v1/crawler/pause", s.withAdminAuth(s.pauseCrawler))
@@ -1109,7 +1111,11 @@ func (s *Server) removePreviousPathAliases(rootID string) (int, error) {
 }
 
 func (s *Server) stopAllCrawlsForMaintenance(operation, rootID string) (func(), []string, bool) {
-	until, resume := s.crawler.BeginMaintenance(10 * time.Minute)
+	return s.stopAllCrawlsForMaintenanceFor(operation, rootID, 10*time.Minute)
+}
+
+func (s *Server) stopAllCrawlsForMaintenanceFor(operation, rootID string, duration time.Duration) (func(), []string, bool) {
+	until, resume := s.crawler.BeginMaintenance(duration)
 	stats := s.crawler.Stats()
 	s.log.Info("crawler maintenance stop requested", "operation", operation, "root", rootID, "active_crawls", stats.ActiveCrawls, "paused_until", until)
 	interruptedRoots := s.crawler.CancelAll()
@@ -1699,6 +1705,11 @@ func backgroundBacklogPolicy(cfg *config.Config) catalog.BackgroundBacklogPolicy
 // exclusive write access for VACUUM, while PostgreSQL refreshes statistics after
 // text trimming. Crawls are checkpointed before either backend proceeds.
 func (s *Server) compactIndex(w http.ResponseWriter, r *http.Request) {
+	if !s.maintenanceMu.TryLock() {
+		writeError(w, http.StatusConflict, "index_maintenance_running", "index storage maintenance is already running; retry after it completes")
+		return
+	}
+	defer s.maintenanceMu.Unlock()
 	s.mu.RLock()
 	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
 	s.mu.RUnlock()
@@ -1720,6 +1731,42 @@ func (s *Server) compactIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("index compact completed", "maintenance", result.Maintenance, "trimmed_documents", result.TrimmedDocuments, "trimmed_text_bytes", result.TrimmedTextBytes, "before_bytes", result.Before.DatabaseBytes, "after_bytes", result.After.DatabaseBytes)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "compacted", "result": result})
+}
+
+// reclaimIndexStorage explicitly trades availability for PostgreSQL disk-space
+// reclamation. VACUUM FULL rewrites the database and requires exclusive locks,
+// so this endpoint is separate from the routine compact operation.
+func (s *Server) reclaimIndexStorage(w http.ResponseWriter, r *http.Request) {
+	if !s.cat.SupportsFullStorageReclaim() {
+		writeError(w, http.StatusBadRequest, "full_reclaim_unsupported", "full storage reclaim is available only when QIndexer uses PostgreSQL; SQLite optimize already reclaims unused pages")
+		return
+	}
+	if !s.maintenanceMu.TryLock() {
+		writeError(w, http.StatusConflict, "index_maintenance_running", "index storage maintenance is already running; retry after it completes")
+		return
+	}
+	defer s.maintenanceMu.Unlock()
+	s.mu.RLock()
+	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
+	s.mu.RUnlock()
+	s.log.Warn("index full storage reclaim requested", "max_stored_text_bytes", maxStoredTextBytes)
+	resume, activeRoots, ok := s.stopAllCrawlsForMaintenanceFor("index_full_reclaim", "", 6*time.Hour)
+	if !ok {
+		writeError(w, http.StatusConflict, "crawler_still_stopping", "crawler is still stopping; retry shortly")
+		return
+	}
+	defer func() {
+		resume()
+		s.scheduleRootCrawls(activeRoots, "index_full_reclaim")
+	}()
+	result, err := s.cat.ReclaimStorage(r.Context(), maxStoredTextBytes)
+	if err != nil {
+		s.log.Error("index full storage reclaim failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "index_full_reclaim_failed", err.Error())
+		return
+	}
+	s.log.Info("index full storage reclaim completed", "maintenance", result.Maintenance, "before_bytes", result.Before.DatabaseBytes, "after_bytes", result.After.DatabaseBytes, "reclaimed_bytes", result.ReclaimedBytes)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "reclaimed", "result": result})
 }
 
 func indexSizeBytes(dataDir string) (int64, error) {

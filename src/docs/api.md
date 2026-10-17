@@ -417,8 +417,9 @@ entries are normalized when QIndexer loads the configuration.
 
 Runs a storage-maintenance pass. QIndexer checkpoints and pauses active crawls,
 trims legacy document text above `max_stored_text_kb`, then optimizes the active
-catalog. SQLite uses `VACUUM`; PostgreSQL uses `ANALYZE`. Crawls that were active
-before maintenance are scheduled again afterward.
+catalog. SQLite uses `PRAGMA optimize`, a WAL checkpoint, and `VACUUM`;
+PostgreSQL uses `VACUUM (ANALYZE)`. Crawls that were active before maintenance
+are scheduled again afterward.
 
 The operation can take time. SQLite may need temporary free disk space while
 rewriting the database. It does not read, change, or delete source files.
@@ -433,6 +434,30 @@ Response:
     "trimmed_text_bytes": 7340032,
     "before": {"database_bytes": 9000000000, "free_bytes": 2000000000},
     "after": {"database_bytes": 5100000000, "free_bytes": 0}
+  }
+}
+```
+
+### POST /admin/v1/index/reclaim
+
+PostgreSQL only. Runs `VACUUM (FULL, ANALYZE)` across the QIndexer database to
+return unused database space to the filesystem. This is intentionally separate
+from routine optimize because it rewrites tables and indexes, pauses all
+crawlers, and may block search and admin database reads until it completes.
+
+The endpoint returns `400 full_reclaim_unsupported` for SQLite because the
+normal compact operation already runs SQLite's file-reclaiming `VACUUM`.
+
+Response:
+
+```json
+{
+  "status": "reclaimed",
+  "result": {
+    "maintenance": "postgres_vacuum_full_analyze",
+    "reclaimed_bytes": 2147483648,
+    "before": {"database_bytes": 9000000000},
+    "after": {"database_bytes": 6852516352}
   }
 }
 ```

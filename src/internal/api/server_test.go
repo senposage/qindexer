@@ -130,6 +130,24 @@ func TestMetricsIncludesIndexSize(t *testing.T) {
 	}
 }
 
+func TestFullStorageReclaimRejectsSQLite(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	cfg := &config.Config{Index: sqliteTestIndex(), Management: config.ManagementConfig{Auth: config.AuthConfig{Mode: "admin-token", Token: "sixteen-character-token"}}}
+	server := New(cfg, filepath.Join(t.TempDir(), "config.yaml"), cat, crawler.New(cfg, cat, slog.New(slog.NewTextHandler(io.Discard, nil))), slog.New(slog.NewTextHandler(io.Discard, nil)), "sixteen-character-token", "sixteen-character-token")
+	req := httptest.NewRequest(http.MethodPost, "/admin/v1/index/reclaim", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer sixteen-character-token")
+	result := httptest.NewRecorder()
+	server.AdminHandler().ServeHTTP(result, req)
+	if result.Code != http.StatusBadRequest || !bytes.Contains(result.Body.Bytes(), []byte(`"full_reclaim_unsupported"`)) {
+		t.Fatalf("expected SQLite full reclaim rejection, got %d: %s", result.Code, result.Body.String())
+	}
+}
+
 func TestConfigViewAndExportRedactDatabaseDSN(t *testing.T) {
 	ctx := context.Background()
 	cat, err := catalog.Open(ctx, filepath.Join(t.TempDir(), "data"))

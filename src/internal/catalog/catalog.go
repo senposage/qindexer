@@ -144,6 +144,16 @@ type CompactResult struct {
 	Maintenance      string       `json:"maintenance"`
 }
 
+// ReclaimResult describes an explicit full PostgreSQL storage rewrite.
+// PostgreSQL VACUUM FULL reclaims filesystem space but blocks normal access
+// while it rewrites catalog tables and indexes.
+type ReclaimResult struct {
+	Before         StorageStats `json:"before"`
+	After          StorageStats `json:"after"`
+	ReclaimedBytes int64        `json:"reclaimed_bytes"`
+	Maintenance    string       `json:"maintenance"`
+}
+
 type Document struct {
 	ID                 string              `json:"id"`
 	ResultID           string              `json:"result_id"`
@@ -554,6 +564,40 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 		result.Maintenance = "sqlite_optimize_checkpoint_vacuum"
 	}
 	result.After, err = c.storageStats(ctx, maxTextBytes, true)
+	return result, err
+}
+
+// SupportsFullStorageReclaim reports whether the active backend can shrink
+// its database files with an explicit full vacuum. SQLite's normal Compact
+// already performs its file-reclaiming VACUUM sequence.
+func (c *Catalog) SupportsFullStorageReclaim() bool {
+	return c != nil && c.db != nil && c.db.backend == backendPostgres
+}
+
+// ReclaimStorage runs a whole-database VACUUM FULL for PostgreSQL. Unlike
+// standard VACUUM, it rewrites tables and indexes to return free space to the
+// filesystem. Callers must quiesce crawlers and accept the exclusive lock.
+func (c *Catalog) ReclaimStorage(ctx context.Context, maxTextBytes int64) (ReclaimResult, error) {
+	if !c.SupportsFullStorageReclaim() {
+		return ReclaimResult{}, fmt.Errorf("full storage reclaim is only supported by PostgreSQL")
+	}
+	if maxTextBytes <= 0 {
+		maxTextBytes = 1 << 20
+	}
+	before, err := c.storageStats(ctx, maxTextBytes, true)
+	if err != nil {
+		return ReclaimResult{}, err
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	result := ReclaimResult{Before: before, Maintenance: "postgres_vacuum_full_analyze"}
+	if _, err := c.db.ExecContext(ctx, `VACUUM (FULL, ANALYZE)`); err != nil {
+		return result, err
+	}
+	result.After, err = c.storageStats(ctx, maxTextBytes, true)
+	if err == nil && result.Before.DatabaseBytes > result.After.DatabaseBytes {
+		result.ReclaimedBytes = result.Before.DatabaseBytes - result.After.DatabaseBytes
+	}
 	return result, err
 }
 

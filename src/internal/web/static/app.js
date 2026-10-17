@@ -112,6 +112,7 @@ document.querySelector("#indexing-settings-form").addEventListener("submit", sav
 document.querySelector("#settings-ocr").addEventListener("change", ensureOCRDependencies);
 document.querySelector("#install-ocr-sidecars").addEventListener("click", () => installOCRDependencies());
 document.querySelector("#compact-index").addEventListener("click", compactIndex);
+document.querySelector("#reclaim-index").addEventListener("click", reclaimIndexStorage);
 document.querySelector("#load-editable-config").addEventListener("click", loadEditableConfig);
 document.querySelector("#save-editable-config").addEventListener("click", saveEditableConfig);
 document.querySelector("#editable-config").addEventListener("input", () => {
@@ -785,13 +786,15 @@ function indexStorageMaintenance() {
     return {
       label: "PostgreSQL index storage",
       button: "Optimize PostgreSQL storage",
-      description: "Trims legacy text, then runs PostgreSQL VACUUM (ANALYZE). Freed space becomes reusable inside PostgreSQL; this does not run VACUUM FULL or force the database files to shrink. Crawls pause and resume automatically.",
+	  reclaim: true,
+      description: "Trims legacy text, then runs PostgreSQL VACUUM (ANALYZE). Freed space becomes reusable inside PostgreSQL; use Reclaim PostgreSQL disk space for a full database rewrite when physical space must be returned. Crawls pause and resume automatically.",
       confirmation: "This uses standard VACUUM (ANALYZE), not VACUUM FULL, so the live catalog is not rewritten.",
     };
   }
   return {
     label: "SQLite index storage",
     button: "Optimize SQLite storage",
+	  reclaim: false,
     description: "Trims legacy text, runs PRAGMA optimize, checkpoints the WAL, and vacuums unused SQLite pages. Crawls pause and resume automatically.",
     confirmation: "This can take time and temporarily needs free disk space.",
   };
@@ -802,6 +805,7 @@ function renderIndexStorageSettings(index) {
   const maintenance = indexStorageMaintenance();
   document.querySelector("#storage-maintenance-description").textContent = maintenance.description;
   document.querySelector("#compact-index").textContent = maintenance.button;
+  document.querySelector("#reclaim-index").classList.toggle("hidden", maintenance.reclaim !== true);
 }
 
 function renderNetworkSettings(network) {
@@ -941,6 +945,30 @@ async function compactIndex() {
   } finally {
     button.disabled = false;
     button.textContent = indexStorageMaintenance().button;
+  }
+}
+
+async function reclaimIndexStorage() {
+  const maintenance = indexStorageMaintenance();
+  if (!maintenance.reclaim) return;
+  const warning = "Reclaim PostgreSQL disk space now? This runs VACUUM FULL (ANALYZE), which rewrites the database, pauses all crawls, and can block searches and admin database reads until it finishes. It may take a long time on a large index.";
+  if (!window.confirm(warning)) return;
+  const button = document.querySelector("#reclaim-index");
+  const optimizeButton = document.querySelector("#compact-index");
+  button.disabled = true;
+  optimizeButton.disabled = true;
+  button.textContent = "Reclaiming disk space...";
+  setMessage("Reclaiming PostgreSQL disk space; crawls are paused and database access may wait...");
+  try {
+    const data = await api("/admin/v1/index/reclaim", { method: "POST", body: "{}", timeoutMs: 4 * 60 * 60 * 1000 });
+    const result = data.result || {};
+    await refresh({ quiet: true, message: `PostgreSQL disk space reclaimed: ${formatBytes(result.before?.database_bytes || 0)} to ${formatBytes(result.after?.database_bytes || 0)} (${formatBytes(result.reclaimed_bytes || 0)} returned)` });
+  } catch (err) {
+    setMessage(err.message);
+  } finally {
+    button.disabled = false;
+    optimizeButton.disabled = false;
+    button.textContent = "Reclaim PostgreSQL disk space";
   }
 }
 
