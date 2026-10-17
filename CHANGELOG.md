@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.35 - 2026-10-17
+
+- Fix the content/OCR claim query to normalize dotted admin extensions such as
+  `.png` and `.pdf` to the catalog's bare extension form before SQL matching.
+  Previously, excluded files could be claimed, released, and immediately
+  claimed again, leaving content workers busy without extracting anything.
+- Apply the same normalization to actionable-backlog totals so the dashboard
+  agrees with the worker claim rules.
+
 ## 1.2.34 - 2026-10-16
 
 - Contain third-party content-parser panics to the individual file that caused

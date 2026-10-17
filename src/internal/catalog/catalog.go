@@ -65,9 +65,28 @@ type BackgroundBacklogPolicy struct {
 func stringSet(values []string) map[string]bool {
 	set := make(map[string]bool, len(values))
 	for _, value := range values {
-		set[value] = true
+		if value = canonicalExtension(value); value != "" {
+			set[value] = true
+		}
 	}
 	return set
+}
+
+// canonicalExtension matches the on-disk catalog representation. Admin rules
+// use dotted extensions (for example .pdf), while documents store bare values
+// (pdf); SQL eligibility checks must use the latter form.
+func canonicalExtension(value string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+
+func canonicalExtensions(values []string) []string {
+	set := stringSet(values)
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 type backgroundBacklogCache struct {
@@ -2249,6 +2268,8 @@ func (c *Catalog) claimBackground(ctx context.Context, column, pending, claimed,
 	if len(rootIDs) == 0 || limit <= 0 || maxSize <= 0 {
 		return nil, nil
 	}
+	extensions = canonicalExtensions(extensions)
+	excludedExtensions = canonicalExtensions(excludedExtensions)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	tx, err := c.db.BeginTx(ctx, nil)

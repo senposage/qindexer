@@ -230,12 +230,12 @@ func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 		t.Fatalf("unexpected backlog: %#v", backlog)
 	}
 	cat.InvalidateBackgroundBacklog()
-	backlog, err = cat.BackgroundBacklog(ctx, map[string][]string{"root": {"pdf"}}, nil)
+	backlog, err = cat.BackgroundBacklog(ctx, map[string][]string{"root": {".pdf"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if backlog.Content != 0 || backlog.OCR != 1 || backlog.Hash != 2 {
-		t.Fatalf("exclusion-aware backlog = %#v", backlog)
+		t.Fatalf("dotted exclusion-aware backlog = %#v", backlog)
 	}
 }
 
@@ -1044,9 +1044,9 @@ func TestBackgroundClaimsExcludeConfiguredExtensions(t *testing.T) {
 			}
 		}
 	}
-	content, err := cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024, []string{"jpg"})
+	content, err := cat.ClaimPendingContent(ctx, []string{"root"}, 10, 1024, []string{".jpg"})
 	if err != nil || len(content) != 2 {
-		t.Fatalf("content claims = %#v, %v", content, err)
+		t.Fatalf("dotted content exclusion claims = %#v, %v", content, err)
 	}
 	for _, item := range content {
 		if item.Path == `D:\\file-jpg.jpg` {
