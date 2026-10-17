@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.44 - 2026-10-17
+
+- Keep excluded files and folder subtrees out of watcher registration, hot
+  folder selection, and queued filesystem hints. File exclusions only suppress
+  the matching files; their parent folders remain eligible to watch.
+
 ## 1.2.43 - 2026-10-17
 
 - Clarify global and root file-filter help with persistent wildcard examples,

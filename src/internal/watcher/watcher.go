@@ -218,7 +218,7 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 				// Windows can report CREATE for a directory that is already being
 				// watched. Only a truly new directory needs a recursive discovery
 				// pass; an existing watched directory is a shallow metadata refresh.
-				recursive = w.tryWatchCreatedDirectory(ctx, set, event.Name, rootID)
+				recursive = w.tryWatchCreatedDirectory(ctx, set, cfg, event.Name, rootID)
 			}
 			w.recordEvent()
 			mu.Lock()
@@ -247,7 +247,7 @@ func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Co
 	rootIDs := enabledRootIDs(cfg)
 	perRootCandidateLimit := topLevelCandidateLimit(set, len(rootIDs))
 	for _, root := range cfg.Roots {
-		if !root.Enabled {
+		if !root.Enabled || !w.directoryWatchAllowed(cfg, root, root.Path) {
 			continue
 		}
 		paths, err := expandRootPathsWithTimeout(ctx, root.Path)
@@ -260,6 +260,9 @@ func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Co
 			continue
 		}
 		for _, path := range paths {
+			if !w.directoryWatchAllowed(cfg, root, path) {
+				continue
+			}
 			if !set.add(ctx, path, root.ID, true) {
 				if set.lastError != "" {
 					w.log.Warn("watch root unavailable", "root", root.ID, "path", path, "error", set.lastError)
@@ -278,7 +281,7 @@ func (w *Watcher) seedWatches(ctx context.Context, set *watchSet, cfg *config.Co
 			for _, entry := range entries {
 				if entry.IsDir() {
 					candidate := filepath.Join(path, entry.Name())
-					if !w.shouldIgnore(candidate) {
+					if w.directoryWatchAllowed(cfg, root, candidate) {
 						topLevel[root.ID] = append(topLevel[root.ID], candidate)
 					}
 				}
@@ -315,7 +318,7 @@ func (w *Watcher) addHotWatches(ctx context.Context, set *watchSet, cfg *config.
 	candidates := map[string][]string{}
 	for _, item := range hot {
 		root, ok := roots[item.RootID]
-		if !ok || !crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, item.Path, "", true) {
+		if !ok || !w.directoryWatchAllowed(cfg, root, item.Path) {
 			continue
 		}
 		candidates[item.RootID] = append(candidates[item.RootID], item.Path)
@@ -587,14 +590,8 @@ func actionableEvent(event fsnotify.Event) bool {
 // only enabled content/OCR work earns an immediate write-triggered refresh.
 func (w *Watcher) shouldQueueEvent(cfg *config.Config, rootID string, event fsnotify.Event) bool {
 	path := event.Name
-	var root config.RootConfig
-	for _, candidate := range cfg.Roots {
-		if candidate.ID == rootID {
-			root = candidate
-			break
-		}
-	}
-	if root.ID == "" || (cfg.Crawler.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) {
+	root, ok := rootConfig(cfg, rootID)
+	if !ok || (cfg.Crawler.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) {
 		return false
 	}
 	extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
@@ -606,13 +603,14 @@ func (w *Watcher) shouldQueueEvent(cfg *config.Config, rootID string, event fsno
 		if !allowedFolder {
 			return false
 		}
-	} else if !allowedFile {
-		// A file rule must win for names such as Office's ~$ temporary files.
-		// If a create arrives before stat succeeds, only extension-less names
-		// may be an as-yet-unavailable directory.
-		if statErr != nil && extension == "" && allowedFolder {
-			return event.Has(fsnotify.Create) || event.Has(fsnotify.Rename)
+	} else if statErr != nil && extension == "" {
+		// A create notification can arrive just before stat succeeds. Admit it
+		// only when neither file nor directory rules exclude the path. This
+		// keeps an excluded directory from briefly entering the hint queue.
+		if !allowedFile || !allowedFolder {
+			return false
 		}
+	} else if !allowedFile {
 		return false
 	}
 	if event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
@@ -636,8 +634,60 @@ func watchExtensionExcluded(extension string, exclusions []string) bool {
 	return false
 }
 
-func (w *Watcher) tryWatchCreatedDirectory(ctx context.Context, set *watchSet, path string, rootID string) bool {
-	if w.shouldIgnore(path) {
+func rootConfig(cfg *config.Config, rootID string) (config.RootConfig, bool) {
+	for _, root := range cfg.Roots {
+		if root.ID == rootID && root.Enabled {
+			return root, true
+		}
+	}
+	return config.RootConfig{}, false
+}
+
+// directoryWatchAllowed guards only directory registration. File exclusions
+// never disqualify a parent directory from being watched.
+func (w *Watcher) directoryWatchAllowed(cfg *config.Config, root config.RootConfig, path string) bool {
+	return !w.shouldIgnore(path) && crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, "", true)
+}
+
+// filterEligibleHints is a second admission gate for queued events. It covers
+// hints that outlive a configuration reload and ensures excluded paths never
+// accumulate activity or trigger a lightweight crawl.
+func (w *Watcher) filterEligibleHints(cfg *config.Config, rootID string, paths map[string]dirtyPath) map[string]dirtyPath {
+	root, ok := rootConfig(cfg, rootID)
+	if !ok || len(paths) == 0 {
+		return nil
+	}
+	accepted := make(map[string]dirtyPath, len(paths))
+	for key, dirty := range paths {
+		path := filepath.Clean(dirty.path)
+		if w.hintPathAllowed(cfg, root, path) {
+			accepted[key] = dirty
+		}
+	}
+	return accepted
+}
+
+func (w *Watcher) hintPathAllowed(cfg *config.Config, root config.RootConfig, path string) bool {
+	if w.shouldIgnore(path) || (cfg.Crawler.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err == nil && info.IsDir() {
+		return crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, "", true)
+	}
+	extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	if err == nil || extension != "" {
+		return crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, extension, false)
+	}
+	// A vanished extension-less path could have been either kind. Be
+	// conservative: retain it only when both file and folder rules allow it.
+	return crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, "", false) &&
+		crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, "", true)
+}
+
+func (w *Watcher) tryWatchCreatedDirectory(ctx context.Context, set *watchSet, cfg *config.Config, path string, rootID string) bool {
+	root, ok := rootConfig(cfg, rootID)
+	if !ok || !w.directoryWatchAllowed(cfg, root, path) {
 		return false
 	}
 	path = filepath.Clean(path)
@@ -661,6 +711,10 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 		return false
 	}
 	cfg := w.snapshot()
+	paths = w.filterEligibleHints(cfg, rootID, paths)
+	if len(paths) == 0 {
+		return true
+	}
 	paths = w.filterRecentHints(rootID, paths, cfg.Watcher.HintCooldown())
 	if len(paths) == 0 {
 		return true

@@ -114,3 +114,44 @@ func TestShouldQueueEventAvoidsNoiseButRefreshesEligibleEnrichment(t *testing.T)
 		t.Fatal("attribute-only event was queued")
 	}
 }
+
+func TestExcludedPathsNeverBecomeHintsOrDirectoryWatches(t *testing.T) {
+	rootPath := t.TempDir()
+	privateDir := filepath.Join(rootPath, "Private")
+	if err := os.Mkdir(privateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	excludedFile := filepath.Join(rootPath, ".temp_writeABCD$")
+	if err := os.WriteFile(excludedFile, []byte("temporary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryFile := filepath.Join(rootPath, "brief.txt")
+	if err := os.WriteFile(ordinaryFile, []byte("matter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "root", Path: rootPath, Enabled: true, ExcludeFolderPatterns: []string{"**/Private/**"}}}, Crawler: config.CrawlerConfig{
+		ExcludeFilePatterns: []string{".temp_write*"},
+	}}
+	w := &Watcher{}
+	root, ok := rootConfig(cfg, "root")
+	if !ok {
+		t.Fatal("enabled root was not found")
+	}
+	if w.directoryWatchAllowed(cfg, root, privateDir) {
+		t.Fatal("excluded folder was eligible for a directory watch")
+	}
+	if !w.directoryWatchAllowed(cfg, root, rootPath) {
+		t.Fatal("file exclusion incorrectly made the parent directory ineligible")
+	}
+	paths := w.filterEligibleHints(cfg, "root", map[string]dirtyPath{
+		excludedFile: {path: excludedFile},
+		privateDir:   {path: privateDir, recursive: true},
+		ordinaryFile: {path: ordinaryFile},
+	})
+	if len(paths) != 1 || paths[ordinaryFile].path != ordinaryFile {
+		t.Fatalf("eligible hints = %#v, want only ordinary file", paths)
+	}
+	if w.shouldQueueEvent(cfg, "root", fsnotify.Event{Name: privateDir, Op: fsnotify.Create}) {
+		t.Fatal("excluded folder create was queued")
+	}
+}
