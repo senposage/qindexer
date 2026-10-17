@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.39 - 2026-10-17
+
+- Batch coalesced filesystem hints per root into durable metadata writes,
+  avoiding a database transaction and crawl generation for each individual
+  notification.
+- Ignore attribute-only and removal notifications. A modified file triggers an
+  immediate refresh only when enabled content extraction or OCR can use it;
+  ordinary metadata changes wait for normal reconciliation.
+- Back off empty content, OCR, and hash claim passes from one second to a
+  thirty-second ceiling, lowering idle PostgreSQL activity without delaying
+  active queues.
+- Verify that content and OCR updates replace existing extracted text rather
+  than accumulating duplicate enrichment data.
+
 ## 1.2.37 - 2026-10-17
 
 - Introduce explicit enrichment routing: OCR-enabled PDFs and raster images
