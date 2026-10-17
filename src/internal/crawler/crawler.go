@@ -96,6 +96,15 @@ type backgroundJob struct {
 	epoch                       uint64
 }
 
+// HintPath is one coalesced filesystem notification. A batch is deliberately
+// advisory: removals do not change missing state, and recursive entries only
+// occur when the watcher discovers a newly-created directory.
+type HintPath struct {
+	Path      string
+	Removed   bool
+	Recursive bool
+}
+
 // backgroundWork is per-root so an operator action on one root cannot
 // interrupt extraction, OCR, or hashing for every other root.
 type backgroundWork struct {
@@ -932,22 +941,25 @@ func (c *Crawler) beginRootWork(parent context.Context, rootID string) (context.
 }
 
 func (c *Crawler) CrawlHint(ctx context.Context, rootID string, path string, removed bool) (catalog.CrawlRun, error) {
-	root, ok := c.rootByID(rootID)
-	if !ok {
-		return catalog.CrawlRun{}, os.ErrNotExist
-	}
-	return c.crawlHint(ctx, root, path, removed, true)
+	return c.CrawlHintBatch(ctx, rootID, []HintPath{{Path: path, Removed: removed, Recursive: true}})
 }
 
 // CrawlHintShallow refreshes only the changed entry. Filesystem notifications
 // for an already watched directory commonly mean that a child changed; walking
 // that directory recursively would turn one event into a subtree recrawl.
 func (c *Crawler) CrawlHintShallow(ctx context.Context, rootID string, path string, removed bool) (catalog.CrawlRun, error) {
+	return c.CrawlHintBatch(ctx, rootID, []HintPath{{Path: path, Removed: removed}})
+}
+
+// CrawlHintBatch stages coalesced watcher paths into one lightweight crawl
+// run. It preserves prompt metadata freshness without turning an event burst
+// into one database transaction and generation per path.
+func (c *Crawler) CrawlHintBatch(ctx context.Context, rootID string, paths []HintPath) (catalog.CrawlRun, error) {
 	root, ok := c.rootByID(rootID)
 	if !ok {
 		return catalog.CrawlRun{}, os.ErrNotExist
 	}
-	return c.crawlHint(ctx, root, path, removed, false)
+	return c.crawlHintBatch(ctx, root, paths)
 }
 
 func (c *Crawler) CrawlAll(ctx context.Context) []catalog.CrawlRun {
@@ -1291,47 +1303,75 @@ func startCrawlerRoutine(ctx context.Context, workers *sync.WaitGroup, log *slog
 	}()
 }
 
+const (
+	backgroundRefillActiveInterval = time.Second
+	backgroundRefillIdleCeiling    = 30 * time.Second
+)
+
 func (c *Crawler) refillBackgroundLoop(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	delay := time.Duration(0)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-		c.refillBackground(ctx)
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
+		queued, eligible := c.refillBackground(ctx)
+		delay = nextBackgroundRefillDelay(delay, queued, eligible)
+		timer.Reset(delay)
 	}
 }
 
-func (c *Crawler) refillBackground(ctx context.Context) {
+// nextBackgroundRefillDelay backs off database claims after repeated empty
+// passes. Native watcher hints and full crawls still wake the next scheduler
+// pass quickly because an ineligible pass retains the active interval.
+func nextBackgroundRefillDelay(previous time.Duration, queued, eligible bool) time.Duration {
+	if queued || !eligible {
+		return backgroundRefillActiveInterval
+	}
+	if previous < backgroundRefillActiveInterval {
+		return backgroundRefillActiveInterval
+	}
+	return min(previous*2, backgroundRefillIdleCeiling)
+}
+
+func (c *Crawler) refillBackground(ctx context.Context) (queued, eligible bool) {
 	// Structural indexing has priority over every enrichment queue. Watcher
 	// hints are deliberately excluded: frequent, short-lived hints must not
 	// starve enrichment indefinitely on an otherwise idle root.
 	if c.InMaintenance() || c.IsPaused() || c.IsAdaptivePaused() || c.HasActiveFullCrawls() {
-		return
+		return false, false
 	}
 	content := c.snapshot().Crawler.ContentExtraction
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled)
 	}); len(rootIDs) > 0 {
+		eligible = true
+		before := len(c.contentJobs)
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.contentJobs, content.MaxFileSizeMB<<20, c.cat.ClaimPendingContent, c.cat.ClaimRetryContent, "content", c.contentExcludedExtensions)
+		queued = queued || len(c.contentJobs) > before
 	}
 	ocr := c.snapshot().Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
+		eligible = true
+		before := len(c.ocrJobs)
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR", c.ocrExcludedExtensions)
+		queued = queued || len(c.ocrJobs) > before
 	}
 	hashing := c.snapshot().Crawler.Hashing
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
 		return !c.IsRootRunning(root.ID) && root.HashingEnabled(hashing.Enabled)
 	}); len(rootIDs) > 0 {
+		eligible = true
+		before := len(c.hashJobs)
 		c.fillBackground(ctx, rootIDs, c.hashJobs, hashing.MaxFileSizeMB<<20, c.cat.ClaimPendingHashes, "hash", nil)
+		queued = queued || len(c.hashJobs) > before
 	}
+	return queued, eligible
 }
 
 func (c *Crawler) waitForEnrichmentWindow(ctx context.Context, rootID string) error {
@@ -1771,7 +1811,7 @@ func (c *Crawler) crawlWithRootWork(ctx context.Context, root config.RootConfig,
 	return run, walkErr
 }
 
-func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path string, removed, recursive bool) (catalog.CrawlRun, error) {
+func (c *Crawler) crawlHintBatch(ctx context.Context, root config.RootConfig, paths []HintPath) (catalog.CrawlRun, error) {
 	if atomic.LoadInt64(&c.maintenance) > 0 {
 		return catalog.CrawlRun{RootID: root.ID, Status: "maintenance_paused", ErrorMessage: "crawler maintenance in progress"}, nil
 	}
@@ -1787,7 +1827,11 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 		return catalog.CrawlRun{RootID: root.ID, Status: "already_running"}, nil
 	}
 	defer finish()
-	defer c.beginProgress(root.ID, path)()
+	progressPath := root.Path
+	if len(paths) > 0 {
+		progressPath = paths[0].Path
+	}
+	defer c.beginProgress(root.ID, progressPath)()
 	atomic.AddInt64(&c.activeCrawls, 1)
 	atomic.AddInt64(&c.hintCrawls, 1)
 	atomic.StoreInt64(&c.lastActivity, time.Now().Unix())
@@ -1806,73 +1850,143 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	if err := c.cat.StartCrawl(ctx, run); err != nil {
 		return run, err
 	}
-	if removed {
-		// A filesystem notification is only a hint. Network shares and editors
-		// routinely emit rename/remove sequences for paths that reappear moments
-		// later, so let a successful full reconciliation establish missing state.
-		run.Status = "hint_ok"
-		_ = c.finishCrawl(ctx, run)
-		return run, nil
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		run.Status = "hint_unreachable"
-		run.ErrorMessage = err.Error()
-		run.Errors = 1
-		_ = c.finishCrawl(ctx, run)
-		return run, nil
-	}
-
 	settings := c.snapshot().Crawler
-	extension := ""
-	if !info.IsDir() {
-		extension = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-	}
-	if (settings.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) || !PathAllowedWithGlobalRules(root, settings, path, extension, info.IsDir()) {
-		run.Status = "hint_ignored"
-		_ = c.finishCrawl(ctx, run)
-		return run, nil
-	}
-	jobs := make(chan string, settings.MetadataQueueSize)
+	jobCapacity := max(32, min(settings.MetadataQueueSize, max(32, len(paths)*2)))
+	jobs := make(chan string, jobCapacity)
 	var filesSeen, filesAdded, filesUpdated, filesUnchanged, errorsCount int64
-	var workers sync.WaitGroup
-	for i := 0; i < settings.MetadataWorkerCount; i++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for p := range jobs {
-				if c.waitIfPaused(ctx, true) != nil {
-					return
+	var worker sync.WaitGroup
+	worker.Add(1)
+	go func() {
+		defer worker.Done()
+		batchSize := min(256, max(32, settings.IndexBatchSize))
+		batch := make([]catalog.Document, 0, batchSize)
+		flush := func() bool {
+			if len(batch) == 0 {
+				return true
+			}
+			results, err := c.cat.UpsertDocuments(ctx, batch)
+			if err != nil {
+				if !isCrawlerCancellation(ctx, err) {
+					atomic.AddInt64(&errorsCount, int64(len(batch)))
+					c.log.Warn("hint metadata batch index failed", "root", root.ID, "entries", len(batch), "error", err)
 				}
-				res, err := c.indexPath(ctx, root, p, generation)
-				if err != nil {
-					if isCrawlerCancellation(ctx, err) {
-						return
-					}
-					atomic.AddInt64(&errorsCount, 1)
-					c.log.Warn("hint metadata index failed", "root", root.ID, "path", p, "error", err)
-					continue
-				}
+				return false
+			}
+			for _, result := range results {
 				atomic.AddInt64(&filesSeen, 1)
-				if res.Added {
+				if result.Added {
 					atomic.AddInt64(&filesAdded, 1)
-				} else if res.Updated {
+				} else if result.Updated {
 					atomic.AddInt64(&filesUpdated, 1)
-				} else if res.Unchanged {
+				} else if result.Unchanged {
 					atomic.AddInt64(&filesUnchanged, 1)
 				}
 			}
-		}()
+			batch = batch[:0]
+			return true
+		}
+		for path := range jobs {
+			if c.waitIfPaused(ctx, true) != nil {
+				return
+			}
+			doc, indexable, err := c.describePath(root, path, generation)
+			if err != nil {
+				if !isCrawlerCancellation(ctx, err) && !errors.Is(err, fs.ErrNotExist) {
+					atomic.AddInt64(&errorsCount, 1)
+					c.logSuppressed("hint-metadata:"+root.ID+":"+path, "hint metadata read failed", err.Error(), 5*time.Minute, "root", root.ID, "path", path, "error", err)
+				}
+				continue
+			}
+			if !indexable {
+				atomic.AddInt64(&filesSeen, 1)
+				atomic.AddInt64(&filesUnchanged, 1)
+				continue
+			}
+			batch = append(batch, doc)
+			if len(batch) >= batchSize && !flush() {
+				return
+			}
+		}
+		flush()
+	}()
+
+	var recursive, shallow []string
+	seen := map[string]bool{}
+	activeHints := 0
+	ignoredHints := 0
+	unavailableHints := 0
+	var firstUnavailable error
+	for _, hint := range paths {
+		if hint.Removed {
+			// A filesystem notification is only a hint. Rename/remove sequences
+			// often reappear moments later, so reconciliation owns missing state.
+			continue
+		}
+		activeHints++
+		path := filepath.Clean(hint.Path)
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		info, err := os.Stat(path)
+		if err != nil {
+			unavailableHints++
+			if firstUnavailable == nil {
+				firstUnavailable = err
+			}
+			atomic.AddInt64(&errorsCount, 1)
+			if !errors.Is(err, fs.ErrNotExist) {
+				c.logSuppressed("hint-stat:"+root.ID+":"+path, "hint path unavailable", err.Error(), 5*time.Minute, "root", root.ID, "path", path, "error", err)
+			}
+			continue
+		}
+		extension := ""
+		if !info.IsDir() {
+			extension = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+		}
+		if (settings.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) || !PathAllowedWithGlobalRules(root, settings, path, extension, info.IsDir()) {
+			ignoredHints++
+			continue
+		}
+		if info.IsDir() && hint.Recursive {
+			recursive = append(recursive, path)
+		} else {
+			shallow = append(shallow, path)
+		}
+	}
+	if len(recursive) == 0 && len(shallow) == 0 {
+		close(jobs)
+		worker.Wait()
+		run.Errors = atomic.LoadInt64(&errorsCount)
+		switch {
+		case activeHints > 0 && unavailableHints == activeHints:
+			run.Status = "hint_unreachable"
+			if firstUnavailable != nil {
+				run.ErrorMessage = firstUnavailable.Error()
+			}
+		case activeHints > 0 && ignoredHints+unavailableHints == activeHints:
+			run.Status = "hint_ignored"
+		default:
+			run.Status = "hint_ok"
+		}
+		if err := c.finishCrawl(ctx, run); err != nil {
+			return run, err
+		}
+		return run, nil
 	}
 	var walkErr error
-	if info.IsDir() && recursive {
-		walkErr = c.walkPaths(ctx, root, []string{path}, jobs, &errorsCount, generation, false, false, true, settings.DirectoryWorkerCount)
-	} else {
-		walkErr = sendPath(ctx, jobs, path)
+	if len(recursive) > 0 {
+		walkErr = c.walkPaths(ctx, root, recursive, jobs, &errorsCount, generation, false, false, true, 1)
+	}
+	if walkErr == nil {
+		for _, path := range shallow {
+			if walkErr = sendPath(ctx, jobs, path); walkErr != nil {
+				break
+			}
+		}
 	}
 	close(jobs)
-	workers.Wait()
+	worker.Wait()
 
 	run.FilesSeen = atomic.LoadInt64(&filesSeen)
 	run.FilesAdded = atomic.LoadInt64(&filesAdded)
@@ -1890,7 +2004,7 @@ func (c *Crawler) crawlHint(ctx context.Context, root config.RootConfig, path st
 	if err := c.finishCrawl(ctx, run); err != nil {
 		return run, err
 	}
-	c.log.Info("hint crawl finished", "root", root.ID, "path", path, "status", run.Status, "seen", run.FilesSeen, "added", run.FilesAdded, "updated", run.FilesUpdated, "missing", run.FilesMissing, "errors", run.Errors)
+	c.log.Info("hint batch finished", "root", root.ID, "paths", len(paths), "status", run.Status, "seen", run.FilesSeen, "added", run.FilesAdded, "updated", run.FilesUpdated, "missing", run.FilesMissing, "errors", run.Errors)
 	return run, walkErr
 }
 

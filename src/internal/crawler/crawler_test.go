@@ -46,6 +46,24 @@ func TestExpandRootPathsRejectsEmptyGlob(t *testing.T) {
 	}
 }
 
+func TestNextBackgroundRefillDelayBacksOffOnlyAfterEmptyEligiblePasses(t *testing.T) {
+	if got := nextBackgroundRefillDelay(0, false, true); got != time.Second {
+		t.Fatalf("initial empty delay = %v, want 1s", got)
+	}
+	if got := nextBackgroundRefillDelay(time.Second, false, true); got != 2*time.Second {
+		t.Fatalf("second empty delay = %v, want 2s", got)
+	}
+	if got := nextBackgroundRefillDelay(20*time.Second, false, true); got != backgroundRefillIdleCeiling {
+		t.Fatalf("capped empty delay = %v, want %v", got, backgroundRefillIdleCeiling)
+	}
+	if got := nextBackgroundRefillDelay(20*time.Second, true, true); got != time.Second {
+		t.Fatalf("queued work delay = %v, want 1s", got)
+	}
+	if got := nextBackgroundRefillDelay(20*time.Second, false, false); got != time.Second {
+		t.Fatalf("ineligible delay = %v, want 1s", got)
+	}
+}
+
 func TestExtensionPoliciesMatchDottedAndLegacyEntries(t *testing.T) {
 	if !extensionAllowed(config.RootConfig{IncludeExtensions: []string{".xml"}}, "xml") {
 		t.Fatal("dotted include policy should match a filename extension")

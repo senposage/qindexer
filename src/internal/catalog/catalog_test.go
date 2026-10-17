@@ -456,6 +456,34 @@ func TestUpdateExtractedContentRepairsInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestEnrichmentUpdatesReplaceExistingText(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	modified := time.Now().UTC()
+	doc := Document{ID: "replace-content", RootID: "test", Path: `D:\fixtures\replace.txt`, NormalizedPath: NormalizePath(`D:\fixtures\replace.txt`), Name: "replace.txt", Extension: "txt", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.UpdateExtractedContent(ctx, doc.ID, doc.Signature, "extracted", "old content that must disappear"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cat.UpdateOCRContent(ctx, doc.ID, doc.Signature, "extracted", "new ocr content"); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := cat.db.QueryRowContext(ctx, `SELECT content_text FROM documents WHERE id = ?`, doc.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "new ocr content" {
+		t.Fatalf("stored enrichment = %q, want replacement text", stored)
+	}
+}
+
 func TestStorageTextCapsPostgresTSVectorInput(t *testing.T) {
 	cat := &Catalog{db: &catalogDB{backend: backendPostgres}}
 	value := strings.Repeat("distinct-token ", postgresTSVectorContentLimit)

@@ -16,6 +16,7 @@ import (
 
 	"qindexer/internal/config"
 	"qindexer/internal/crawler"
+	"qindexer/internal/extract"
 )
 
 type Watcher struct {
@@ -201,11 +202,14 @@ func (w *Watcher) run(ctx context.Context) (bool, error) {
 				w.setUnavailable(cfg, errors.New("filesystem watcher event stream closed"))
 				return false, nil
 			}
-			if w.shouldIgnore(event.Name) {
+			if !actionableEvent(event) || w.shouldIgnore(event.Name) {
 				continue
 			}
 			rootID := rootForEvent(event.Name, set.paths)
 			if rootID == "" {
+				continue
+			}
+			if !w.shouldQueueEvent(cfg, rootID, event) {
 				continue
 			}
 			removed := event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)
@@ -570,6 +574,68 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// actionableEvent ignores attribute-only notifications and removals. Full
+// reconciliation owns missing-state changes, while creates and renames can
+// reveal new files immediately. Writes are filtered further by enrichment
+// eligibility in shouldQueueEvent.
+func actionableEvent(event fsnotify.Event) bool {
+	return event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Rename)
+}
+
+// shouldQueueEvent applies the same exclusion and hidden-path policy before a
+// notification is debounced. Metadata-only writes wait for reconciliation;
+// only enabled content/OCR work earns an immediate write-triggered refresh.
+func (w *Watcher) shouldQueueEvent(cfg *config.Config, rootID string, event fsnotify.Event) bool {
+	path := event.Name
+	var root config.RootConfig
+	for _, candidate := range cfg.Roots {
+		if candidate.ID == rootID {
+			root = candidate
+			break
+		}
+	}
+	if root.ID == "" || (cfg.Crawler.IgnoreHidden && strings.HasPrefix(filepath.Base(path), ".")) {
+		return false
+	}
+	extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	info, statErr := os.Stat(path)
+	isFolder := statErr == nil && info.IsDir()
+	allowedFile := crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, extension, false)
+	allowedFolder := crawler.PathAllowedWithGlobalRules(root, cfg.Crawler, path, "", true)
+	if isFolder {
+		if !allowedFolder {
+			return false
+		}
+	} else if !allowedFile {
+		// A file rule must win for names such as Office's ~$ temporary files.
+		// If a create arrives before stat succeeds, only extension-less names
+		// may be an as-yet-unavailable directory.
+		if statErr != nil && extension == "" && allowedFolder {
+			return event.Has(fsnotify.Create) || event.Has(fsnotify.Rename)
+		}
+		return false
+	}
+	if event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
+		return true
+	}
+	content := cfg.Crawler.ContentExtraction
+	if allowedFile && root.ContentExtractionEnabled(content.Enabled) && extract.Indexable(path) && !watchExtensionExcluded(extension, root.ContentExcludedExtensions(content.ExcludeExtensions)) {
+		return true
+	}
+	ocr := cfg.Crawler.OCR
+	return allowedFile && root.OCREnabled(ocr.Enabled) && extract.OCREligible(path) && !watchExtensionExcluded(extension, root.OCRExcludedExtensions(ocr.ExcludeExtensions))
+}
+
+func watchExtensionExcluded(extension string, exclusions []string) bool {
+	extension = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(extension)), ".")
+	for _, value := range exclusions {
+		if extension == strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), ".") {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *Watcher) tryWatchCreatedDirectory(ctx context.Context, set *watchSet, path string, rootID string) bool {
 	if w.shouldIgnore(path) {
 		return false
@@ -633,29 +699,23 @@ func (w *Watcher) processHints(ctx context.Context, rootID string, paths map[str
 		}
 		return run.Status != "already_running" && run.Status != "maintenance_paused"
 	}
+	batch := make([]crawler.HintPath, 0, len(paths))
 	for _, dirty := range paths {
-		crawlHint := w.crawler.CrawlHintShallow
-		if dirty.recursive {
-			crawlHint = w.crawler.CrawlHint
-		}
-		run, err := crawlHint(ctx, rootID, dirty.path, dirty.removed)
-		if err != nil {
-			if isCancellation(ctx, err) {
-				w.releaseHints(rootID, paths)
-				return false
-			}
-			w.releaseHint(rootID, dirty.path)
-			w.log.Warn("hint crawl failed", "root", rootID, "path", dirty.path, "error", err)
-			continue
-		}
-		if run.Status == "already_running" || run.Status == "maintenance_paused" || run.Status == "paused" {
+		batch = append(batch, crawler.HintPath{Path: dirty.path, Removed: dirty.removed, Recursive: dirty.recursive})
+	}
+	run, err := w.crawler.CrawlHintBatch(ctx, rootID, batch)
+	if err != nil {
+		if isCancellation(ctx, err) {
 			w.releaseHints(rootID, paths)
 			return false
 		}
-		if run.Status == "pressure_paused" {
-			w.releaseHints(rootID, paths)
-			return false
-		}
+		w.releaseHints(rootID, paths)
+		w.log.Warn("hint batch failed", "root", rootID, "paths", len(batch), "error", err)
+		return true
+	}
+	if run.Status == "already_running" || run.Status == "maintenance_paused" || run.Status == "paused" || run.Status == "pressure_paused" {
+		w.releaseHints(rootID, paths)
+		return false
 	}
 	return true
 }

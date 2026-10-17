@@ -6,6 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+
+	"qindexer/internal/config"
 )
 
 func TestPinnedWatchLimitReservesCapacityForHotFolders(t *testing.T) {
@@ -86,5 +90,27 @@ func TestHintBatchWindowDefersRepeatedRootDispatch(t *testing.T) {
 	defer cancel()
 	if w.waitForHintBatchWindow(ctx, "root", time.Minute) {
 		t.Fatal("repeated root hint was not deferred")
+	}
+}
+
+func TestShouldQueueEventAvoidsNoiseButRefreshesEligibleEnrichment(t *testing.T) {
+	rootPath := t.TempDir()
+	cfg := &config.Config{Roots: []config.RootConfig{{ID: "root", Path: rootPath, Enabled: true}}, Crawler: config.CrawlerConfig{
+		ExcludeFilePatterns: []string{"~$*"},
+		ContentExtraction:   config.ContentExtractionConfig{Enabled: true},
+		OCR:                 config.OCRConfig{Enabled: true},
+	}}
+	w := &Watcher{}
+	if w.shouldQueueEvent(cfg, "root", fsnotify.Event{Name: filepath.Join(rootPath, "~$draft.docx"), Op: fsnotify.Create}) {
+		t.Fatal("temporary Office file was queued")
+	}
+	if !w.shouldQueueEvent(cfg, "root", fsnotify.Event{Name: filepath.Join(rootPath, "notes.txt"), Op: fsnotify.Write}) {
+		t.Fatal("content-eligible write was not queued")
+	}
+	if !w.shouldQueueEvent(cfg, "root", fsnotify.Event{Name: filepath.Join(rootPath, "scan.pdf"), Op: fsnotify.Write}) {
+		t.Fatal("OCR-eligible write was not queued")
+	}
+	if actionableEvent(fsnotify.Event{Op: fsnotify.Chmod}) {
+		t.Fatal("attribute-only event was queued")
 	}
 }
