@@ -75,11 +75,13 @@ func runTesseract(ctx context.Context, path string, options OCROptions) (string,
 		args = append(args, "-l", options.Languages)
 	}
 	var out cappedBuffer
+	var stderr cappedBuffer
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Stdout = &out
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		return "failed", "", commandError(command, err)
+		return "failed", "", commandError(command, err, stderr.String())
 	}
 	return "extracted", normalizeText(out.String()), nil
 }
@@ -95,14 +97,17 @@ func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, 
 	}
 	defer os.RemoveAll(dir)
 	sidecar := filepath.Join(dir, "content.txt")
-	args := []string{"--skip-text", "--output-type", "none", "--sidecar", sidecar}
-	if options.Languages != "" {
-		args = append(args, "-l", options.Languages)
-	}
-	// OCRmyPDF requires '-' as the output argument when output-type is none.
-	args = append(args, path, "-")
-	if err := exec.CommandContext(ctx, command, args...).Run(); err != nil {
-		return "failed", "", commandError(command, err)
+	if err := runOCRmyPDFCommand(ctx, command, path, sidecar, options.Languages); err != nil {
+		if !shouldStageOCRInput(err) {
+			return "failed", "", err
+		}
+		staged := filepath.Join(dir, "source.pdf")
+		if stageErr := stageOCRInput(ctx, path, staged); stageErr != nil {
+			return "failed", "", fmt.Errorf("%w; local staging retry could not read source: %v", err, stageErr)
+		}
+		if retryErr := runOCRmyPDFCommand(ctx, command, staged, sidecar, options.Languages); retryErr != nil {
+			return "failed", "", fmt.Errorf("%w; local staging retry also failed: %v", err, retryErr)
+		}
 	}
 	f, err := os.Open(sidecar)
 	if err != nil {
@@ -114,6 +119,66 @@ func runOCRmyPDF(ctx context.Context, path string, options OCROptions) (string, 
 		return "failed", "", errors.New("could not read OCR text sidecar")
 	}
 	return "extracted", normalizeText(string(text)), nil
+}
+
+func runOCRmyPDFCommand(ctx context.Context, command, path, sidecar, languages string) error {
+	args := []string{"--skip-text", "--output-type", "none", "--sidecar", sidecar}
+	if languages != "" {
+		args = append(args, "-l", languages)
+	}
+	// OCRmyPDF requires '-' as the output argument when output-type is none.
+	args = append(args, path, "-")
+	var stderr cappedBuffer
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return commandError(command, err, stderr.String())
+	}
+	return nil
+}
+
+// shouldStageOCRInput recognizes source-provider errors emitted before
+// OCRmyPDF begins parsing the PDF. Staging only these cases avoids a second
+// full read for ordinary local and network files.
+func shouldStageOCRInput(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "invalid argument") ||
+		strings.Contains(message, "cloud file") ||
+		strings.Contains(message, "resource temporarily unavailable")
+}
+
+func stageOCRInput(ctx context.Context, source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	buffer := make([]byte, 256*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		read, readErr := in.Read(buffer)
+		if read > 0 {
+			if _, err := out.Write(buffer[:read]); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return out.Sync()
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // cappedBuffer drains a command's output without allowing a malformed OCR
@@ -132,12 +197,27 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-func commandError(command string, err error) error {
+func commandError(command string, err error, stderr string) error {
 	name := commandName(command)
 	if errors.Is(err, exec.ErrNotFound) {
 		return fmt.Errorf("OCR command %q was not found", name)
 	}
+	if detail := commandDiagnostic(stderr); detail != "" {
+		return fmt.Errorf("OCR command %q failed: %s", name, summarizeError(errors.New(detail)))
+	}
 	return fmt.Errorf("OCR command %q failed", name)
+}
+
+// commandDiagnostic selects the final non-empty stderr line. OCRmyPDF emits
+// Python tracebacks where the final line contains the actionable exception;
+// retaining the beginning would hide it behind stack frames.
+func commandDiagnostic(stderr string) string {
+	for lines := strings.Split(strings.ReplaceAll(stderr, "\r\n", "\n"), "\n"); len(lines) > 0; lines = lines[:len(lines)-1] {
+		if detail := strings.TrimSpace(lines[len(lines)-1]); detail != "" {
+			return detail
+		}
+	}
+	return ""
 }
 
 func commandName(command string) string {

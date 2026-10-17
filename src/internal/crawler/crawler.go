@@ -1081,6 +1081,13 @@ func (c *Crawler) scheduleRetry(ctx context.Context, root config.RootConfig, del
 }
 
 func (c *Crawler) logSuppressed(key, event, message string, interval time.Duration, attrs ...any) {
+	c.logSuppressedAt(slog.LevelWarn, key, event, message, interval, attrs...)
+}
+
+// logSuppressedAt emits an operational event at most once per interval while
+// retaining a repeat count for the next message. Deferred enrichment is normal
+// retry work, so it uses Info rather than being mixed with crawler warnings.
+func (c *Crawler) logSuppressedAt(level slog.Level, key, event, message string, interval time.Duration, attrs ...any) {
 	now := time.Now()
 	c.mu.Lock()
 	state := c.logState[key]
@@ -1100,7 +1107,15 @@ func (c *Crawler) logSuppressed(key, event, message string, interval time.Durati
 	if suppressed > 0 {
 		attrs = append(attrs, "suppressed_repeats", suppressed)
 	}
-	c.log.Warn(event, attrs...)
+	c.log.Log(context.Background(), level, event, attrs...)
+}
+
+func (c *Crawler) logEnrichmentDeferred(kind, rootID, path, engine string, err error) {
+	attrs := []any{"root", rootID, "path", path, "reason", err}
+	if engine != "" {
+		attrs = append(attrs, "engine", engine)
+	}
+	c.logSuppressedAt(slog.LevelInfo, "enrichment-deferred:"+strings.ToLower(kind)+":"+rootID, kind+" retry deferred", "retry_pending", 5*time.Minute, attrs...)
 }
 
 func (c *Crawler) clearSuppressedLogsForRoot(rootID string) {
@@ -1489,9 +1504,9 @@ func enrichmentFailureMessage(kind, status string, err error) string {
 		return kind + " engine unavailable"
 	}
 	if status == "retry_pending" {
-		return kind + " deferred; file will be retried"
+		return kind + " retry deferred"
 	}
-	if strings.Contains(lower, "access denied") || strings.Contains(lower, "permission denied") || (strings.Contains(lower, "cloud file") && strings.Contains(lower, "denied")) || strings.Contains(lower, "resource temporarily unavailable") {
+	if strings.Contains(lower, "access denied") || strings.Contains(lower, "permission denied") || strings.Contains(lower, "cloud file provider is not running") || (strings.Contains(lower, "cloud file") && strings.Contains(lower, "denied")) || strings.Contains(lower, "resource temporarily unavailable") {
 		return strings.ToLower(kind) + " source unavailable"
 	}
 	return "file not eligible for " + strings.ToLower(kind)
@@ -2716,8 +2731,8 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				completeActivity := c.contentActivity.begin(job.path)
 				text, err := safeContentText(extract.Text, job.path)
 				text = extract.TruncateText(text, settings.MaxStoredTextKB*1024)
-				completeActivity(err)
 				if jobCtx.Err() != nil {
+					completeActivity(nil)
 					finish()
 					return
 				}
@@ -2726,14 +2741,20 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 					text = ""
 					result, recordErr := c.cat.RecordContentFailure(jobCtx, job.id, job.signature, err.Error(), enrichmentFailureRetryable(err))
 					if recordErr != nil {
+						completeActivity(recordErr)
 						c.log.Debug("content failure state update failed", "path", job.path, "error", recordErr)
 						_ = c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature)
+					} else if result == "retry_pending" {
+						completeActivity(nil)
+						c.logEnrichmentDeferred("Content extraction", job.rootID, job.path, "", err)
 					} else {
+						completeActivity(err)
 						c.log.Debug(enrichmentFailureMessage("Content extraction", result, err), "path", job.path, "status", result, "detail", err)
 					}
 					finish()
 					return
 				}
+				completeActivity(nil)
 				if err := c.cat.UpdateExtractedContent(jobCtx, job.id, job.signature, status, text); err != nil {
 					if isCrawlerCancellation(jobCtx, err) {
 						finish()
@@ -2803,22 +2824,28 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 			})
 			text = extract.TruncateText(text, crawlerSettings.ContentExtraction.MaxStoredTextKB*1024)
 			cancel()
-			completeActivity(err)
 			if jobCtx.Err() != nil {
+				completeActivity(nil)
 				finish()
 				continue
 			}
 			if err != nil {
 				result, recordErr := c.cat.RecordOCRFailure(jobCtx, job.id, job.signature, err.Error(), enrichmentFailureRetryable(err))
 				if recordErr != nil {
+					completeActivity(recordErr)
 					c.log.Debug("OCR failure state update failed", "path", job.path, "error", recordErr)
 					_ = c.cat.ReleaseOCRClaim(context.Background(), job.id, job.signature)
+				} else if result == "retry_pending" {
+					completeActivity(nil)
+					c.logEnrichmentDeferred("OCR", job.rootID, job.path, settings.Engine, err)
 				} else {
+					completeActivity(err)
 					c.log.Debug(enrichmentFailureMessage("OCR", result, err), "path", job.path, "engine", settings.Engine, "status", result, "detail", err)
 				}
 				finish()
 				continue
 			}
+			completeActivity(nil)
 			if err := c.cat.UpdateOCRContent(jobCtx, job.id, job.signature, status, text); err != nil {
 				if isCrawlerCancellation(jobCtx, err) {
 					finish()

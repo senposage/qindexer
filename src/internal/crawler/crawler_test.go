@@ -65,7 +65,7 @@ func TestEnrichmentFailureMessageDistinguishesFileAndEngineFailures(t *testing.T
 	if got := enrichmentFailureMessage("OCR", "unindexable", errors.New(`OCR command "tesseract" failed`)); got != "file not eligible for ocr" {
 		t.Fatalf("terminal OCR failure message = %q", got)
 	}
-	if got := enrichmentFailureMessage("Content extraction", "retry_pending", errors.New("resource temporarily unavailable")); got != "Content extraction deferred; file will be retried" {
+	if got := enrichmentFailureMessage("Content extraction", "retry_pending", errors.New("resource temporarily unavailable")); got != "Content extraction retry deferred" {
 		t.Fatalf("retryable content failure message = %q", got)
 	}
 	if got := enrichmentFailureMessage("OCR", "unindexable", errors.New(`OCR command "tesseract" was not found`)); got != "OCR engine unavailable" {
@@ -73,6 +73,9 @@ func TestEnrichmentFailureMessageDistinguishesFileAndEngineFailures(t *testing.T
 	}
 	if got := enrichmentFailureMessage("Content extraction", "unindexable", errors.New("Access to the cloud file is denied")); got != "content extraction source unavailable" {
 		t.Fatalf("cloud placeholder message = %q", got)
+	}
+	if got := enrichmentFailureMessage("OCR", "unindexable", errors.New("The cloud file provider is not running")); got != "ocr source unavailable" {
+		t.Fatalf("cloud provider message = %q", got)
 	}
 }
 
