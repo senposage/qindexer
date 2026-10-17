@@ -71,6 +71,9 @@ func TestEnrichmentFailureMessageDistinguishesFileAndEngineFailures(t *testing.T
 	if got := enrichmentFailureMessage("OCR", "unindexable", errors.New(`OCR command "tesseract" was not found`)); got != "OCR engine unavailable" {
 		t.Fatalf("missing engine message = %q", got)
 	}
+	if got := enrichmentFailureMessage("Content extraction", "unindexable", errors.New("Access to the cloud file is denied")); got != "content extraction source unavailable" {
+		t.Fatalf("cloud placeholder message = %q", got)
+	}
 }
 
 func TestExcludedImageIsNominatedForOCRWithoutContentExtraction(t *testing.T) {
@@ -88,8 +91,45 @@ func TestExcludedImageIsNominatedForOCRWithoutContentExtraction(t *testing.T) {
 	if err != nil || !indexable {
 		t.Fatalf("describe image = %#v, indexable=%t, err=%v", doc, indexable, err)
 	}
-	if doc.OCRStatus != "pending" || doc.ContentStatus != "" {
+	if doc.OCRStatus != "pending" || doc.ContentStatus != "not_requested" {
 		t.Fatalf("excluded image routing = %#v", doc)
+	}
+}
+
+func TestPDFRoutesDirectlyToOCRWhenEnabled(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "scan.pdf")
+	if err := os.WriteFile(path, []byte("not parsed by this routing test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Crawler: config.CrawlerConfig{
+		ContentExtraction: config.ContentExtractionConfig{Enabled: true, MaxFileSizeMB: 64},
+		OCR:               config.OCRConfig{Enabled: true, MaxFileSizeMB: 128},
+	}}
+	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	doc, indexable, err := c.describePath(config.RootConfig{ID: "root", Path: rootPath, Enabled: true}, path, 1)
+	if err != nil || !indexable {
+		t.Fatalf("describe PDF = %#v, indexable=%t, err=%v", doc, indexable, err)
+	}
+	if doc.ContentStatus != "not_requested" || doc.OCRStatus != "pending" {
+		t.Fatalf("direct PDF OCR routing = %#v", doc)
+	}
+}
+
+func TestPDFUsesContentWhenOCRIsDisabled(t *testing.T) {
+	rootPath := t.TempDir()
+	path := filepath.Join(rootPath, "text.pdf")
+	if err := os.WriteFile(path, []byte("not parsed by this routing test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Crawler: config.CrawlerConfig{ContentExtraction: config.ContentExtractionConfig{Enabled: true, MaxFileSizeMB: 64}}}
+	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	doc, indexable, err := c.describePath(config.RootConfig{ID: "root", Path: rootPath, Enabled: true}, path, 1)
+	if err != nil || !indexable {
+		t.Fatalf("describe PDF = %#v, indexable=%t, err=%v", doc, indexable, err)
+	}
+	if doc.ContentStatus != "" || doc.OCRStatus != "" {
+		t.Fatalf("content PDF routing = %#v", doc)
 	}
 }
 

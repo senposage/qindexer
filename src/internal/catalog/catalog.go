@@ -2060,6 +2060,45 @@ func (c *Catalog) UpdateOCRStatus(ctx context.Context, id, signature, status str
 	return err
 }
 
+// RouteContentToOCR moves a claimed item to the direct-OCR pipeline without
+// resetting OCR retry state that may already be in progress.
+func (c *Catalog) RouteContentToOCR(ctx context.Context, id, signature string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, err := c.db.ExecContext(ctx, `UPDATE documents
+		SET content_status = 'not_requested', content_text = '', content_error = '', content_attempts = 0, content_retry_at = '',
+		    ocr_status = CASE WHEN ocr_status IN ('not_requested', 'pending') THEN 'pending' ELSE ocr_status END
+		WHERE id = ? AND signature = ? AND content_status = 'queued'`, id, signature)
+	return err
+}
+
+// RoutePendingContentToOCR repairs routing after a policy change or an
+// unclean stop. It only touches unprocessed content states and leaves already
+// extracted text and terminal OCR failures intact.
+func (c *Catalog) RoutePendingContentToOCR(ctx context.Context, rootID string, extensions []string, maxSize int64) (int64, error) {
+	exts := canonicalExtensions(extensions)
+	if rootID == "" || len(exts) == 0 || maxSize <= 0 {
+		return 0, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	args := []any{rootID, maxSize}
+	for _, ext := range exts {
+		args = append(args, ext)
+	}
+	result, err := c.db.ExecContext(ctx, `UPDATE documents
+		SET content_status = 'not_requested', content_text = '', content_error = '', content_attempts = 0, content_retry_at = '',
+		    ocr_status = CASE WHEN ocr_status IN ('not_requested', 'pending') THEN 'pending' ELSE ocr_status END
+		WHERE root_id = ? AND status = 'active' AND is_folder = 0 AND size <= ?
+		  AND extension IN (`+placeholders(len(exts))+`)
+		  AND content_status IN ('not_indexed', 'retry_pending', 'queued')`, args...)
+	if err != nil {
+		return 0, err
+	}
+	changed, _ := result.RowsAffected()
+	return changed, nil
+}
+
 func (c *Catalog) UpdateContentStatus(ctx context.Context, id, signature, status string) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()

@@ -264,9 +264,13 @@ func (c *Crawler) snapshot() *config.Config {
 // Queue and worker-count changes take effect after restart because those
 // channels and goroutines are intentionally fixed for the process lifetime.
 func (c *Crawler) ApplyConfig(cfg *config.Config) {
+	snapshot := config.Clone(cfg)
 	c.cfgMu.Lock()
-	c.cfg = config.Clone(cfg)
+	c.cfg = snapshot
 	c.cfgMu.Unlock()
+	if c.cat != nil {
+		go c.reconcileEnrichmentRoutes(context.Background(), snapshot)
+	}
 	select {
 	case c.configChanged <- struct{}{}:
 	default:
@@ -1131,6 +1135,7 @@ func (c *Crawler) Loop(ctx context.Context) {
 		} else {
 			c.log.Info("recovered queued enrichment claims at startup")
 		}
+		c.reconcileEnrichmentRoutes(ctx, c.snapshot())
 	}
 	startCrawlerRoutine(ctx, &workers, c.log, c.throughputMonitor)
 	startCrawlerRoutine(ctx, &workers, c.log, c.adaptiveMonitor)
@@ -1179,6 +1184,73 @@ func (c *Crawler) recoverQueuedBackground(ctx context.Context) error {
 	recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	return c.cat.ResetQueuedBackground(recoveryCtx)
+}
+
+type enrichmentRoute uint8
+
+const (
+	enrichmentNone enrichmentRoute = iota
+	enrichmentContent
+	enrichmentOCR
+)
+
+// enrichmentRouteFor chooses a single primary enrichment path. OCR is the
+// authoritative path for PDFs and raster images when enabled; text and Office
+// documents retain the inexpensive native content extractor.
+func enrichmentRouteFor(root config.RootConfig, settings config.CrawlerConfig, path, extension string, size int64) enrichmentRoute {
+	extension = canonicalExtension(extension)
+	ocr := settings.OCR
+	if root.OCREnabled(ocr.Enabled) && extract.OCREligible(path) && !extensionExcluded(extension, root.OCRExcludedExtensions(ocr.ExcludeExtensions)) && withinEnrichmentSizeLimit(size, ocr.MaxFileSizeMB) {
+		return enrichmentOCR
+	}
+	content := settings.ContentExtraction
+	if root.ContentExtractionEnabled(content.Enabled) && extract.Indexable(path) && !extensionExcluded(extension, root.ContentExcludedExtensions(content.ExcludeExtensions)) && withinEnrichmentSizeLimit(size, content.MaxFileSizeMB) {
+		return enrichmentContent
+	}
+	return enrichmentNone
+}
+
+func withinEnrichmentSizeLimit(size, maxMB int64) bool {
+	return maxMB <= 0 || size <= maxMB<<20
+}
+
+func directOCRExtensions(root config.RootConfig, settings config.CrawlerConfig) []string {
+	if !root.OCREnabled(settings.OCR.Enabled) {
+		return nil
+	}
+	var extensions []string
+	for _, extension := range extract.OCREligibleExtensions() {
+		if !extensionExcluded(extension, root.OCRExcludedExtensions(settings.OCR.ExcludeExtensions)) {
+			extensions = append(extensions, extension)
+		}
+	}
+	return extensions
+}
+
+func (c *Crawler) reconcileEnrichmentRoutes(parent context.Context, cfg *config.Config) {
+	if c.cat == nil || cfg == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
+	for _, root := range cfg.Roots {
+		if !root.Enabled {
+			continue
+		}
+		extensions := directOCRExtensions(root, cfg.Crawler)
+		maxSize := cfg.Crawler.OCR.MaxFileSizeMB << 20
+		if maxSize <= 0 {
+			maxSize = 1 << 62
+		}
+		changed, err := c.cat.RoutePendingContentToOCR(ctx, root.ID, extensions, maxSize)
+		if err != nil {
+			c.log.Warn("could not reconcile enrichment routes", "root", root.ID, "error", err)
+			continue
+		}
+		if changed > 0 {
+			c.log.Info("reconciled direct OCR routes", "root", root.ID, "documents", changed)
+		}
+	}
 }
 
 func resetCrawlTimer(timer *time.Timer, interval time.Duration) {
@@ -1235,7 +1307,7 @@ func (c *Crawler) refillBackground(ctx context.Context) {
 	}
 	ocr := c.snapshot().Crawler.OCR
 	if rootIDs := c.rootIDsFor(func(root config.RootConfig) bool {
-		return !c.IsRootRunning(root.ID) && root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled)
+		return !c.IsRootRunning(root.ID) && root.OCREnabled(ocr.Enabled)
 	}); len(rootIDs) > 0 {
 		c.fillBackgroundWithRetries(ctx, rootIDs, c.ocrJobs, ocr.MaxFileSizeMB<<20, c.cat.ClaimPendingOCR, c.cat.ClaimRetryOCR, "OCR", c.ocrExcludedExtensions)
 	}
@@ -1412,11 +1484,15 @@ func safeContentText(read func(string) (string, error), path string) (text strin
 // service-side problem in the operational log. The original error is retained
 // as a detail field at the call site for diagnosis.
 func enrichmentFailureMessage(kind, status string, err error) string {
-	if strings.Contains(strings.ToLower(err.Error()), "was not found") {
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "was not found") {
 		return kind + " engine unavailable"
 	}
 	if status == "retry_pending" {
 		return kind + " deferred; file will be retried"
+	}
+	if strings.Contains(lower, "access denied") || strings.Contains(lower, "permission denied") || (strings.Contains(lower, "cloud file") && strings.Contains(lower, "denied")) || strings.Contains(lower, "resource temporarily unavailable") {
+		return strings.ToLower(kind) + " source unavailable"
 	}
 	return "file not eligible for " + strings.ToLower(kind)
 }
@@ -2493,12 +2569,10 @@ func (c *Crawler) describePath(root config.RootConfig, path string, generation i
 		Signature:          catalog.Signature(info.Size(), info.ModTime()),
 		AccessStatus:       "metadata_readable",
 	}
-	settings := crawlerSettings
-	contentExcluded := root.ContentExcludedExtensions(settings.ContentExtraction.ExcludeExtensions)
-	ocrExcluded := root.OCRExcludedExtensions(settings.OCR.ExcludeExtensions)
-	if !isFolder && root.ContentExtractionEnabled(settings.ContentExtraction.Enabled) && root.OCREnabled(settings.OCR.Enabled) && extract.OCREligible(path) && extensionExcluded(ext, contentExcluded) && !extensionExcluded(ext, ocrExcluded) {
-		// Images are excluded from ordinary text extraction by default, but still
-		// need a direct OCR nomination rather than relying on an empty extraction.
+	if !isFolder && enrichmentRouteFor(root, crawlerSettings, path, ext, info.Size()) == enrichmentOCR {
+		// Direct OCR work must never also enter the content queue. OCR will set
+		// content_status to extracted when its sidecar text is stored.
+		doc.ContentStatus = "not_requested"
 		doc.OCRStatus = "pending"
 	}
 	if root.OwnershipEnabled(c.snapshot().Crawler.CollectOwnership) {
@@ -2614,9 +2688,10 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 				if !valid {
 					return
 				}
-				settings := c.snapshot().Crawler.ContentExtraction
+				crawlerSettings := c.snapshot().Crawler
+				settings := crawlerSettings.ContentExtraction
 				root, exists := c.rootByID(job.rootID)
-				if !exists || !root.ContentExtractionEnabled(settings.Enabled) {
+				if !exists {
 					if jobCtx.Err() == nil {
 						_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
 					}
@@ -2624,13 +2699,16 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 					return
 				}
 				extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
-				if extensionExcluded(extension, root.ContentExcludedExtensions(settings.ExcludeExtensions)) {
+				switch enrichmentRouteFor(root, crawlerSettings, job.path, extension, job.size) {
+				case enrichmentOCR:
 					if jobCtx.Err() == nil {
-						_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
-						ocr := c.snapshot().Crawler.OCR
-						if extract.OCREligible(job.path) && root.OCREnabled(ocr.Enabled) && !extensionExcluded(extension, root.OCRExcludedExtensions(ocr.ExcludeExtensions)) {
-							_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
-						}
+						_ = c.cat.RouteContentToOCR(jobCtx, job.id, job.signature)
+					}
+					finish()
+					return
+				case enrichmentNone:
+					if jobCtx.Err() == nil {
+						_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_requested")
 					}
 					finish()
 					return
@@ -2702,7 +2780,7 @@ func (c *Crawler) ocrWorker(ctx context.Context) {
 			crawlerSettings := c.snapshot().Crawler
 			settings := crawlerSettings.OCR
 			root, exists := c.rootByID(job.rootID)
-			if !exists || !root.ContentExtractionEnabled(crawlerSettings.ContentExtraction.Enabled) || !root.OCREnabled(settings.Enabled) {
+			if !exists || !root.OCREnabled(settings.Enabled) {
 				if jobCtx.Err() == nil {
 					_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
 				}

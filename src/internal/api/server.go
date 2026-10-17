@@ -1618,7 +1618,7 @@ func backgroundBacklogPolicy(cfg *config.Config) catalog.BackgroundBacklogPolicy
 			ExcludedExtensions: append([]string(nil), root.ContentExcludedExtensions(content.ExcludeExtensions)...),
 		}
 		policy.OCR[root.ID] = catalog.BackgroundWorkPolicy{
-			Enabled: root.Enabled && root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled), MaxFileSizeBytes: ocr.MaxFileSizeMB << 20,
+			Enabled: root.Enabled && root.OCREnabled(ocr.Enabled), MaxFileSizeBytes: ocr.MaxFileSizeMB << 20,
 			ExcludedExtensions: append([]string(nil), root.OCRExcludedExtensions(ocr.ExcludeExtensions)...),
 		}
 		policy.Hash[root.ID] = catalog.BackgroundWorkPolicy{

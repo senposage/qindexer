@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.37 - 2026-10-17
+
+- Introduce explicit enrichment routing: OCR-enabled PDFs and raster images
+  bypass native content extraction and enter the OCR queue directly; Office
+  and plain-text documents remain on the fast content path.
+- Make OCR independent of content extraction, and reconcile previously queued
+  PDFs/images to direct OCR at startup and after a configuration change without
+  resetting completed work or terminal retry state.
+- Identify OneDrive and other inaccessible cloud placeholders as unavailable
+  sources in logs instead of incorrectly calling them ineligible content.
+
 ## 1.2.36 - 2026-10-17
 
 - Release only orphaned queued content/OCR/hash claims at startup. An unclean

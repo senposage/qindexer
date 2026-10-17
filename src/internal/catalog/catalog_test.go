@@ -1059,6 +1059,45 @@ func TestBackgroundClaimsExcludeConfiguredExtensions(t *testing.T) {
 	}
 }
 
+func TestRoutePendingContentToOCRPreservesTerminalOCRFailures(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, id := range []string{"pending", "failed"} {
+		doc := Document{ID: id, RootID: "root", Path: `C:\` + id + `.pdf`, NormalizedPath: NormalizePath(`C:\` + id + `.pdf`), Name: id + `.pdf`, Extension: "pdf", Size: 10, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(10, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := cat.db.ExecContext(ctx, `UPDATE documents SET ocr_status = 'unindexable' WHERE id = 'failed'`); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := cat.RoutePendingContentToOCR(ctx, "root", []string{".pdf"}, 1024)
+	if err != nil || changed != 2 {
+		t.Fatalf("route pending PDFs = %d, %v", changed, err)
+	}
+	rows, err := cat.db.QueryContext(ctx, `SELECT content_status, ocr_status FROM documents WHERE root_id = 'root' ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var statuses [][2]string
+	for rows.Next() {
+		var content, ocr string
+		if err := rows.Scan(&content, &ocr); err != nil {
+			t.Fatal(err)
+		}
+		statuses = append(statuses, [2]string{content, ocr})
+	}
+	if len(statuses) != 2 || statuses[0] != [2]string{"not_requested", "unindexable"} || statuses[1] != [2]string{"not_requested", "pending"} {
+		t.Fatalf("routed statuses = %#v", statuses)
+	}
+}
+
 func TestSpecificIncludeOverridesParentExclusion(t *testing.T) {
 	ctx := context.Background()
 	cat, err := Open(ctx, t.TempDir())
