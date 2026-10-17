@@ -239,6 +239,33 @@ func TestBackgroundBacklogCountsEligibleWorkBeyondWorkerQueues(t *testing.T) {
 	}
 }
 
+func TestBackgroundBacklogPolicyExcludesDisabledRootsAndFeatures(t *testing.T) {
+	ctx := context.Background()
+	cat, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	for _, rootID := range []string{"enabled", "disabled"} {
+		doc := Document{ID: rootID, RootID: rootID, Path: `X:\` + rootID + `.pdf`, NormalizedPath: NormalizePath(`X:\` + rootID + `.pdf`), Name: rootID + `.pdf`, Extension: "pdf", Size: 10, ModifiedAt: modified, LastSeenGeneration: 1, Signature: Signature(10, modified)}
+		if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := BackgroundBacklogPolicy{Strict: true, Content: map[string]BackgroundWorkPolicy{
+		"enabled":  {Enabled: true, MaxFileSizeBytes: 100},
+		"disabled": {Enabled: false, MaxFileSizeBytes: 100},
+	}, OCR: map[string]BackgroundWorkPolicy{}, Hash: map[string]BackgroundWorkPolicy{}}
+	backlog, err := cat.BackgroundBacklogWithPolicy(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backlog.Content != 1 || backlog.OCR != 0 || backlog.Hash != 0 {
+		t.Fatalf("policy-filtered backlog = %#v", backlog)
+	}
+}
+
 func TestCheckDatabaseUsesReadOnlySQLiteURI(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

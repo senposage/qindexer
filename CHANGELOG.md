@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.34 - 2026-10-16
+
+- Contain third-party content-parser panics to the individual file that caused
+  them. A malformed or transiently unreadable PDF is now marked unindexable
+  for content instead of silently terminating a content worker.
+- Detect a buffered content queue with no waiting or in-flight worker, log the
+  exact state, and start a bounded replacement worker to recover without an
+  index reset.
+- Make content, OCR, and hash backlog totals respect enabled roots, per-root
+  overrides, file-size limits, and exclusions. Disabled hashing is no longer
+  reported as a pending hash backlog.
+
 ## 1.2.33 - 2026-10-16
 
 - Prevent watcher hint traffic from starving content extraction, OCR, or

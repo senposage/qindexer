@@ -46,6 +46,22 @@ type BackgroundBacklog struct {
 	Hash    int64
 }
 
+// BackgroundWorkPolicy is the effective enrichment policy for one root.
+// The dashboard uses it to count only catalog rows a worker can actually
+// claim, rather than every historical pending value in the database.
+type BackgroundWorkPolicy struct {
+	Enabled            bool
+	MaxFileSizeBytes   int64
+	ExcludedExtensions []string
+}
+
+type BackgroundBacklogPolicy struct {
+	Strict  bool
+	Content map[string]BackgroundWorkPolicy
+	OCR     map[string]BackgroundWorkPolicy
+	Hash    map[string]BackgroundWorkPolicy
+}
+
 func stringSet(values []string) map[string]bool {
 	set := make(map[string]bool, len(values))
 	for _, value := range values {
@@ -1199,6 +1215,20 @@ func (c *Catalog) CachedIndexStats() (IndexStats, bool) {
 // BackgroundBacklog reports every eligible document still waiting for content,
 // OCR, or hashing. Unlike worker-channel depth it is not capped by queue size.
 func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcludedByRoot, ocrExcludedByRoot map[string][]string) (BackgroundBacklog, error) {
+	policy := BackgroundBacklogPolicy{Content: map[string]BackgroundWorkPolicy{}, OCR: map[string]BackgroundWorkPolicy{}}
+	for rootID, excluded := range contentExcludedByRoot {
+		policy.Content[rootID] = BackgroundWorkPolicy{Enabled: true, MaxFileSizeBytes: math.MaxInt64, ExcludedExtensions: excluded}
+	}
+	for rootID, excluded := range ocrExcludedByRoot {
+		policy.OCR[rootID] = BackgroundWorkPolicy{Enabled: true, MaxFileSizeBytes: math.MaxInt64, ExcludedExtensions: excluded}
+	}
+	return c.BackgroundBacklogWithPolicy(ctx, policy)
+}
+
+// BackgroundBacklogWithPolicy reports the currently actionable enrichment
+// backlog. Strict policies suppress roots/features that are disabled in the
+// active configuration.
+func (c *Catalog) BackgroundBacklogWithPolicy(ctx context.Context, policy BackgroundBacklogPolicy) (BackgroundBacklog, error) {
 	c.backlogMu.Lock()
 	if time.Since(c.backlog.at) < backgroundBacklogCacheTTL {
 		value := c.backlog.value
@@ -1208,20 +1238,12 @@ func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcludedByRoot, 
 	c.backlogMu.Unlock()
 	contentEligible := stringSet(extract.IndexableExtensions())
 	ocrEligible := stringSet(extract.OCREligibleExtensions())
-	contentExcluded := make(map[string]map[string]bool, len(contentExcludedByRoot))
-	for rootID, values := range contentExcludedByRoot {
-		contentExcluded[rootID] = stringSet(values)
-	}
-	ocrExcluded := make(map[string]map[string]bool, len(ocrExcludedByRoot))
-	for rootID, values := range ocrExcludedByRoot {
-		ocrExcluded[rootID] = stringSet(values)
-	}
-	query := `SELECT root_id, extension,
+	query := `SELECT root_id, extension, size,
 		SUM(CASE WHEN content_status IN ('not_indexed', 'retry_pending', 'queued') THEN 1 ELSE 0 END),
 		SUM(CASE WHEN ocr_status IN ('pending', 'retry_pending', 'queued') THEN 1 ELSE 0 END),
 		SUM(CASE WHEN hash_status IN ('not_hashed', 'queued') THEN 1 ELSE 0 END)
 		FROM documents WHERE status = 'active' AND is_folder = 0
-		GROUP BY root_id, extension`
+		GROUP BY root_id, extension, size`
 	var backlog BackgroundBacklog
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
@@ -1230,17 +1252,32 @@ func (c *Catalog) BackgroundBacklog(ctx context.Context, contentExcludedByRoot, 
 	defer rows.Close()
 	for rows.Next() {
 		var rootID, extension string
+		var size int64
 		var content, ocr, hash int64
-		if err := rows.Scan(&rootID, &extension, &content, &ocr, &hash); err != nil {
+		if err := rows.Scan(&rootID, &extension, &size, &content, &ocr, &hash); err != nil {
 			return BackgroundBacklog{}, err
 		}
-		if contentEligible[extension] && !contentExcluded[rootID][extension] {
+		contentPolicy, contentOK := policy.Content[rootID]
+		if !contentOK && !policy.Strict {
+			contentPolicy = BackgroundWorkPolicy{Enabled: true, MaxFileSizeBytes: math.MaxInt64}
+		}
+		ocrPolicy, ocrOK := policy.OCR[rootID]
+		if !ocrOK && !policy.Strict {
+			ocrPolicy = BackgroundWorkPolicy{Enabled: true, MaxFileSizeBytes: math.MaxInt64}
+		}
+		hashPolicy, hashOK := policy.Hash[rootID]
+		if !hashOK && !policy.Strict {
+			hashPolicy = BackgroundWorkPolicy{Enabled: true, MaxFileSizeBytes: math.MaxInt64}
+		}
+		if contentPolicy.Enabled && size <= contentPolicy.MaxFileSizeBytes && contentEligible[extension] && !stringSet(contentPolicy.ExcludedExtensions)[extension] {
 			backlog.Content += content
 		}
-		if ocrEligible[extension] && !ocrExcluded[rootID][extension] {
+		if ocrPolicy.Enabled && size <= ocrPolicy.MaxFileSizeBytes && ocrEligible[extension] && !stringSet(ocrPolicy.ExcludedExtensions)[extension] {
 			backlog.OCR += ocr
 		}
-		backlog.Hash += hash
+		if hashPolicy.Enabled && size <= hashPolicy.MaxFileSizeBytes {
+			backlog.Hash += hash
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return BackgroundBacklog{}, err
@@ -1269,7 +1306,7 @@ func (c *Catalog) InvalidateBackgroundBacklog() {
 // WarmAdminStats refreshes expensive dashboard aggregates in one low-priority
 // sequence. Running full-table scans together creates needless I/O contention
 // on large catalogs, regardless of backend.
-func (c *Catalog) WarmAdminStats(maxTextBytes int64, contentExcludedByRoot, ocrExcludedByRoot map[string][]string) {
+func (c *Catalog) WarmAdminStats(maxTextBytes int64, policy BackgroundBacklogPolicy) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
 	}
@@ -1289,7 +1326,7 @@ func (c *Catalog) WarmAdminStats(maxTextBytes int64, contentExcludedByRoot, ocrE
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		_, _ = c.IndexStats(ctx)
-		_, _ = c.BackgroundBacklog(ctx, contentExcludedByRoot, ocrExcludedByRoot)
+		_, _ = c.BackgroundBacklogWithPolicy(ctx, policy)
 		_, _ = c.StorageStats(ctx, maxTextBytes)
 	}()
 }

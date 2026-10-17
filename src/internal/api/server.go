@@ -1569,12 +1569,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	dataDir := config.ResolveDataDir(s.configPath, s.cfg.Index.DataDir)
 	maxStoredTextBytes := s.cfg.Crawler.ContentExtraction.MaxStoredTextKB * 1024
-	contentExcluded := make(map[string][]string, len(s.cfg.Roots))
-	ocrExcluded := make(map[string][]string, len(s.cfg.Roots))
-	for _, root := range s.cfg.Roots {
-		contentExcluded[root.ID] = append([]string(nil), root.ContentExcludedExtensions(s.cfg.Crawler.ContentExtraction.ExcludeExtensions)...)
-		ocrExcluded[root.ID] = append([]string(nil), root.OCRExcludedExtensions(s.cfg.Crawler.OCR.ExcludeExtensions)...)
-	}
+	backgroundPolicy := backgroundBacklogPolicy(s.cfg)
 	watch := s.watcher
 	s.mu.RUnlock()
 	size, err := indexSizeBytes(dataDir)
@@ -1590,7 +1585,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		size = storage.DatabaseBytes
 	}
 	_, backgroundReady := s.cat.CachedBackgroundBacklog()
-	s.cat.WarmAdminStats(maxStoredTextBytes, contentExcluded, ocrExcluded)
+	s.cat.WarmAdminStats(maxStoredTextBytes, backgroundPolicy)
 	watcherStats := watcher.Stats{}
 	if watch != nil {
 		watcherStats = watch.Stats()
@@ -1605,6 +1600,32 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		BackgroundReady bool                 `json:"background_ready"`
 		Watcher         watcher.Stats        `json:"watcher"`
 	}{Stats: s.crawler.Stats(), IndexSizeBytes: size, IndexStats: indexStats, IndexStatsReady: indexStatsReady, Storage: storage, StorageReady: storageReady, BackgroundReady: backgroundReady, Watcher: watcherStats})
+}
+
+func backgroundBacklogPolicy(cfg *config.Config) catalog.BackgroundBacklogPolicy {
+	policy := catalog.BackgroundBacklogPolicy{
+		Strict:  true,
+		Content: make(map[string]catalog.BackgroundWorkPolicy, len(cfg.Roots)),
+		OCR:     make(map[string]catalog.BackgroundWorkPolicy, len(cfg.Roots)),
+		Hash:    make(map[string]catalog.BackgroundWorkPolicy, len(cfg.Roots)),
+	}
+	for _, root := range cfg.Roots {
+		content := cfg.Crawler.ContentExtraction
+		ocr := cfg.Crawler.OCR
+		hashing := cfg.Crawler.Hashing
+		policy.Content[root.ID] = catalog.BackgroundWorkPolicy{
+			Enabled: root.Enabled && root.ContentExtractionEnabled(content.Enabled), MaxFileSizeBytes: content.MaxFileSizeMB << 20,
+			ExcludedExtensions: append([]string(nil), root.ContentExcludedExtensions(content.ExcludeExtensions)...),
+		}
+		policy.OCR[root.ID] = catalog.BackgroundWorkPolicy{
+			Enabled: root.Enabled && root.ContentExtractionEnabled(content.Enabled) && root.OCREnabled(ocr.Enabled), MaxFileSizeBytes: ocr.MaxFileSizeMB << 20,
+			ExcludedExtensions: append([]string(nil), root.OCRExcludedExtensions(ocr.ExcludeExtensions)...),
+		}
+		policy.Hash[root.ID] = catalog.BackgroundWorkPolicy{
+			Enabled: root.Enabled && root.HashingEnabled(hashing.Enabled), MaxFileSizeBytes: hashing.MaxFileSizeMB << 20,
+		}
+	}
+	return policy
 }
 
 // compactIndex is intentionally a global maintenance operation. SQLite needs

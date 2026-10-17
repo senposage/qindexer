@@ -40,50 +40,54 @@ var (
 )
 
 type Crawler struct {
-	cfg                 *config.Config
-	cfgMu               sync.RWMutex
-	cat                 *catalog.Catalog
-	log                 *slog.Logger
-	mu                  sync.Mutex
-	run                 map[string]context.CancelFunc
-	done                map[string]chan struct{}
-	progressMu          sync.RWMutex
-	progress            map[string]*crawlProgress
-	configChanged       chan struct{}
-	startedAt           time.Time
-	activeCrawls        int64
-	activeFullCrawls    int64
-	contentWorkers      int64
-	contentWaiting      int64
-	filesStatted        int64
-	bytesStatted        int64
-	dirsRead            int64
-	rateMu              sync.RWMutex
-	rate                throughputSample
-	hintCrawls          int64
-	fullCrawls          int64
-	initialCrawls       int64
-	lastActivity        int64
-	pausedUntil         int64
-	hardStopped         atomic.Bool
-	nextFullCrawl       int64
-	maintenance         int64
-	maintenanceMu       sync.Mutex
-	maintenancePrevious int64
-	maintenanceTarget   int64
-	pressureMu          sync.RWMutex
-	pressure            adaptivePressure
-	contentJobs         chan backgroundJob
-	ocrJobs             chan backgroundJob
-	hashJobs            chan backgroundJob
-	retry               map[string]bool
-	logState            map[string]suppressedLog
-	backgroundMu        sync.Mutex
-	background          map[string]*backgroundWork
-	backgroundEpoch     map[string]uint64
-	contentActivity     backgroundActivity
-	ocrActivity         backgroundActivity
-	hashActivity        backgroundActivity
+	cfg                  *config.Config
+	cfgMu                sync.RWMutex
+	cat                  *catalog.Catalog
+	log                  *slog.Logger
+	mu                   sync.Mutex
+	run                  map[string]context.CancelFunc
+	done                 map[string]chan struct{}
+	progressMu           sync.RWMutex
+	progress             map[string]*crawlProgress
+	configChanged        chan struct{}
+	startedAt            time.Time
+	activeCrawls         int64
+	activeFullCrawls     int64
+	contentWorkers       int64
+	contentWaiting       int64
+	contentInFlight      int64
+	contentLastDequeued  int64
+	contentLastRescue    int64
+	contentWorkerRescues int64
+	filesStatted         int64
+	bytesStatted         int64
+	dirsRead             int64
+	rateMu               sync.RWMutex
+	rate                 throughputSample
+	hintCrawls           int64
+	fullCrawls           int64
+	initialCrawls        int64
+	lastActivity         int64
+	pausedUntil          int64
+	hardStopped          atomic.Bool
+	nextFullCrawl        int64
+	maintenance          int64
+	maintenanceMu        sync.Mutex
+	maintenancePrevious  int64
+	maintenanceTarget    int64
+	pressureMu           sync.RWMutex
+	pressure             adaptivePressure
+	contentJobs          chan backgroundJob
+	ocrJobs              chan backgroundJob
+	hashJobs             chan backgroundJob
+	retry                map[string]bool
+	logState             map[string]suppressedLog
+	backgroundMu         sync.Mutex
+	background           map[string]*backgroundWork
+	backgroundEpoch      map[string]uint64
+	contentActivity      backgroundActivity
+	ocrActivity          backgroundActivity
+	hashActivity         backgroundActivity
 }
 
 type backgroundJob struct {
@@ -282,37 +286,40 @@ func (c *Crawler) HotFolders(ctx context.Context, rootIDs []string, halfLife tim
 }
 
 type Stats struct {
-	StartedAt         time.Time          `json:"started_at"`
-	UptimeSeconds     float64            `json:"uptime_seconds"`
-	ActiveCrawls      int64              `json:"active_crawls"`
-	ActiveRoots       []string           `json:"active_roots"`
-	InitialCrawls     int64              `json:"initial_crawls"`
-	FilesStatted      int64              `json:"files_statted"`
-	DirectoriesRead   int64              `json:"directories_read"`
-	BytesStatted      int64              `json:"bytes_statted"`
-	FilesPerSecond    float64            `json:"files_per_second"`
-	DirsPerSecond     float64            `json:"directories_per_second"`
-	BytesPerSecond    float64            `json:"bytes_per_second"`
-	HintCrawls        int64              `json:"hint_crawls"`
-	FullCrawls        int64              `json:"full_crawls"`
-	LastActivityUnix  int64              `json:"last_activity_unix"`
-	Paused            bool               `json:"paused"`
-	PausedUntilUnix   int64              `json:"paused_until_unix"`
-	PauseReason       string             `json:"pause_reason,omitempty"`
-	AdaptivePaused    bool               `json:"adaptive_paused"`
-	CPUPercent        float64            `json:"cpu_percent"`
-	DiskBusyPercent   float64            `json:"disk_busy_percent"`
-	NextFullCrawlUnix int64              `json:"next_full_crawl_unix"`
-	ContentQueueDepth int64              `json:"content_queue_depth"`
-	ContentWorkers    int64              `json:"content_workers"`
-	ContentWaiting    int64              `json:"content_waiting"`
-	ContentBuffered   int                `json:"content_buffered"`
-	OCRQueueDepth     int64              `json:"ocr_queue_depth"`
-	HashQueueDepth    int64              `json:"hash_queue_depth"`
-	ContentActivity   BackgroundActivity `json:"content_activity"`
-	OCRActivity       BackgroundActivity `json:"ocr_activity"`
-	HashActivity      BackgroundActivity `json:"hash_activity"`
-	ActiveProgress    []CrawlProgress    `json:"active_progress"`
+	StartedAt                 time.Time          `json:"started_at"`
+	UptimeSeconds             float64            `json:"uptime_seconds"`
+	ActiveCrawls              int64              `json:"active_crawls"`
+	ActiveRoots               []string           `json:"active_roots"`
+	InitialCrawls             int64              `json:"initial_crawls"`
+	FilesStatted              int64              `json:"files_statted"`
+	DirectoriesRead           int64              `json:"directories_read"`
+	BytesStatted              int64              `json:"bytes_statted"`
+	FilesPerSecond            float64            `json:"files_per_second"`
+	DirsPerSecond             float64            `json:"directories_per_second"`
+	BytesPerSecond            float64            `json:"bytes_per_second"`
+	HintCrawls                int64              `json:"hint_crawls"`
+	FullCrawls                int64              `json:"full_crawls"`
+	LastActivityUnix          int64              `json:"last_activity_unix"`
+	Paused                    bool               `json:"paused"`
+	PausedUntilUnix           int64              `json:"paused_until_unix"`
+	PauseReason               string             `json:"pause_reason,omitempty"`
+	AdaptivePaused            bool               `json:"adaptive_paused"`
+	CPUPercent                float64            `json:"cpu_percent"`
+	DiskBusyPercent           float64            `json:"disk_busy_percent"`
+	NextFullCrawlUnix         int64              `json:"next_full_crawl_unix"`
+	ContentQueueDepth         int64              `json:"content_queue_depth"`
+	ContentWorkers            int64              `json:"content_workers"`
+	ContentWaiting            int64              `json:"content_waiting"`
+	ContentInFlight           int64              `json:"content_in_flight"`
+	ContentBuffered           int                `json:"content_buffered"`
+	ContentLastDequeuedAtUnix int64              `json:"content_last_dequeued_at_unix"`
+	ContentWorkerRescues      int64              `json:"content_worker_rescues"`
+	OCRQueueDepth             int64              `json:"ocr_queue_depth"`
+	HashQueueDepth            int64              `json:"hash_queue_depth"`
+	ContentActivity           BackgroundActivity `json:"content_activity"`
+	OCRActivity               BackgroundActivity `json:"ocr_activity"`
+	HashActivity              BackgroundActivity `json:"hash_activity"`
+	ActiveProgress            []CrawlProgress    `json:"active_progress"`
 }
 
 func (c *Crawler) Stats() Stats {
@@ -342,24 +349,27 @@ func (c *Crawler) Stats() Stats {
 		FilesPerSecond: rate.filesPerSecond, DirsPerSecond: rate.dirsPerSecond,
 		BytesPerSecond: rate.bytesPerSecond,
 		HintCrawls:     atomic.LoadInt64(&c.hintCrawls), FullCrawls: atomic.LoadInt64(&c.fullCrawls),
-		LastActivityUnix:  atomic.LoadInt64(&c.lastActivity),
-		Paused:            pausedReason != "" || (pressure.Paused && initialCrawls == 0),
-		PausedUntilUnix:   pausedUntil,
-		PauseReason:       pausedReason,
-		AdaptivePaused:    pressure.Paused,
-		CPUPercent:        pressure.CPUPercent,
-		DiskBusyPercent:   pressure.DiskBusyPercent,
-		NextFullCrawlUnix: atomic.LoadInt64(&c.nextFullCrawl),
-		ContentQueueDepth: backlog.Content,
-		ContentWorkers:    atomic.LoadInt64(&c.contentWorkers),
-		ContentWaiting:    atomic.LoadInt64(&c.contentWaiting),
-		ContentBuffered:   len(c.contentJobs),
-		OCRQueueDepth:     backlog.OCR,
-		HashQueueDepth:    backlog.Hash,
-		ContentActivity:   c.contentActivity.snapshot(),
-		OCRActivity:       c.ocrActivity.snapshot(),
-		HashActivity:      c.hashActivity.snapshot(),
-		ActiveProgress:    c.ActiveProgress(),
+		LastActivityUnix:          atomic.LoadInt64(&c.lastActivity),
+		Paused:                    pausedReason != "" || (pressure.Paused && initialCrawls == 0),
+		PausedUntilUnix:           pausedUntil,
+		PauseReason:               pausedReason,
+		AdaptivePaused:            pressure.Paused,
+		CPUPercent:                pressure.CPUPercent,
+		DiskBusyPercent:           pressure.DiskBusyPercent,
+		NextFullCrawlUnix:         atomic.LoadInt64(&c.nextFullCrawl),
+		ContentQueueDepth:         backlog.Content,
+		ContentWorkers:            atomic.LoadInt64(&c.contentWorkers),
+		ContentWaiting:            atomic.LoadInt64(&c.contentWaiting),
+		ContentInFlight:           atomic.LoadInt64(&c.contentInFlight),
+		ContentBuffered:           len(c.contentJobs),
+		ContentLastDequeuedAtUnix: atomic.LoadInt64(&c.contentLastDequeued),
+		ContentWorkerRescues:      atomic.LoadInt64(&c.contentWorkerRescues),
+		OCRQueueDepth:             backlog.OCR,
+		HashQueueDepth:            backlog.Hash,
+		ContentActivity:           c.contentActivity.snapshot(),
+		OCRActivity:               c.ocrActivity.snapshot(),
+		HashActivity:              c.hashActivity.snapshot(),
+		ActiveProgress:            c.ActiveProgress(),
 	}
 }
 
@@ -1115,6 +1125,7 @@ func (c *Crawler) Loop(ctx context.Context) {
 	startCrawlerRoutine(ctx, &workers, c.log, c.throughputMonitor)
 	startCrawlerRoutine(ctx, &workers, c.log, c.adaptiveMonitor)
 	c.startBackgroundWorkers(ctx, &workers)
+	startCrawlerRoutine(ctx, &workers, c.log, c.contentWorkerSupervisor)
 	startCrawlerRoutine(ctx, &workers, c.log, c.refillBackgroundLoop)
 	scanInterval := c.snapshot().Crawler.ScanInterval()
 	c.log.Info("crawler loop started", "scan_interval", scanInterval)
@@ -1356,13 +1367,26 @@ func enrichmentFailureRetryable(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	for _, permanent := range []string{
-		"unsupported", "malformed", "invalid or incomplete", "encrypted pdf", "not a pdf", "zip: not a valid", "unknown ocr engine", "requires an image", "only accepts pdfs",
+		"unsupported", "malformed", "invalid or incomplete", "encrypted pdf", "not a pdf", "zip: not a valid", "parser panic", "unknown ocr engine", "requires an image", "only accepts pdfs",
 	} {
 		if strings.Contains(message, permanent) {
 			return false
 		}
 	}
 	return true
+}
+
+// safeContentText contains parser panics to one document. Some third-party
+// PDF readers panic for malformed input or transient network reads; allowing
+// that panic to leave contentWorker permanently removes a worker from the pool.
+func safeContentText(read func(string) (string, error), path string) (text string, err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			text = ""
+			err = fmt.Errorf("content parser panic: %v", value)
+		}
+	}()
+	return read(path)
 }
 
 // enrichmentFailureMessage keeps a normal per-file rejection distinct from a
@@ -2490,8 +2514,64 @@ func (c *Crawler) startBackgroundWorkers(ctx context.Context, workers *sync.Wait
 	}
 }
 
+// contentWorkerSupervisor protects the only hand-off between claimed catalog
+// rows and extractors. A blocked parser is tracked as in-flight or waiting;
+// buffered work with neither state means the pool has stopped receiving. A
+// replacement worker is deliberately bounded so a bad runtime state cannot
+// turn into an unbounded goroutine leak.
+func (c *Crawler) contentWorkerSupervisor(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.rescueStalledContentWorker(ctx, time.Now())
+		}
+	}
+}
+
+func (c *Crawler) rescueStalledContentWorker(ctx context.Context, now time.Time) {
+	if !c.contentWorkerStalled(now) {
+		return
+	}
+	buffered := len(c.contentJobs)
+	lastDequeued := atomic.LoadInt64(&c.contentLastDequeued)
+	lastRescue := atomic.LoadInt64(&c.contentLastRescue)
+	if lastRescue != 0 && now.Sub(time.Unix(lastRescue, 0)) < 30*time.Second {
+		return
+	}
+	maxRescues := int64(max(1, c.snapshot().Crawler.ContentExtraction.WorkerCount))
+	if atomic.LoadInt64(&c.contentWorkerRescues) >= maxRescues {
+		atomic.StoreInt64(&c.contentLastRescue, now.Unix())
+		c.log.Error("content worker pool remains stalled", "buffered_jobs", buffered, "workers", atomic.LoadInt64(&c.contentWorkers), "rescue_limit", maxRescues)
+		return
+	}
+	atomic.StoreInt64(&c.contentLastRescue, now.Unix())
+	rescue := atomic.AddInt64(&c.contentWorkerRescues, 1)
+	c.log.Error("content worker pool stalled; starting replacement worker", "buffered_jobs", buffered, "workers", atomic.LoadInt64(&c.contentWorkers), "last_dequeued_at", time.Unix(lastDequeued, 0).UTC(), "replacement", rescue, "replacement_limit", maxRescues)
+	go func() {
+		defer func() {
+			if value := recover(); value != nil {
+				c.log.Error("replacement content worker panic recovered", "panic", value, "stack", string(debug.Stack()))
+			}
+		}()
+		c.contentWorker(ctx)
+	}()
+}
+
+func (c *Crawler) contentWorkerStalled(now time.Time) bool {
+	if len(c.contentJobs) == 0 || atomic.LoadInt64(&c.contentInFlight) != 0 || atomic.LoadInt64(&c.contentWaiting) != 0 {
+		return false
+	}
+	lastDequeued := atomic.LoadInt64(&c.contentLastDequeued)
+	return lastDequeued != 0 && now.Sub(time.Unix(lastDequeued, 0)) >= 15*time.Second
+}
+
 func (c *Crawler) contentWorker(ctx context.Context) {
 	atomic.AddInt64(&c.contentWorkers, 1)
+	atomic.StoreInt64(&c.contentLastDequeued, time.Now().Unix())
 	defer atomic.AddInt64(&c.contentWorkers, -1)
 	for {
 		select {
@@ -2501,80 +2581,85 @@ func (c *Crawler) contentWorker(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			atomic.AddInt64(&c.contentWaiting, 1)
-			waitErr := c.waitForEnrichmentWindow(ctx, job.rootID)
-			atomic.AddInt64(&c.contentWaiting, -1)
-			if waitErr != nil {
-				return
-			}
-			jobCtx, finish, valid := c.beginBackgroundWork(ctx, job.rootID, job.epoch)
-			if !valid {
-				continue
-			}
-			settings := c.snapshot().Crawler.ContentExtraction
-			root, exists := c.rootByID(job.rootID)
-			if !exists || !root.ContentExtractionEnabled(settings.Enabled) {
-				if jobCtx.Err() == nil {
-					_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
+			atomic.StoreInt64(&c.contentLastDequeued, time.Now().Unix())
+			atomic.AddInt64(&c.contentInFlight, 1)
+			func() {
+				defer atomic.AddInt64(&c.contentInFlight, -1)
+				atomic.AddInt64(&c.contentWaiting, 1)
+				waitErr := c.waitForEnrichmentWindow(ctx, job.rootID)
+				atomic.AddInt64(&c.contentWaiting, -1)
+				if waitErr != nil {
+					return
 				}
-				finish()
-				continue
-			}
-			extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
-			if extensionExcluded(extension, root.ContentExcludedExtensions(settings.ExcludeExtensions)) {
-				if jobCtx.Err() == nil {
-					_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
-					ocr := c.snapshot().Crawler.OCR
-					if extract.OCREligible(job.path) && root.OCREnabled(ocr.Enabled) && !extensionExcluded(extension, root.OCRExcludedExtensions(ocr.ExcludeExtensions)) {
-						_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
+				jobCtx, finish, valid := c.beginBackgroundWork(ctx, job.rootID, job.epoch)
+				if !valid {
+					return
+				}
+				settings := c.snapshot().Crawler.ContentExtraction
+				root, exists := c.rootByID(job.rootID)
+				if !exists || !root.ContentExtractionEnabled(settings.Enabled) {
+					if jobCtx.Err() == nil {
+						_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
 					}
-				}
-				finish()
-				continue
-			}
-			completeActivity := c.contentActivity.begin(job.path)
-			text, err := extract.Text(job.path)
-			text = extract.TruncateText(text, settings.MaxStoredTextKB*1024)
-			completeActivity(err)
-			if jobCtx.Err() != nil {
-				finish()
-				continue
-			}
-			status := "extracted"
-			if err != nil {
-				text = ""
-				result, recordErr := c.cat.RecordContentFailure(jobCtx, job.id, job.signature, err.Error(), enrichmentFailureRetryable(err))
-				if recordErr != nil {
-					c.log.Debug("content failure state update failed", "path", job.path, "error", recordErr)
-					_ = c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature)
-				} else {
-					c.log.Debug(enrichmentFailureMessage("Content extraction", result, err), "path", job.path, "status", result, "detail", err)
-				}
-				finish()
-				continue
-			}
-			if err := c.cat.UpdateExtractedContent(jobCtx, job.id, job.signature, status, text); err != nil {
-				if isCrawlerCancellation(jobCtx, err) {
 					finish()
-					continue
+					return
 				}
-				c.log.Debug("content update failed", "path", job.path, "error", err)
-				if releaseErr := c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature); releaseErr != nil {
-					c.log.Debug("content claim release failed", "path", job.path, "error", releaseErr)
+				extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
+				if extensionExcluded(extension, root.ContentExcludedExtensions(settings.ExcludeExtensions)) {
+					if jobCtx.Err() == nil {
+						_ = c.cat.UpdateContentStatus(jobCtx, job.id, job.signature, "not_indexed")
+						ocr := c.snapshot().Crawler.OCR
+						if extract.OCREligible(job.path) && root.OCREnabled(ocr.Enabled) && !extensionExcluded(extension, root.OCRExcludedExtensions(ocr.ExcludeExtensions)) {
+							_ = c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending")
+						}
+					}
+					finish()
+					return
+				}
+				completeActivity := c.contentActivity.begin(job.path)
+				text, err := safeContentText(extract.Text, job.path)
+				text = extract.TruncateText(text, settings.MaxStoredTextKB*1024)
+				completeActivity(err)
+				if jobCtx.Err() != nil {
+					finish()
+					return
+				}
+				status := "extracted"
+				if err != nil {
+					text = ""
+					result, recordErr := c.cat.RecordContentFailure(jobCtx, job.id, job.signature, err.Error(), enrichmentFailureRetryable(err))
+					if recordErr != nil {
+						c.log.Debug("content failure state update failed", "path", job.path, "error", recordErr)
+						_ = c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature)
+					} else {
+						c.log.Debug(enrichmentFailureMessage("Content extraction", result, err), "path", job.path, "status", result, "detail", err)
+					}
+					finish()
+					return
+				}
+				if err := c.cat.UpdateExtractedContent(jobCtx, job.id, job.signature, status, text); err != nil {
+					if isCrawlerCancellation(jobCtx, err) {
+						finish()
+						return
+					}
+					c.log.Debug("content update failed", "path", job.path, "error", err)
+					if releaseErr := c.cat.ReleaseContentClaim(context.Background(), job.id, job.signature); releaseErr != nil {
+						c.log.Debug("content claim release failed", "path", job.path, "error", releaseErr)
+					}
+					finish()
+					return
+				}
+				if exists && strings.TrimSpace(text) == "" && root.OCREnabled(c.snapshot().Crawler.OCR.Enabled) && extract.OCREligible(job.path) {
+					if updateErr := c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending"); updateErr != nil {
+						if isCrawlerCancellation(jobCtx, updateErr) {
+							finish()
+							return
+						}
+						c.log.Debug("OCR pending update failed", "path", job.path, "error", updateErr)
+					}
 				}
 				finish()
-				continue
-			}
-			if err == nil && exists && strings.TrimSpace(text) == "" && root.OCREnabled(c.snapshot().Crawler.OCR.Enabled) && extract.OCREligible(job.path) {
-				if updateErr := c.cat.UpdateOCRStatus(jobCtx, job.id, job.signature, "pending"); updateErr != nil {
-					if isCrawlerCancellation(jobCtx, updateErr) {
-						finish()
-						continue
-					}
-					c.log.Debug("OCR pending update failed", "path", job.path, "error", updateErr)
-				}
-			}
-			finish()
+			}()
 		}
 	}
 }

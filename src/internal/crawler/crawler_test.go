@@ -646,6 +646,32 @@ func TestContentWorkerStatsExposeWaitingWorkerAndBufferedJob(t *testing.T) {
 	t.Fatalf("content worker stats never reflected blocked worker: %#v", c.Stats())
 }
 
+func TestContentWorkerStallRequiresBufferedWorkWithoutAWorkerState(t *testing.T) {
+	c := New(&config.Config{Crawler: config.CrawlerConfig{ContentExtraction: config.ContentExtractionConfig{QueueSize: 1}}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.contentJobs <- backgroundJob{rootID: "root"}
+	now := time.Now()
+	atomic.StoreInt64(&c.contentLastDequeued, now.Add(-16*time.Second).Unix())
+	if !c.contentWorkerStalled(now) {
+		t.Fatal("buffered work without waiting or in-flight work was not detected")
+	}
+	atomic.StoreInt64(&c.contentInFlight, 1)
+	if c.contentWorkerStalled(now) {
+		t.Fatal("active content work must not be treated as a stalled pool")
+	}
+}
+
+func TestSafeContentTextContainsParserPanic(t *testing.T) {
+	text, err := safeContentText(func(string) (string, error) {
+		panic("malformed reader")
+	}, "bad.pdf")
+	if text != "" || err == nil || !strings.Contains(err.Error(), "parser panic") {
+		t.Fatalf("panic conversion = text %q, err %v", text, err)
+	}
+	if enrichmentFailureRetryable(err) {
+		t.Fatal("parser panic must be recorded as unindexable instead of retried forever")
+	}
+}
+
 func TestRepeatedUnreachableLogsAreSuppressed(t *testing.T) {
 	var buf bytes.Buffer
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(&buf, nil)))
