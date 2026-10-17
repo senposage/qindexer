@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>QIndexer Admin</title>
+  <script>
+    (() => {
+      try {
+        const saved = localStorage.getItem("qindexer.admin.theme");
+        const theme = saved || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+      } catch (_) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -12,16 +21,23 @@
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
         <h1>QIndexer</h1>
-        <p>Search service administration <span class="build">UI 1.2.42</span></p>
+        <p>Search service administration <span class="build">UI 1.2.43</span></p>
       </div>
     </div>
-    <div class="auth">
-      <div id="auth-controls" class="auth-controls">
-        <input id="token" type="password" autocomplete="current-password" placeholder="Admin token" aria-describedby="auth-state">
-        <button id="save-token" type="button">Connect</button>
-        <button id="clear-token" type="button" class="secondary">Forget</button>
+    <div class="header-actions">
+      <label class="theme-control" title="Toggle dark theme">
+        <input id="theme-toggle" type="checkbox" aria-label="Dark theme">
+        <span class="theme-switch" aria-hidden="true"></span>
+        <span>Dark</span>
+      </label>
+      <div class="auth">
+        <div id="auth-controls" class="auth-controls">
+          <input id="token" type="password" autocomplete="current-password" placeholder="Admin token" aria-describedby="auth-state">
+          <button id="save-token" type="button">Connect</button>
+          <button id="clear-token" type="button" class="secondary">Forget</button>
+        </div>
+        <span id="auth-state" class="auth-state" data-state="logged-out" role="status">Not connected</span>
       </div>
-      <span id="auth-state" class="auth-state" data-state="logged-out" role="status">Not connected</span>
     </div>
   </header>
 
@@ -252,7 +268,7 @@
         <section class="form-section">
           <div class="form-section-title">
             <p class="eyebrow">This root's file filters</p>
-            <p>File types use dotted extensions such as <code>.pdf</code>. Wildcard fields use glob patterns such as <code>*.pdf</code> or <code>**/Finance/*.pdf</code>. Leave file types empty to allow all.</p>
+            <p>File types use exact dotted extensions such as <code>.pdf</code>. File wildcard fields use one glob per line, for example <code>.temp_write*</code>, <code>*.exe*</code>, or <code>**/Finance/*.pdf</code>. Leave file types empty to allow all.</p>
           </div>
           <div class="rules-grid">
             <label>
@@ -449,7 +465,7 @@
               <section class="settings-section">
 			<div class="form-section-title">
 			  <p class="eyebrow">Global crawl exclusions</p>
-			  <p>Common temporary, OS, recycle, and sync clutter is preloaded here. Root rules only need local exceptions.</p>
+			  <p>Common temporary, OS, recycle, and sync clutter is preloaded here. Enter one filename or path glob per line, such as <code>.temp_write*</code>, <code>*.exe*</code>, or <code>**/cache/*.tmp</code>. Root rules only need local exceptions.</p>
 			</div>
 			<div class="rules-grid">
 			  <label>Exclude file wildcards<textarea id="settings-global-exclude-file" spellcheck="false" placeholder="~$*&#10;*.tmp"></textarea></label>

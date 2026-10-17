@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.43 - 2026-10-17
+
+- Clarify global and root file-filter help with persistent wildcard examples,
+  including `.temp_write*` and `*.exe*`, and distinguish them from exact
+  dotted extension lists.
+
 ## 1.2.42 - 2026-10-17
 
 - Add a PostgreSQL-only **Reclaim PostgreSQL disk space** action. It pauses

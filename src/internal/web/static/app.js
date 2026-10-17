@@ -3,6 +3,7 @@ const message = document.querySelector("#message");
 const endpoint = document.querySelector("#endpoint");
 const authState = document.querySelector("#auth-state");
 const connectButton = document.querySelector("#save-token");
+const themeToggle = document.querySelector("#theme-toggle");
 
 const defaultRootExcludeFilePatterns = [
   "~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*",
@@ -35,6 +36,24 @@ let liveMetricsRefreshing = false;
 
 tokenInput.value = state.token;
 endpoint.textContent = `${location.origin}/admin/v1`;
+applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light", false);
+
+themeToggle.addEventListener("change", () => {
+  applyTheme(themeToggle.checked ? "dark" : "light");
+});
+
+function applyTheme(theme, persist = true) {
+  const selected = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = selected;
+  themeToggle.checked = selected === "dark";
+  if (persist) {
+    try {
+      localStorage.setItem("qindexer.admin.theme", selected);
+    } catch (_) {
+      // Theme selection remains usable when browser storage is unavailable.
+    }
+  }
+}
 
 connectButton.addEventListener("click", () => {
   if (authState.dataset.state === "authenticated") {
