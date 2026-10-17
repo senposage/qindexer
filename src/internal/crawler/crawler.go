@@ -1122,6 +1122,16 @@ func (c *Crawler) Loop(ctx context.Context) {
 		// held hostage by that work; the OS closes any stragglers on exit.
 		go func() { workers.Wait() }()
 	}()
+	// Queue claims belong to this process. If a prior process was killed before
+	// its shutdown handler ran, release only those orphaned reservations before
+	// workers start so an otherwise healthy backlog cannot remain stranded.
+	if c.cat != nil {
+		if err := c.recoverQueuedBackground(ctx); err != nil {
+			c.log.Warn("could not recover queued enrichment claims at startup", "error", err)
+		} else {
+			c.log.Info("recovered queued enrichment claims at startup")
+		}
+	}
 	startCrawlerRoutine(ctx, &workers, c.log, c.throughputMonitor)
 	startCrawlerRoutine(ctx, &workers, c.log, c.adaptiveMonitor)
 	c.startBackgroundWorkers(ctx, &workers)
@@ -1160,6 +1170,15 @@ func (c *Crawler) Loop(ctx context.Context) {
 			c.CrawlAll(ctx)
 		}
 	}
+}
+
+func (c *Crawler) recoverQueuedBackground(ctx context.Context) error {
+	if c.cat == nil {
+		return nil
+	}
+	recoveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return c.cat.ResetQueuedBackground(recoveryCtx)
 }
 
 func resetCrawlTimer(timer *time.Timer, interval time.Duration) {

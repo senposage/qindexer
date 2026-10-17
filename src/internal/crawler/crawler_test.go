@@ -672,6 +672,30 @@ func TestSafeContentTextContainsParserPanic(t *testing.T) {
 	}
 }
 
+func TestStartupRecoveryReleasesOrphanedContentClaims(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+	modified := time.Now().UTC()
+	doc := catalog.Document{ID: "queued", RootID: "root", Path: `C:\queued.pdf`, NormalizedPath: catalog.NormalizePath(`C:\queued.pdf`), Name: "queued.pdf", Extension: "pdf", Size: 1, ModifiedAt: modified, LastSeenGeneration: 1, Signature: catalog.Signature(1, modified)}
+	if _, err := cat.UpsertDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := cat.ClaimPendingContent(ctx, []string{"root"}, 1, 1024, nil); err != nil || len(claimed) != 1 {
+		t.Fatalf("initial claim = %#v, %v", claimed, err)
+	}
+	c := New(&config.Config{}, cat, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := c.recoverQueuedBackground(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := cat.ClaimPendingContent(ctx, []string{"root"}, 1, 1024, nil); err != nil || len(claimed) != 1 {
+		t.Fatalf("recovered claim = %#v, %v", claimed, err)
+	}
+}
+
 func TestRepeatedUnreachableLogsAreSuppressed(t *testing.T) {
 	var buf bytes.Buffer
 	c := New(&config.Config{}, nil, slog.New(slog.NewTextHandler(&buf, nil)))

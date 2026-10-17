@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.36 - 2026-10-17
+
+- Release only orphaned queued content/OCR/hash claims at startup. An unclean
+  process stop can no longer leave documents permanently reserved by workers
+  that no longer exist; no indexed documents or extracted text are removed.
+
 ## 1.2.35 - 2026-10-17
 
 - Fix the content/OCR claim query to normalize dotted admin extensions such as
