@@ -1718,7 +1718,7 @@ func (s *Server) compactIndex(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "index_compact_failed", err.Error())
 		return
 	}
-	s.log.Info("index compact completed", "trimmed_documents", result.TrimmedDocuments, "trimmed_text_bytes", result.TrimmedTextBytes, "before_bytes", result.Before.DatabaseBytes, "after_bytes", result.After.DatabaseBytes)
+	s.log.Info("index compact completed", "maintenance", result.Maintenance, "trimmed_documents", result.TrimmedDocuments, "trimmed_text_bytes", result.TrimmedTextBytes, "before_bytes", result.Before.DatabaseBytes, "after_bytes", result.After.DatabaseBytes)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "compacted", "result": result})
 }
 

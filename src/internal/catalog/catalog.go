@@ -141,6 +141,7 @@ type CompactResult struct {
 	After            StorageStats `json:"after"`
 	TrimmedDocuments int64        `json:"trimmed_documents"`
 	TrimmedTextBytes int64        `json:"trimmed_text_bytes"`
+	Maintenance      string       `json:"maintenance"`
 }
 
 type Document struct {
@@ -481,8 +482,8 @@ func (c *Catalog) CachedStorageStats(maxTextBytes int64) (StorageStats, bool) {
 	return c.storage.value, true
 }
 
-// Compact trims legacy over-limit content and rewrites SQLite to return unused
-// pages to the filesystem. Callers must quiesce crawlers first.
+// Compact trims legacy over-limit content, then runs the appropriate backend
+// maintenance. Callers must quiesce crawlers first.
 func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResult, error) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = 1 << 20
@@ -539,6 +540,7 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 		if _, err := c.db.ExecContext(ctx, `VACUUM (ANALYZE) documents`); err != nil {
 			return result, err
 		}
+		result.Maintenance = "postgres_vacuum_analyze"
 	} else {
 		if _, err := c.db.ExecContext(ctx, `PRAGMA optimize`); err != nil {
 			return result, err
@@ -549,6 +551,7 @@ func (c *Catalog) Compact(ctx context.Context, maxTextBytes int64) (CompactResul
 		if _, err := c.db.ExecContext(ctx, `VACUUM`); err != nil {
 			return result, err
 		}
+		result.Maintenance = "sqlite_optimize_checkpoint_vacuum"
 	}
 	result.After, err = c.storageStats(ctx, maxTextBytes, true)
 	return result, err

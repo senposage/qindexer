@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.41 - 2026-10-17
+
+- Populate the advanced JSON configuration editor automatically after a valid
+  admin session is established, show its loading state, and give the editor a
+  practical working height.
+- Make index storage maintenance backend-aware in the admin UI. PostgreSQL
+  deployments run and report `VACUUM (ANALYZE)` after text trimming; SQLite
+  deployments report their optimize, checkpoint, and vacuum sequence.
+
 ## 1.2.40 - 2026-10-17
 
 - Add severity, source, and text filters to the admin log view. The default

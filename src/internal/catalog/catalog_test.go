@@ -420,6 +420,9 @@ func TestCompactKeepsContentSearchAndTrimsStoredText(t *testing.T) {
 	if result.TrimmedDocuments != 1 || result.TrimmedTextBytes <= 0 {
 		t.Fatalf("unexpected compact result: %#v", result)
 	}
+	if result.Maintenance != "sqlite_optimize_checkpoint_vacuum" {
+		t.Fatalf("unexpected SQLite maintenance result: %q", result.Maintenance)
+	}
 	stats, err := cat.StorageStats(ctx, 64<<10)
 	if err != nil || stats.OversizedDocuments != 0 || stats.DocumentTextBytes > 64<<10 {
 		t.Fatalf("unexpected storage stats: %#v, %v", stats, err)

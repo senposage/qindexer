@@ -12,7 +12,7 @@
       <span class="brand-mark" aria-hidden="true">Q</span>
       <div>
         <h1>QIndexer</h1>
-        <p>Search service administration <span class="build">UI 1.2.40</span></p>
+        <p>Search service administration <span class="build">UI 1.2.41</span></p>
       </div>
     </div>
     <div class="auth">
@@ -509,7 +509,7 @@
 		<div class="settings-form maintenance-settings">
 		  <div class="form-section-title">
 			<p class="eyebrow">Index storage</p>
-			<p>Reclaims unused SQLite pages and trims legacy text above the stored-text limit. Crawls pause and resume automatically.</p>
+			<p id="storage-maintenance-description">Trims legacy text and runs storage maintenance. Crawls pause and resume automatically.</p>
 		  </div>
 		  <div class="form-actions"><button id="compact-index" type="button" class="secondary">Optimize index storage</button></div>
 		</div>
@@ -518,7 +518,7 @@
             <p class="eyebrow">Advanced configuration</p>
             <p>Edit the portable JSON configuration. Database credentials remain hidden and are preserved on save; network settings stay in the form above.</p>
           </div>
-          <textarea id="editable-config" spellcheck="false" aria-label="Editable configuration"></textarea>
+          <textarea id="editable-config" spellcheck="false" aria-label="Editable configuration" placeholder="Loading configuration after authentication..."></textarea>
           <div class="form-actions">
             <span id="config-save-status" class="save-status" role="status" aria-live="polite"></span>
             <button id="load-editable-config" type="button" class="secondary">Load configuration</button>

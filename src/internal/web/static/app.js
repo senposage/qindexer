@@ -20,8 +20,12 @@ const state = {
   editingRoot: null,
   creatingRoot: false,
   crawler: {},
+  index: {},
   network: {},
   logFilters: { level: "attention", source: "all", query: "" },
+  editableConfigLoaded: false,
+  editableConfigLoading: false,
+  editableConfigDirty: false,
 };
 
 let liveMetricsTimer = null;
@@ -110,6 +114,9 @@ document.querySelector("#install-ocr-sidecars").addEventListener("click", () => 
 document.querySelector("#compact-index").addEventListener("click", compactIndex);
 document.querySelector("#load-editable-config").addEventListener("click", loadEditableConfig);
 document.querySelector("#save-editable-config").addEventListener("click", saveEditableConfig);
+document.querySelector("#editable-config").addEventListener("input", () => {
+  if (state.editableConfigLoaded) state.editableConfigDirty = true;
+});
 document.querySelector("#roots").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -273,13 +280,16 @@ async function refresh(options = {}) {
     if (crawls) renderCrawls(crawls.crawls || []);
     if (logs) renderLogs(logs);
     if (config) {
+      state.index = config.index || {};
       state.crawler = config.crawler || {};
       state.watcher = config.watcher || {};
       state.network = { server: config.server || {}, management: config.management || {} };
       renderNetworkSettings(state.network);
       renderIndexingSettings(state.crawler, state.watcher);
+      renderIndexStorageSettings(state.index);
     }
     setAdminVisibility(true);
+    void ensureEditableConfigLoaded();
     const failures = results.filter((item) => item.status === "rejected");
     setMessage(options.message || (failures.length ? `Authenticated. ${failures.length} dashboard request${failures.length === 1 ? "" : "s"} delayed or unavailable.` : "Ready"));
     return true;
@@ -399,7 +409,11 @@ function setAdminVisibility(authenticated) {
 function resetPrivateDashboard() {
   state.roots = [];
   state.crawler = {};
+  state.index = {};
   state.network = {};
+  state.editableConfigLoaded = false;
+  state.editableConfigLoading = false;
+  state.editableConfigDirty = false;
   document.querySelector("#roots").innerHTML = "";
   document.querySelector("#crawls").innerHTML = "";
   document.querySelector("#root-errors").innerHTML = "";
@@ -765,6 +779,31 @@ function renderIndexingSettings(crawler, watcher = {}) {
 	  document.querySelector("#settings-scan-interval").value = Math.max(1, Math.round((crawler.scan_interval_seconds || 21600) / 60));
 }
 
+function indexStorageMaintenance() {
+  const driver = String(state.index?.database?.driver || "sqlite").toLowerCase();
+  if (driver === "postgres" || driver === "postgresql") {
+    return {
+      label: "PostgreSQL index storage",
+      button: "Optimize PostgreSQL storage",
+      description: "Trims legacy text, then runs PostgreSQL VACUUM (ANALYZE). Freed space becomes reusable inside PostgreSQL; this does not run VACUUM FULL or force the database files to shrink. Crawls pause and resume automatically.",
+      confirmation: "This uses standard VACUUM (ANALYZE), not VACUUM FULL, so the live catalog is not rewritten.",
+    };
+  }
+  return {
+    label: "SQLite index storage",
+    button: "Optimize SQLite storage",
+    description: "Trims legacy text, runs PRAGMA optimize, checkpoints the WAL, and vacuums unused SQLite pages. Crawls pause and resume automatically.",
+    confirmation: "This can take time and temporarily needs free disk space.",
+  };
+}
+
+function renderIndexStorageSettings(index) {
+  state.index = index || {};
+  const maintenance = indexStorageMaintenance();
+  document.querySelector("#storage-maintenance-description").textContent = maintenance.description;
+  document.querySelector("#compact-index").textContent = maintenance.button;
+}
+
 function renderNetworkSettings(network) {
   const server = network.server || {};
   const management = network.management || {};
@@ -884,7 +923,8 @@ async function waitForOCRInstallation(button) {
 }
 
 async function compactIndex() {
-  if (!window.confirm("Optimize index storage now? Crawls will checkpoint and pause while SQLite compacts. This can take time and temporarily needs free disk space.")) return;
+  const maintenance = indexStorageMaintenance();
+  if (!window.confirm(`Optimize ${maintenance.label.toLowerCase()} now? Crawls will checkpoint and pause while maintenance runs. ${maintenance.confirmation}`)) return;
   const button = document.querySelector("#compact-index");
   button.disabled = true;
   button.textContent = "Optimizing...";
@@ -892,12 +932,15 @@ async function compactIndex() {
   try {
     const data = await api("/admin/v1/index/compact", { method: "POST", body: "{}" });
     const result = data.result || {};
-    await refresh({ quiet: true, message: `Index optimized: ${formatBytes(result.before?.database_bytes || 0)} to ${formatBytes(result.after?.database_bytes || 0)}` });
+    const completed = result.maintenance === "postgres_vacuum_analyze"
+      ? "PostgreSQL VACUUM (ANALYZE) completed"
+      : "SQLite optimize, checkpoint, and vacuum completed";
+    await refresh({ quiet: true, message: `${completed}: ${formatBytes(result.before?.database_bytes || 0)} to ${formatBytes(result.after?.database_bytes || 0)}` });
   } catch (err) {
     setMessage(err.message);
   } finally {
     button.disabled = false;
-    button.textContent = "Optimize index storage";
+    button.textContent = indexStorageMaintenance().button;
   }
 }
 
@@ -1004,16 +1047,25 @@ function renderLogs(data) {
   if (nearBottom) list.scrollTop = list.scrollHeight;
 }
 
-async function loadEditableConfig() {
+async function ensureEditableConfigLoaded() {
+  if (!state.token || state.editableConfigLoaded || state.editableConfigLoading) return;
+  await loadEditableConfig({ silent: true });
+}
+
+async function loadEditableConfig(options = {}) {
+  const silent = options.silent === true;
   const button = document.querySelector("#load-editable-config");
   const editor = document.querySelector("#editable-config");
   const status = document.querySelector("#config-save-status");
+  state.editableConfigLoading = true;
   button.disabled = true;
   status.className = "save-status";
-  status.textContent = "Loading...";
+  status.textContent = "Loading configuration...";
   try {
     const data = await api("/admin/v1/config/export", { timeoutMs: 8000 });
     editor.value = JSON.stringify(data, null, 2);
+    state.editableConfigLoaded = true;
+    state.editableConfigDirty = false;
     document.querySelector("#save-editable-config").disabled = false;
     status.className = "save-status success";
     status.textContent = "Loaded";
@@ -1022,6 +1074,7 @@ async function loadEditableConfig() {
     status.textContent = "Load failed";
     setMessage(err.message);
   } finally {
+    state.editableConfigLoading = false;
     button.disabled = false;
   }
 }
@@ -1046,6 +1099,7 @@ async function saveEditableConfig() {
     const data = await api("/admin/v1/config/import", { method: "POST", body: JSON.stringify(payload) });
     status.className = "save-status success";
     status.textContent = data.restart_recommended ? "Saved; restart recommended" : "Saved";
+    state.editableConfigDirty = false;
     await refresh({ quiet: true, message: status.textContent });
   } catch (err) {
     status.className = "save-status error";
@@ -1426,6 +1480,7 @@ function showView(view) {
     rootsButton.classList.add("secondary");
     configButton.classList.remove("secondary");
     history.replaceState(null, "", "/config");
+    void ensureEditableConfigLoaded();
     return;
   }
   configView.classList.add("hidden");
