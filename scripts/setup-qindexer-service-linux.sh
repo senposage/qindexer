@@ -15,7 +15,7 @@ usage() {
 Usage: setup-qindexer-service-linux.sh [options]
 
 Installs and starts QIndexer as a native systemd service. A newly created
-configuration has no roots and no token; complete first-run setup in the admin UI.
+configuration has no roots and has generated local search and admin tokens.
 
 Options:
   --install-dir PATH    Binary installation directory, default /opt/qindexer
@@ -114,10 +114,6 @@ write_first_run_config() {
   local search_token admin_token
   search_token="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-40)"
   admin_token="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-40)"
-  $SUDO install -d -m 0700 "$CONFIG_DIR/secrets"
-  printf '%s\n' "$search_token" | $SUDO tee "$CONFIG_DIR/secrets/search-api-token" >/dev/null
-  printf '%s\n' "$admin_token" | $SUDO tee "$CONFIG_DIR/secrets/admin-api-token" >/dev/null
-  $SUDO chmod 0600 "$CONFIG_DIR/secrets/search-api-token" "$CONFIG_DIR/secrets/admin-api-token"
   $SUDO tee "$CONFIG_PATH" >/dev/null <<CONFIG
 server:
   bind: "127.0.0.1:41973"
@@ -126,7 +122,7 @@ server:
   public_base_url: "http://127.0.0.1:41973"
   auth:
     mode: "static-token"
-    token_file: "secrets/search-api-token"
+    token: "$search_token"
 
 management:
   enabled: true
@@ -135,7 +131,7 @@ management:
     - "127.0.0.1:41974"
   auth:
     mode: "admin-token"
-    token_file: "secrets/admin-api-token"
+    token: "$admin_token"
 
 index:
   data_dir: "$DATA_DIR"

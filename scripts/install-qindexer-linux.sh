@@ -102,10 +102,6 @@ write_first_run_config() {
   local search_token admin_token
   search_token="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-40)"
   admin_token="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-40)"
-  $SUDO install -d -m 0700 "$INSTALL_DIR/configs/secrets"
-  printf '%s\n' "$search_token" | $SUDO tee "$INSTALL_DIR/configs/secrets/search-api-token" >/dev/null
-  printf '%s\n' "$admin_token" | $SUDO tee "$INSTALL_DIR/configs/secrets/admin-api-token" >/dev/null
-  $SUDO chmod 0600 "$INSTALL_DIR/configs/secrets/search-api-token" "$INSTALL_DIR/configs/secrets/admin-api-token"
   $SUDO tee "$INSTALL_DIR/configs/qindexer.yaml" >/dev/null <<CONFIG
 server:
   bind: "127.0.0.1:41973"
@@ -114,7 +110,7 @@ server:
   public_base_url: "http://127.0.0.1:41973"
   auth:
     mode: "static-token"
-    token_file: "secrets/search-api-token"
+    token: "$search_token"
 
 management:
   enabled: true
@@ -123,7 +119,7 @@ management:
     - "127.0.0.1:41974"
   auth:
     mode: "admin-token"
-    token_file: "secrets/admin-api-token"
+    token: "$admin_token"
 
 index:
   data_dir: "$INSTALL_DIR/data"
