@@ -81,20 +81,20 @@ type repairProgress struct {
 const maxRequestBodyBytes = 1 << 20
 
 var defaultRootExcludeFilePatterns = []string{
-	"~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*",
-	"*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo", "*.lock", "*.lck", "*.dmp",
-	"pagefile.sys", "swapfile.sys", "hiberfil.sys",
+	"~$*", ".~lock.*#", ".temp_write*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*", ".directory", ".nomedia",
+	"*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.opdownload", "*.aria2", "*.filepart", "*.crswap",
+	"*.sw", "*.swp", "*.swo", "*.swn", "*.bak", "*.lock", "*.lck", "*.laccdb", "*.ldb", "*.dmp", "*.pid", "*.sock",
+	"*.lnk", "*.url", "*.webloc", "*.pyc", "*.pyo", "NTUSER.DAT*", "pagefile.sys", "swapfile.sys", "hiberfil.sys",
 }
 
 var defaultRootExcludeFolderPatterns = []string{
-	"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**",
-	"**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
-	"**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**",
-	"**/.svn/**", "**/.hg/**", "**/.terraform/**", "**/.venv/**", "**/__pycache__/**", "**/.pytest_cache/**",
-	"**/System Volume Information/**", "**/$WinREAgent/**", "**/Recovery/**", "**/PerfLogs/**", "**/Config.Msi/**", "**/MSOCache/**",
-	"**/Windows/**", "**/Program Files/**", "**/Program Files (x86)/**", "**/ProgramData/**",
-	"**/AppData/Local/Temp/**", "**/AppData/Local/CrashDumps/**", "**/AppData/Local/Microsoft/Windows/WebCache/**", "**/AppData/Local/Packages/**",
-	"**/proc/**", "**/sys/**", "**/dev/**", "**/run/**", "**/lost+found/**", "**/var/cache/**",
+	"**/.git/**", "**/.svn/**", "**/.hg/**", "**/.terraform/**", "**/.venv/**", "**/.tox/**", "**/__pycache__/**", "**/.pytest_cache/**",
+	"**/node_modules/**", "**/bower_components/**", "**/.gradle/**", "**/.m2/repository/**", "**/.nuget/packages/**", "**/.npm/**", "**/.pnpm-store/**", "**/.cache/**",
+	"**/.Trash/**", "**/.Trash-*/**", "**/.Trashes/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**", "**/.fseventsd/**", "**/.DocumentRevisions-V100/**", "**/.TemporaryItems/**",
+	"**/@eaDir/**", "**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/#snapshot/**", "**/@GMT-*/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
+	"**/.snapshot/**", "**/.snapshots/**", "**/.zfs/**", "**/.local/share/Trash/**", "**/.stfolder/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**", "**/.dropbox.cache/**",
+	"**/System Volume Information/**", "**/$WinREAgent/**", "**/Recovery/**", "**/PerfLogs/**", "**/Config.Msi/**", "**/MSOCache/**", "**/Windows/**", "**/Program Files/**", "**/Program Files (x86)/**", "**/ProgramData/**", "**/AppData/**", "**/OneDriveTemp/**",
+	"**/proc/**", "**/sys/**", "**/dev/**", "**/run/**", "**/tmp/**", "**/var/cache/**", "**/var/tmp/**", "**/lost+found/**",
 }
 
 type rootAliasView struct {

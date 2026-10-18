@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestRootEnrichmentOverridesGlobalDefaults(t *testing.T) {
 	trueValue, falseValue := true, false
@@ -74,6 +77,29 @@ func TestDatabaseDefaultsToPostgresAndRequiresDSN(t *testing.T) {
 	}
 }
 
+func TestPrivatePostgresRequiresPostgresConfiguration(t *testing.T) {
+	cfg := Config{
+		Server:     ServerConfig{Bind: "127.0.0.1:41973"},
+		Management: ManagementConfig{Bind: "127.0.0.1:41974"},
+		Index: IndexConfig{Database: DatabaseConfig{
+			Driver: "postgres",
+			DSN:    "postgres://qindexer:secret@127.0.0.1:5432/qindexer?sslmode=disable",
+			PrivatePostgres: &PrivatePostgresConfig{
+				DataDir: "data/postgresql/data",
+				Command: "/usr/bin/postgres",
+			},
+		}},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("private PostgreSQL configuration should validate: %v", err)
+	}
+	cfg.Index.Database.Driver = "sqlite"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected private PostgreSQL with SQLite to fail validation")
+	}
+}
+
 func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
 	cfg := Config{}
 	cfg.ApplyDefaults()
@@ -88,6 +114,25 @@ func TestCrawlerDefaultsScaleWithAvailableCPUs(t *testing.T) {
 	}
 	if cfg.Watcher.HintBatchSeconds != 15 {
 		t.Fatalf("watcher hint batch interval = %d, want 15", cfg.Watcher.HintBatchSeconds)
+	}
+	for _, pattern := range []string{".temp_write*", "*.sw", "*.lnk"} {
+		if !hasString(cfg.Crawler.ExcludeFilePatterns, pattern) {
+			t.Fatalf("missing default file exclusion %q: %#v", pattern, cfg.Crawler.ExcludeFilePatterns)
+		}
+	}
+	for _, pattern := range []string{"**/AppData/**", "**/.Trash/**", "**/@GMT-*/**", "**/.local/share/Trash/**"} {
+		if !hasString(cfg.Crawler.ExcludeFolderPatterns, pattern) {
+			t.Fatalf("missing default folder exclusion %q: %#v", pattern, cfg.Crawler.ExcludeFolderPatterns)
+		}
+	}
+}
+
+func TestPackagedExampleConfigurationsValidate(t *testing.T) {
+	for _, name := range []string{"example.yaml", "windows-nas.example.yaml", "linux-nas.example.yaml"} {
+		path := filepath.Join("..", "..", "configs", name)
+		if _, err := Load(path); err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
 	}
 }
 
@@ -168,4 +213,13 @@ func TestCustomizedCrawlerProfileIsNotOverwritten(t *testing.T) {
 	if cfg.Crawler.DirectoryWorkerCount != 12 || cfg.Crawler.MetadataWorkerCount != 24 || cfg.Crawler.MetadataQueueSize != 4000 || cfg.Crawler.IndexBatchSize != 800 {
 		t.Fatalf("custom profile was overwritten: %#v", cfg.Crawler)
 	}
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

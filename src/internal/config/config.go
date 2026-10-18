@@ -113,8 +113,26 @@ type OCRConfig struct {
 
 var defaultContentExcludeExtensions = []string{".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp", ".tmp", ".bak", ".part", ".partial", ".crdownload", ".download", ".lnk", ".url", ".ds_store", ".thumbs.db"}
 var defaultOCRExcludeExtensions = []string{".tmp", ".bak", ".part", ".partial", ".crdownload", ".download", ".lnk", ".url", ".ds_store", ".thumbs.db"}
-var defaultExcludeFilePatterns = []string{"~$*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*", "*.tmp", "*.temp", "*.bak", "*.partial", "*.part", "*.crdownload", "*.download", "*.swp", "*.swo"}
-var defaultExcludeFolderPatterns = []string{"**/.git/**", "**/node_modules/**", "**/.Trash-*/**", "**/@eaDir/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**", "**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**", "**/AppData/Local/Temp/**"}
+
+// Default exclusion rules are intentionally limited to known transient,
+// generated, operating-system, and synchronization metadata. They do not
+// exclude ordinary document, source, archive, or media formats.
+var defaultExcludeFilePatterns = []string{
+	"~$*", ".~lock.*#", ".temp_write*", "Thumbs.db", "ehthumbs.db", "desktop.ini", ".DS_Store", "._*", ".directory", ".nomedia",
+	"*.tmp", "*.temp", "*.partial", "*.part", "*.crdownload", "*.download", "*.opdownload", "*.aria2", "*.filepart", "*.crswap",
+	"*.sw", "*.swp", "*.swo", "*.swn", "*.bak", "*.lock", "*.lck", "*.laccdb", "*.ldb", "*.dmp", "*.pid", "*.sock",
+	"*.lnk", "*.url", "*.webloc", "*.pyc", "*.pyo", "NTUSER.DAT*", "pagefile.sys", "swapfile.sys", "hiberfil.sys",
+}
+
+var defaultExcludeFolderPatterns = []string{
+	"**/.git/**", "**/.svn/**", "**/.hg/**", "**/.terraform/**", "**/.venv/**", "**/.tox/**", "**/__pycache__/**", "**/.pytest_cache/**",
+	"**/node_modules/**", "**/bower_components/**", "**/.gradle/**", "**/.m2/repository/**", "**/.nuget/packages/**", "**/.npm/**", "**/.pnpm-store/**", "**/.cache/**",
+	"**/.Trash/**", "**/.Trash-*/**", "**/.Trashes/**", "**/.AppleDouble/**", "**/.Spotlight-V100/**", "**/.fseventsd/**", "**/.DocumentRevisions-V100/**", "**/.TemporaryItems/**",
+	"**/@eaDir/**", "**/@Recently-Snapshot/**", "**/@Recycle/**", "**/#recycle/**", "**/#snapshot/**", "**/@GMT-*/**", "**/$RECYCLE.BIN/**", "**/RECYCLER/**",
+	"**/.snapshot/**", "**/.snapshots/**", "**/.zfs/**", "**/.local/share/Trash/**", "**/.stfolder/**", "**/.sync/**", "**/.qsync/**", "**/.qsync_sn/**", "**/.dropbox.cache/**",
+	"**/System Volume Information/**", "**/$WinREAgent/**", "**/Recovery/**", "**/PerfLogs/**", "**/Config.Msi/**", "**/MSOCache/**", "**/Windows/**", "**/Program Files/**", "**/Program Files (x86)/**", "**/ProgramData/**", "**/AppData/**", "**/OneDriveTemp/**",
+	"**/proc/**", "**/sys/**", "**/dev/**", "**/run/**", "**/tmp/**", "**/var/cache/**", "**/var/tmp/**", "**/lost+found/**",
+}
 
 type HashingConfig struct {
 	Enabled       bool  `yaml:"enabled" json:"enabled"`

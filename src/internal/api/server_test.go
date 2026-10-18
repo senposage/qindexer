@@ -293,10 +293,10 @@ func TestRequestAccessLogIsSeparateFromOperationalLog(t *testing.T) {
 
 func TestNewRootUsesEditableJunkRuleDefaults(t *testing.T) {
 	root := rootConfigFromUpdate("new-root", rootRulesUpdate{Path: `X:\Shared`, Enabled: true})
-	if !hasString(root.ExcludeFilePatterns, "~$*") || !hasString(root.ExcludeFilePatterns, "Thumbs.db") {
+	if !hasString(root.ExcludeFilePatterns, "~$*") || !hasString(root.ExcludeFilePatterns, "Thumbs.db") || !hasString(root.ExcludeFilePatterns, ".temp_write*") || !hasString(root.ExcludeFilePatterns, "*.sw") {
 		t.Fatalf("missing default file exclusions: %v", root.ExcludeFilePatterns)
 	}
-	if !hasString(root.ExcludeFolderPatterns, "**/@eaDir/**") || !hasString(root.ExcludeFolderPatterns, "**/$RECYCLE.BIN/**") {
+	if !hasString(root.ExcludeFolderPatterns, "**/@eaDir/**") || !hasString(root.ExcludeFolderPatterns, "**/$RECYCLE.BIN/**") || !hasString(root.ExcludeFolderPatterns, "**/AppData/**") || !hasString(root.ExcludeFolderPatterns, "**/.local/share/Trash/**") {
 		t.Fatalf("missing default folder exclusions: %v", root.ExcludeFolderPatterns)
 	}
 

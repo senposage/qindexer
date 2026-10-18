@@ -86,6 +86,13 @@ migrate an existing SQLite catalog into PostgreSQL. Keep the DSN out of config
 exports and source control. A TLS-enabled deployment should use an appropriate
 `sslmode` rather than the local-only `sslmode=disable` example.
 
+On Linux, an installer-managed cluster also writes `private_postgres` with its
+data directory and `postgres` executable. QIndexer starts that child only for
+its own PostgreSQL-backed service and stops it during a clean shutdown. It
+never enables, starts, or modifies the host distribution's generic PostgreSQL
+service. This block is installer-owned; leave it out for external PostgreSQL
+or SQLite configurations.
+
 ## Crawler
 
 ```yaml
@@ -329,15 +336,30 @@ text search terms are not rewritten.
 
 `crawler.exclude_file_patterns` and `crawler.exclude_folder_patterns` apply to
 every root. QIndexer preloads them with common Office lock files, temporary
-downloads, shell metadata, recycle bins, snapshots, sync metadata, and local
-development folders. They are additive with a root's own filters, so normal
-roots can stay focused on business-specific rules.
+downloads, editor swap files, browser partial downloads, shell metadata,
+recycle bins, snapshots, sync metadata, package/build caches, and OS runtime
+trees. They are additive with a root's own filters, so normal roots can stay
+focused on business-specific rules.
 
 ```yaml
 crawler:
-  exclude_file_patterns: ["~$*", "*.tmp", "*.crdownload"]
-  exclude_folder_patterns: ["**/$RECYCLE.BIN/**", "**/@Recycle/**"]
+  exclude_file_patterns: ["~$*", ".temp_write*", "*.tmp", "*.crdownload"]
+  exclude_folder_patterns: ["**/$RECYCLE.BIN/**", "**/@Recycle/**", "**/AppData/**"]
 ```
+
+Patterns are evaluated against both the full normalized path and its base
+name. Enter one pattern per line in the admin UI. For example,
+`.temp_write*` excludes transient Steam-style files with that prefix, while
+`**/@GMT-*/**` excludes a NAS snapshot subtree. File patterns suppress only
+matching files; folder patterns suppress the named directory and all of its
+descendants from traversal, watcher registration, hot-folder selection, and
+filesystem hints.
+
+The packaged default profile deliberately does **not** exclude ordinary user
+documents, source files, archives, logs, executable files, or media by file
+extension. It is intended to remove generated noise without hiding potentially
+useful search results. The full editable default list is included in
+`configs/example.yaml`.
 
 ## Root Rules
 
@@ -389,6 +411,10 @@ Recommended default folder exclusions for office/NAS roots:
 - `**/$RECYCLE.BIN/**`
 - `**/RECYCLER/**`
 - `**/.sync/**`
+- `**/AppData/**`
+- `**/.Trash/**`
+- `**/@GMT-*/**`
+- `**/.local/share/Trash/**`
 
 These are now crawler-wide defaults and do not need to be duplicated on every
 root unless a root has additional local restrictions.
