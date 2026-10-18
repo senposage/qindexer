@@ -137,7 +137,7 @@ CONFIG
   fi
   $SUDO tee -a "$INSTALL_DIR/configs/qindexer.yaml" >/dev/null <<CONFIG
 
-roots: []
+roots:
 CONFIG
   $SUDO chmod 0600 "$INSTALL_DIR/configs/qindexer.yaml"
 }

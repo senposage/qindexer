@@ -147,7 +147,7 @@ CONFIG
   if [[ -n "$DATABASE_USER" ]]; then printf '      user: "%s"\n' "$DATABASE_USER" | $SUDO tee -a "$CONFIG_PATH" >/dev/null; fi
   $SUDO tee -a "$CONFIG_PATH" >/dev/null <<CONFIG
 
-roots: []
+roots:
 CONFIG
   $SUDO chmod 0600 "$CONFIG_PATH"
 }
