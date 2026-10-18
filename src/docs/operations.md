@@ -315,11 +315,13 @@ default command names. Installing sidecars alone does not enable OCR or create
 an enrichment backlog.
 
 On a fresh installation, both package installers provision a private,
-loopback-only PostgreSQL service, a `qindexer` database, and an application
-login before writing the local configuration. QSurfer should treat this as an
-internal QIndexer dependency: it must not create a SQLite file or manage the
-generated database DSN. Provide an existing config with an external PostgreSQL
-DSN or `database.driver: sqlite` to override that default. `-SkipDatabase` and
+loopback-only PostgreSQL catalog and application login before writing the local
+configuration. QSurfer should treat this as an internal QIndexer dependency:
+it must not create a SQLite file or manage the generated database DSN. On
+Linux, QIndexer itself starts and stops that private cluster; the installer
+does not enable or alter the host distribution's generic PostgreSQL service.
+Provide an existing config with an external PostgreSQL DSN or
+`database.driver: sqlite` to override that default. `-SkipDatabase` and
 `--skip-database` reject a placeholder config rather than creating an unusable
 service.
 

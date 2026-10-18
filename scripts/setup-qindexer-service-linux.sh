@@ -53,7 +53,8 @@ source "$SCRIPT_DIR/install-progress-linux.sh"
 report_progress() {
   write_qindexer_install_progress "$PROGRESS_FILE" "$1" "$2" "$3" "$4"
 }
-trap 'report_progress failed service_install 100 "QIndexer service installation failed."' ERR
+POSTGRES_SETUP_FAILED=0
+trap '[[ "$POSTGRES_SETUP_FAILED" -eq 1 ]] || report_progress failed service_install 100 "QIndexer service installation failed."' ERR
 report_progress running service_prepare 5 "Preparing the QIndexer service installation."
 if [[ -z "$BINARY_PATH" ]]; then
   for candidate in "$BUNDLE_ROOT/qindexer" "$BUNDLE_ROOT/qindexer_linux_amd64" "$BUNDLE_ROOT/src/dist/qindexer_linux_amd64"; do
@@ -63,7 +64,11 @@ fi
 [[ -n "$BINARY_PATH" && -f "$BINARY_PATH" ]] || { echo "QIndexer Linux binary not found. Pass --binary PATH." >&2; exit 1; }
 
 SUDO=""
-if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then SUDO="sudo"; fi
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  SUDO="sudo"
+  report_progress running service_elevation 8 "Requesting permission to install the QIndexer service."
+  sudo -v
+fi
 
 CONFIG_PATH="$CONFIG_DIR/qindexer.yaml"
 LOG_DIR="$DATA_DIR/logs"
@@ -73,6 +78,8 @@ UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
 $SUDO install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/scripts"
 $SUDO install -d -m 0700 "$CONFIG_DIR" "$DATA_DIR" "$LOG_DIR"
+$SUDO touch "$LOG_DIR/install.log"
+$SUDO chmod 0600 "$LOG_DIR/install.log"
 $SUDO install -m 0755 "$BINARY_PATH" "$INSTALL_DIR/qindexer"
 report_progress running service_files 20 "Installing QIndexer service files."
 if [[ -f "$SCRIPT_DIR/setup-sidecars-linux.sh" ]]; then
@@ -85,12 +92,32 @@ if [[ -f "$SCRIPT_DIR/install-progress-linux.sh" ]]; then
   $SUDO install -m 0755 "$SCRIPT_DIR/install-progress-linux.sh" "$INSTALL_DIR/scripts/install-progress-linux.sh"
 fi
 
-if [[ ! -f "$CONFIG_PATH" ]]; then
-  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "--skip-database requires an existing configuration with an explicit database backend." >&2; exit 2; }
-  [[ -x "$POSTGRES_SCRIPT" ]] || { echo "Packaged PostgreSQL setup script is missing: $POSTGRES_SCRIPT" >&2; exit 1; }
-  DATABASE_JSON="$($SUDO "$POSTGRES_SCRIPT" --install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR" --progress-file "$PROGRESS_FILE")"
+INSTALL_LOG="$LOG_DIR/install.log"
+DATABASE_DSN=""
+DATABASE_PRIVATE_DIR=""
+DATABASE_COMMAND=""
+DATABASE_USER=""
+
+provision_database() {
+  if ! DATABASE_JSON="$($SUDO "$POSTGRES_SCRIPT" --install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR" --progress-file "$PROGRESS_FILE" --log-file "$INSTALL_LOG")"; then
+    POSTGRES_SETUP_FAILED=1
+    return 1
+  fi
   DATABASE_DSN="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"dsn":"\([^"]*\)".*/\1/p')"
-  [[ -n "$DATABASE_DSN" ]] || { echo "PostgreSQL setup did not return a QIndexer DSN." >&2; exit 1; }
+  DATABASE_PRIVATE_DIR="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"private_data_dir":"\([^"]*\)".*/\1/p')"
+  DATABASE_COMMAND="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"postgres_command":"\([^"]*\)".*/\1/p')"
+  DATABASE_USER="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"private_user":"\([^"]*\)".*/\1/p')"
+  [[ -n "$DATABASE_DSN" && -n "$DATABASE_PRIVATE_DIR" && -n "$DATABASE_COMMAND" ]] || { echo "PostgreSQL setup did not return a complete QIndexer database configuration." >&2; exit 1; }
+}
+
+write_first_run_config() {
+  local search_token admin_token
+  search_token="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-40)"
+  admin_token="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-40)"
+  $SUDO install -d -m 0700 "$CONFIG_DIR/secrets"
+  printf '%s\n' "$search_token" | $SUDO tee "$CONFIG_DIR/secrets/search-api-token" >/dev/null
+  printf '%s\n' "$admin_token" | $SUDO tee "$CONFIG_DIR/secrets/admin-api-token" >/dev/null
+  $SUDO chmod 0600 "$CONFIG_DIR/secrets/search-api-token" "$CONFIG_DIR/secrets/admin-api-token"
   $SUDO tee "$CONFIG_PATH" >/dev/null <<CONFIG
 server:
   bind: "127.0.0.1:41973"
@@ -99,6 +126,7 @@ server:
   public_base_url: "http://127.0.0.1:41973"
   auth:
     mode: "static-token"
+    token_file: "secrets/search-api-token"
 
 management:
   enabled: true
@@ -107,6 +135,7 @@ management:
     - "127.0.0.1:41974"
   auth:
     mode: "admin-token"
+    token_file: "secrets/admin-api-token"
 
 index:
   data_dir: "$DATA_DIR"
@@ -115,19 +144,85 @@ index:
     dsn: "$DATABASE_DSN"
     max_open_conns: 32
     max_idle_conns: 8
+    private_postgres:
+      data_dir: "$DATABASE_PRIVATE_DIR"
+      command: "$DATABASE_COMMAND"
+CONFIG
+  if [[ -n "$DATABASE_USER" ]]; then printf '      user: "%s"\n' "$DATABASE_USER" | $SUDO tee -a "$CONFIG_PATH" >/dev/null; fi
+  $SUDO tee -a "$CONFIG_PATH" >/dev/null <<CONFIG
 
 roots: []
 CONFIG
   $SUDO chmod 0600 "$CONFIG_PATH"
-  echo "Created an empty configuration. Add roots and set the first admin token in the web UI."
+}
+
+upgrade_legacy_sqlite_config() {
+  local backup temporary
+  backup="$CONFIG_PATH.pre-postgres-$(date -u +%Y%m%dT%H%M%SZ).bak"
+  temporary="$(mktemp)"
+  $SUDO cp "$CONFIG_PATH" "$backup"
+  $SUDO awk -v dsn="$DATABASE_DSN" -v data_dir="$DATABASE_PRIVATE_DIR" -v command="$DATABASE_COMMAND" -v user="$DATABASE_USER" '
+    /^index:[[:space:]]*$/ && !inserted {
+      print
+      print "  database:"
+      print "    driver: \"postgres\""
+      print "    dsn: \"" dsn "\""
+      print "    max_open_conns: 32"
+      print "    max_idle_conns: 8"
+      print "    private_postgres:"
+      print "      data_dir: \"" data_dir "\""
+      print "      command: \"" command "\""
+      if (user != "") print "      user: \"" user "\""
+      inserted = 1
+      next
+    }
+    { print }
+    END { if (!inserted) exit 42 }
+  ' "$CONFIG_PATH" > "$temporary" || { rm -f "$temporary"; echo "Cannot upgrade the legacy configuration because it has no top-level index section." >&2; exit 1; }
+  $SUDO install -m 0600 "$temporary" "$CONFIG_PATH"
+  rm -f "$temporary"
+  echo "Upgraded the legacy SQLite-era configuration to PostgreSQL. Backup: $backup" >&2
+}
+
+add_private_postgres_config() {
+  local temporary
+  $SUDO grep -qE '^[[:space:]]+private_postgres:[[:space:]]*$' "$CONFIG_PATH" && return
+  temporary="$(mktemp)"
+  $SUDO awk -v data_dir="$DATABASE_PRIVATE_DIR" -v command="$DATABASE_COMMAND" -v user="$DATABASE_USER" '
+    /^[[:space:]]+dsn:[[:space:]]*/ && !inserted {
+      print
+      print "    private_postgres:"
+      print "      data_dir: \"" data_dir "\""
+      print "      command: \"" command "\""
+      if (user != "") print "      user: \"" user "\""
+      inserted = 1
+      next
+    }
+    { print }
+    END { if (!inserted) exit 42 }
+  ' "$CONFIG_PATH" > "$temporary" || { rm -f "$temporary"; echo "Cannot add private PostgreSQL settings to the supplied configuration." >&2; exit 1; }
+  $SUDO install -m 0600 "$temporary" "$CONFIG_PATH"
+  rm -f "$temporary"
+}
+
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "--skip-database requires an existing configuration with an explicit database backend." >&2; exit 2; }
+  [[ -x "$POSTGRES_SCRIPT" ]] || { echo "Packaged PostgreSQL setup script is missing: $POSTGRES_SCRIPT" >&2; exit 1; }
+  provision_database
+  write_first_run_config
+  echo "Created an empty configuration with generated local tokens."
 fi
 if $SUDO grep -Fq 'postgres://qindexer:change-me@' "$CONFIG_PATH"; then
   [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "The existing configuration contains the PostgreSQL placeholder DSN, but --skip-database was requested." >&2; exit 2; }
   [[ -x "$POSTGRES_SCRIPT" ]] || { echo "Packaged PostgreSQL setup script is missing: $POSTGRES_SCRIPT" >&2; exit 1; }
-  DATABASE_JSON="$($SUDO "$POSTGRES_SCRIPT" --install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR" --progress-file "$PROGRESS_FILE")"
-  DATABASE_DSN="$(printf '%s' "$DATABASE_JSON" | sed -n 's/.*"dsn":"\([^"]*\)".*/\1/p')"
-  [[ -n "$DATABASE_DSN" ]] || { echo "PostgreSQL setup did not return a QIndexer DSN." >&2; exit 1; }
+  provision_database
   $SUDO sed -i "s|^    dsn:.*|    dsn: \"$DATABASE_DSN\"|" "$CONFIG_PATH"
+  add_private_postgres_config
+elif ! $SUDO grep -qE '^[[:space:]]+database:[[:space:]]*$' "$CONFIG_PATH"; then
+  [[ "$SKIP_DATABASE" -eq 0 ]] || { echo "The existing configuration predates PostgreSQL support; remove --skip-database to upgrade it." >&2; exit 2; }
+  report_progress running service_upgrade 70 "Upgrading the legacy SQLite-era configuration."
+  provision_database
+  upgrade_legacy_sqlite_config
 fi
 
 if [[ "$SIDECAR_MODE" == "prompt" && -t 0 ]]; then

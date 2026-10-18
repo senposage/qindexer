@@ -3,13 +3,19 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"qindexer/internal/config"
 )
+
+func startPrivatePostgres(context.Context, *config.Config, string, string, *slog.Logger) (privatePostgresHandle, error) {
+	return nil, nil
+}
 
 func stopPrivatePostgres(configPath string, cfg *config.Config) error {
 	if cfg.Index.Database.Driver != "postgres" || !strings.Contains(cfg.Index.Database.DSN, "@127.0.0.1:") {

@@ -27,6 +27,10 @@ type App struct {
 	StopPrivatePostgresOnExit bool
 }
 
+type privatePostgresHandle interface {
+	stop(*slog.Logger)
+}
+
 func (a App) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -56,12 +60,22 @@ func (a App) Run(ctx context.Context) error {
 		log.Warn("access logging unavailable; using operational log", "path", accessLogPath, "error", accessLogErr)
 	}
 	api.PrepareSidecarEnvironment(log, cfg.Crawler.OCR)
+	privatePostgres, err := startPrivatePostgres(runCtx, cfg, a.ConfigPath, dataDir, log)
+	if err != nil {
+		return err
+	}
 	cat, err := openCatalog(ctx, cfg, a.ConfigPath)
 	if err != nil {
+		if privatePostgres != nil {
+			privatePostgres.stop(log)
+		}
 		return err
 	}
 	defer func() {
 		cat.Close()
+		if privatePostgres != nil {
+			privatePostgres.stop(log)
+		}
 		if a.StopPrivatePostgresOnExit {
 			if err := stopPrivatePostgres(a.ConfigPath, cfg); err != nil {
 				log.Warn("private PostgreSQL stop failed during service shutdown", "error", err)
@@ -253,6 +267,14 @@ func (a App) CrawlOnce(ctx context.Context, rootID string) error {
 	log := a.Logger
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stdout, nil))
+	}
+	dataDir := config.ResolveDataDir(a.ConfigPath, cfg.Index.DataDir)
+	privatePostgres, err := startPrivatePostgres(ctx, cfg, a.ConfigPath, dataDir, log)
+	if err != nil {
+		return err
+	}
+	if privatePostgres != nil {
+		defer privatePostgres.stop(log)
 	}
 	cat, err := openCatalog(ctx, cfg, a.ConfigPath)
 	if err != nil {

@@ -52,10 +52,19 @@ type IndexConfig struct {
 // DatabaseConfig selects the catalog backend. PostgreSQL is the default for
 // durable multi-root indexes; SQLite remains available for portable installs.
 type DatabaseConfig struct {
-	Driver       string `yaml:"driver" json:"driver"`
-	DSN          string `yaml:"dsn" json:"dsn,omitempty"`
-	MaxOpenConns int    `yaml:"max_open_conns" json:"max_open_conns"`
-	MaxIdleConns int    `yaml:"max_idle_conns" json:"max_idle_conns"`
+	Driver          string                 `yaml:"driver" json:"driver"`
+	DSN             string                 `yaml:"dsn" json:"dsn,omitempty"`
+	MaxOpenConns    int                    `yaml:"max_open_conns" json:"max_open_conns"`
+	MaxIdleConns    int                    `yaml:"max_idle_conns" json:"max_idle_conns"`
+	PrivatePostgres *PrivatePostgresConfig `yaml:"private_postgres,omitempty" json:"private_postgres,omitempty"`
+}
+
+// PrivatePostgresConfig identifies an installer-managed PostgreSQL cluster.
+// It is optional: externally managed PostgreSQL and SQLite are unaffected.
+type PrivatePostgresConfig struct {
+	DataDir string `yaml:"data_dir" json:"data_dir"`
+	Command string `yaml:"command" json:"command"`
+	User    string `yaml:"user,omitempty" json:"user,omitempty"`
 }
 
 type CrawlerConfig struct {
@@ -435,6 +444,14 @@ func (c *Config) Validate() error {
 	}
 	if (driver == "postgres" || driver == "postgresql") && strings.TrimSpace(c.Index.Database.DSN) == "" {
 		return errors.New("index database dsn is required for postgres")
+	}
+	if c.Index.Database.PrivatePostgres != nil {
+		if driver != "postgres" && driver != "postgresql" {
+			return errors.New("index database private_postgres requires postgres")
+		}
+		if strings.TrimSpace(c.Index.Database.PrivatePostgres.DataDir) == "" || strings.TrimSpace(c.Index.Database.PrivatePostgres.Command) == "" {
+			return errors.New("index database private_postgres requires data_dir and command")
+		}
 	}
 	if c.Index.Database.MaxOpenConns < 1 || c.Index.Database.MaxOpenConns > 256 {
 		return fmt.Errorf("index database max_open_conns must be between 1 and 256")
