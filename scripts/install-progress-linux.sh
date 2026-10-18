@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S bash
 
 write_qindexer_install_progress() {
   local path="$1" status="$2" stage="$3" percent="$4" message="$5"
